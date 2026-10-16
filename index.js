@@ -14,15 +14,27 @@
  * 这样凭证 `bili_credential.json` 落在家里而不是插件包里）/ `duty.md` / `out/` / `duty.log`。
  * ============================================================================
  */
-import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { loadHostDeps } from './lib/hostdeps.mjs'
+
+// 🔴 **不要在这里裸 import `@deepseek-ai/*`**（2026-10-16 改，照上游 0.1.4 的修法）：
+//    它们在 package.json 里是 optional peer，而桌面版 profile 是
+//    `autoInstallPeers: false` ⇒ **永远不装** ⇒ 裸 import 失败 ⇒
+//    **整条插件不激活**（DSH 只留一句 `1 entry did not activate … failed to import`）。
+//    ⚠️ web profile 上之所以一直没事，是因为树里恰好有别的插件把它们 hoist 上来了 —— **那是运气**。
+//    ⭐ 现在这三样都从 `loadHostDeps()` 取：先找宿主那棵树，找不到退到自己依赖，
+//       再拿不到也**不让插件不激活**（详见 lib/hostdeps.mjs 的注释）。
+const hostDeps = await loadHostDeps()
+const z = hostDeps.z
+const defineTool = hostDeps.defineTool
+const createUserMessage = hostDeps.createUserMessage
+
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname, resolve, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { McpClient } from './lib/mcp.mjs'
+import { pyEnv } from './lib/pyenv.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
@@ -36,7 +48,9 @@ export const inject = ['webServer', 'tools', 'settings']
  *    "Plugin entry … has no volatile fields"。另外两个条件是：
  *    **loader entry 的 id 必须等于命名空间名**（我们 patch 里就是 `bili-duty`）+ **本模块导出 Config**。
  */
-export const Config = z.object({
+// ⚠️ z 彻底拿不到时这里会是 undefined —— **插件照常加载**，只是没有 Config、设置页降级
+//    （宁可少一个设置页，也不能因为一个 import 让整条插件不激活 ✗）
+export const Config = !z ? undefined : z.object({
   /** 定量刷：每天最多挑几条 */
   perDay: z.natural().default(5).extra('volatile', true),
   /** 峰谷自动刷（总开关） */
@@ -201,6 +215,14 @@ export function apply(ctx, config) {
     try { appendFileSync(logFile, line + '\n', 'utf8') } catch { /* 日志写不进去也不致命 */ }
     try { ctx.logger?.info?.(`[bili-duty] ${msg}`) } catch { /* 没有 logger 就算了 */ }
   }
+
+  // ⭐ 把「宿主依赖是从哪儿取的」写进 duty.log（2026-10-16）。
+  //    为什么必须写：README 里让**桌面版装不起来的用户**把日志那几行发来排查 ——
+  //    而 `loadHostDeps()` 只把结果收在内存数组里，**不落盘就翻不到**。
+  //    ⚠️ 这段要在 `log` 定义**之后**、且不能因为写日志失败而中断挂载。
+  try {
+    for (const n of (hostDeps.notes || [])) log(`宿主依赖：${n}`)
+  } catch { /* 日志不该拦着插件挂载 */ }
 
   /**
    * ⚠️ 2026-10-14 事故（第一次挂上就炸了整个 DSH，见当天的 lesson）：
@@ -1338,6 +1360,15 @@ export function apply(ctx, config) {
         log(`刷B站开跑失败（${why}）：${msg}`)
         return { started: false, why, error: msg }
       }
+      // ⚠️ `createUserMessage` 现在可能拿不到（dsh-llm 是 optional peer，桌面版可能没装）
+      //    ⇒ 那种环境下**前台跑不可用，但后台跑照常**。这里要**明确说清**，别让它退化成一个
+      //    看不懂的 TypeError（"createUserMessage is not a function"）。
+      if (typeof createUserMessage !== 'function') {
+        const msg = '这个环境拿不到 dsh-llm（造开场消息要用它）⇒ 前台会话建不了。'
+          + '改用「后台」跑（面板里改「跑在哪」）。'
+        log(`刷B站开跑失败（${why}）：${msg}`)
+        return { started: false, why, error: msg }
+      }
 
       // ⚠️ `agentOptions` **必须显式给** —— 不传会继承 parent 的 requestHeader
       //    （memj 实测：继承到 hy3 后把 maxTokens 烧光、输出 0 字符）。
@@ -1560,7 +1591,8 @@ export function apply(ctx, config) {
     let c
     try {
       c = spawn(cmd, args, { cwd: stateDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-        env: env ? { ...process.env, ...env } : process.env })
+        // ⭐ pyEnv：是 Python 就自动钉 UTF-8（Windows 默认 GBK ⇒ 中文报错乱码 / UnicodeDecodeError）
+        env: pyEnv(cmd, env) })
     } catch (e) { sink(`起不来：${e?.message ?? e}\n`); return resolve(1) }
     const w = (b) => sink(String(b))
     c.stdout?.on('data', w)
