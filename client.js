@@ -175,6 +175,9 @@ window.__ModuleLoader__.load({
       // ⭐ 前台会话的工作区（2026-10-16 加）：空 = 用默认（家目录下的 front-sessions）
       const [wsPath, setWsPath] = React.useState(null)
       const [wsBusy, setWsBusy] = React.useState(false)
+      // ⭐ 产物清单（2026-10-16 加：改成每条一份 md，不再是汇总日报）
+      const [reports, setReports] = React.useState(null)
+      const [reportFile, setReportFile] = React.useState(null)
       const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -185,7 +188,7 @@ window.__ModuleLoader__.load({
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
-      const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
+      // （旧的「报告展开态」已删 —— 日报不写了，见下面的产物清单）底下，看不见）
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
       // ── 人设（2026-10-15 新增）──
@@ -274,14 +277,19 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      const onShowReport = async () => {
-        if (report !== null) { setReport(null); return }       // 再点一次收起
-        setBusy('report')
+      /** ⭐ 列产物（每条一份 md；2026-10-16 加，取代「看今天的报告」）。 */
+      const onListReports = async () => {
+        if (reports !== null) { setReports(null); setReportFile(null); return }  // 再点一次收起
+        setBusy('reports')
         try {
-          const r = await jget('/report')
-          setReport(r && r.exists ? (r.text || '（报告是空的）') : '今天还没有报告 —— 跑一轮之后就有了')
-        } catch (e) { setReport('读不到报告：' + String(e?.message ?? e)) } finally { setBusy('') }
+          const r = await jget('/reports')
+          setReports(r && r.ok ? r : { ok: false, files: [], count: 0 })
+          setReportFile(null)
+        } catch (e) { say('读不到产物清单：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
+
+      // ⚠️ 旧的 `onShowReport`（读「今天的报告」）**已删**（2026-10-16）：
+      //    日报不再写了，那个按钮也换成了「看产物」。`/report` 路由留着兼容旧文件。
 
       const copyText = async (text) => {
         const v = String(text || '')
@@ -812,14 +820,31 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-kv': '' },
             `家目录：${st.home}`,
             h('br'),
-            `今天的报告：${st.report}`),
+            `产物目录：${st.reportDir || '（读不到）'}`),
+          h('div', { 'data-bd-note': '' },
+            '挑中的每条视频各写一份 md（文件名：标题-YYMMDD），不再是汇总日报。'),
           h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', disabled: busy === 'report', onClick: onShowReport },
-              report !== null ? '收起报告' : '看今天的报告'),
+            h('button', { 'data-bd-btn': '', disabled: busy === 'reports', onClick: onListReports },
+              reports !== null ? '收起清单' : '看产物'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
-            h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
-            h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
-          report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null),
+            h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录')),
+          reports !== null
+            ? (reports.files?.length
+              ? h('div', null,
+                  h('div', { 'data-bd-note': '' }, `共 ${reports.count} 份，最近的排前面（点一行看内容）：`),
+                  h('div', null, reports.files.map((f) => h('div', { 'data-bd-row': '', key: f.name },
+                    h('div', { 'data-bd-grow': '' },
+                      h('div', { 'data-bd-note': '' }, `${f.name}　${Math.round(f.size / 1024)}KB`)),
+                    h('button', {
+                      'data-bd-btn': '',
+                      onClick: async () => {
+                        try { const r = await jget('/report-file?name=' + encodeURIComponent(f.name)); setReportFile(r?.text || '（空的）') }
+                        catch (e) { setReportFile('读不到：' + String(e?.message ?? e)) }
+                      },
+                    }, '看')))),
+                  reportFile !== null ? h('pre', { 'data-bd-pre': '' }, reportFile) : null)
+              : h('div', { 'data-bd-note': '' }, '还没有产物 —— 跑一轮之后，挑中的每条会各写一份 md。'))
+            : null),
       )
     }
 

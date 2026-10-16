@@ -294,6 +294,91 @@ export function apply(ctx, config) {
 
   const hasCredential = () => existsSync(join(stateDir, 'bili_credential.json'))
 
+  /* ─────────────── 判重表 seen.md（2026-10-16 加） ───────────────
+   *
+   * 🔴 为什么必须由**插件**来管、而不是写在章程里让模型自觉：
+   *    章程（duty.md）早就写着「判重 —— 已经看过的跳过（判重表就在家目录根下，叫 seen.md）」，
+   *    但实测**跑完一轮之后 `seen.md` 根本不存在**（2026-10-16 首次跑通那轮，4 条评论全发出去、
+   *    文件一个都没写）。原因是它只是**一句话约定**：模型要自己记得读写、自己拼格式，
+   *    而它在那一轮里正忙着重试被 ACL 挡住的 shell ⇒ 这件事就被丢了。
+   *    ⇒ 教训与 `bili_reply` 那次同源：**能由代码保证的事，不要交给模型的自觉**。
+   *
+   * 现在：**发评论前查、发成功后立刻写**，都在 `bili_reply` 里做掉，模型不需要记得做任何事。
+   * 另外仍然注册 `bili_seen` 工具，给模型**主动查/记**的余地（例如报告里想说明为什么跳过）。
+   *
+   * ⚠️ 格式刻意做成 markdown 表格（人可直接看、也可手改），但**解析只认 `|` 分隔的字段**，
+   *    所以手工增删行不会破坏它。
+   */
+  const seenFile = join(stateDir, 'seen.md')
+
+  /**
+   * 解析 seen.md → Map<bvid, {at, kind, rpid, note}>
+   * （容错：任何一行读不懂就跳过；**新旧两种列数都认**）
+   */
+  const readSeen = () => {
+    const map = new Map()
+    let text = ''
+    try { text = readFileSync(seenFile, 'utf8') } catch { return map }
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim()
+      // 新格式（5 列）：| BV | 日期 | 怎么来的 | rpid | 备注 |
+      let m = /^\|\s*(BV[0-9A-Za-z]+)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/.exec(t)
+      if (m) {
+        map.set(m[1], { at: m[2].trim(), kind: m[3].trim(), rpid: m[4].trim(), note: m[5].trim() })
+        continue
+      }
+      // 旧格式（4 列，向后兼容）：| BV | 日期 | rpid | 备注 |
+      m = /^\|\s*(BV[0-9A-Za-z]+)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/.exec(t)
+      if (m) map.set(m[1], { at: m[2].trim(), kind: '', rpid: m[3].trim(), note: m[4].trim() })
+    }
+    return map
+  }
+
+  /**
+   * 写入/更新 seen.md 里的一条（文件不存在就先写表头）。
+   *
+   * ⭐ **同一个 BV 只留一行**（2026-10-16 改）：原来是无脑 append，
+   *    于是「同一轮里先被记『看过』、后来又被记『挑中』」会留两行、表格越来越乱。
+   *    ⇒ 现在**先删旧行再插新行**（就地更新）。
+   * ⚠️ 但**不许降级**：调用方若要写「看过」，而表里已是「挑中/评论」，就跳过不写
+   *    （重的记录不该被轻的覆盖）—— 这条由 `markSeen` 自己判，调用方不必操心。
+   */
+  const markSeen = (bvid, { rpid = '', note = '', kind = '' } = {}) => {
+    const id = String(bvid || '').trim()
+    if (!/^BV[0-9A-Za-z]+$/.test(id)) return false
+    // kind 的权重：评论 > 挑中 > 看过（数字越大越重）
+    const weight = (k) => (k === '评论' ? 3 : k === '挑中' ? 2 : k === '看过' ? 1 : 0)
+    const HEADER = '# 刷B站 · 判重表\n\n'
+      + '> 这个文件由**插件自动维护**，也可以手工增删。\n'
+      + '> 「怎么来的」有三种：**看过**（读过字幕）/ **挑中**（判定值得看）/ **评论**（真发了）。\n'
+      + '> ⭐ 三者都算「这条已经占用过使用者的注意力」⇒ 下一轮**不再占候选预算**。\n\n'
+      + '| BV | 日期 | 怎么来的 | rpid | 备注 |\n|---|---|---|---|---|\n'
+    try {
+      const old = readSeen().get(id)
+      if (old && weight(old.kind) > weight(kind)) return false   // 不许降级
+      const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
+      const row = `| ${id} | ${dayKey()} | ${clean(kind).slice(0, 6)} | ${clean(rpid)} | ${clean(note).slice(0, 40)} |`
+      // 读出旧文件 → 保住所有**别的**数据行（含手写的）→ 去掉这个 BV 的旧行 → 新的追加到最后
+      let others = []
+      try {
+        // ⚠️ 只认**真正的数据行**：`| BV<字母数字>`。
+        //    关键是 `[0-9A-Za-z]+` 那一段 —— 没有它的话表头 `| BV | 日期 | …` 也会被当成数据行，
+        //    于是每次写都把表头复制一份到数据区（写探针时真踩过：过滤条件写松了，误判成插件 bug）。
+        others = readFileSync(seenFile, 'utf8').split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => /^\|\s*BV[0-9A-Za-z]+\s*\|/.test(l))
+          .filter((l) => !new RegExp(`^\\|\\s*${id}\\s*\\|`).test(l))   // 去掉这个 BV 的旧行
+      } catch { /* 文件还不存在 ⇒ others 为空 */ }
+      writeFileSync(seenFile, HEADER + [...others, row].join('\n') + '\n', 'utf8')
+      return true
+    } catch (e) {
+      log(`写判重表失败：${e?.message ?? e}`)
+      return false
+    }
+  }
+
+  const seenCount = () => readSeen().size
+
   /* ─────────────── 工具 ─────────────── */
 
   const textOutput = {
@@ -365,21 +450,33 @@ export function apply(ctx, config) {
       const r = await call('bili_search', payload)
       // ⭐ **自动并入候选池**（2026-10-16 加）—— 模型不需要记得"我要记进池子"。
       //    并把"池子现在多少 / 够不够"**附在返回里**，它不用再问一次。
+      //
+      // 🔴 **判重前移**（2026-10-16 使用者要求）：搜索阶段就把**已看过的**剔出去。
+      //    为什么必须在这一步：原来只有「发评论」才判重 ⇒ 它**白读字幕、白占候选预算**
+      //    （实测那轮：2 条今早已看过的又被读了一遍，到发评论才被拦）。
+      //    ⇒ 现在：搜到就查表，看过的**不进候选池**、也不算进池子大小。
       try {
         let obj = r
         if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON 就算了 */ } }
-        const videos = Array.isArray(obj?.videos) ? obj.videos : []
-        const size = poolAdd(videos)
+        const all = Array.isArray(obj?.videos) ? obj.videos : []
+        const seen = readSeen()
+        const fresh = all.filter((v) => v?.bvid && !seen.has(v.bvid))
+        const skipped = all.length - fresh.length
+        const size = poolAdd(fresh)              // ⚠️ 只把**新鲜的**并入池
         const target = poolTarget()
         return {
           ...(obj && typeof obj === 'object' ? obj : { raw: r }),
+          // ⭐ 把"已看过的"从本次结果里**剔掉**，模型根本看不到它们 ⇒ 不会再去读
+          videos: fresh,
+          skippedSeen: skipped,
           // ⚠️ 这几个字段是**插件加的**（MCP 不返回它们）—— 给模型判断"够不够"
           poolCount: size,
           poolTarget: target,
           poolEnough: size >= target,
-          poolHint: size >= target
-            ? `候选池已够（${size} ≥ ${target}）⇒ 可以开始读字幕筛选了。`
-            : `候选池还不够（${size} < ${target}）⇒ 换个关键词继续搜（放宽词 / 换角度）。`,
+          poolHint: (skipped > 0 ? `（本轮已跳过 ${skipped} 条看过的）` : '')
+            + (size >= target
+              ? `候选池已够（${size} ≥ ${target}）⇒ 可以开始读字幕筛选了。`
+              : `候选池还不够（${size} < ${target}）⇒ 换个关键词继续搜（放宽词 / 换角度）。`),
         }
       } catch { return r }
     },
@@ -388,9 +485,22 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_subtitle',
     description: '取一个视频的字幕（AI 字幕）全文。**判断内容就靠它** —— 没有字幕时，'
-      + '若设置里开了「本地转写」再想别的办法，否则直接跳过这条。',
+      + '若设置里开了「本地转写」再想别的办法，否则直接跳过这条。\n'
+      + '⭐ 调它就等于「你看过这条了」—— 插件会**自动记进判重表**（浏览判重），下次不再占候选预算。',
     parameters: { bvid: { type: 'string', description: 'BV号' } },
-    async execute(args) { return call('bili_subtitle', { bvid: String(args.bvid ?? '') }) },
+    async execute(args) {
+      const bvid = String(args.bvid ?? '')
+      const r = await call('bili_subtitle', { bvid })
+      // ⭐ **浏览判重**（2026-10-16 加）：读字幕 = 真看过 ⇒ 立刻记账。
+      //    为什么在这里做：这是**最可靠的"看过"信号**（模型一定会调它才会判断内容），
+      //    比"靠模型自觉调 bili_seen"稳得多 —— 实测那轮它只主动记了 3 条，
+      //    而实际读过字幕的有十几条 ⇒ 没记的下轮还会被搜出来、白占候选预算。
+      //    ⚠️ 已有记录不覆盖（后记的「评论/挑中」比「看过」更重，别被降级）。
+      try {
+        if (!readSeen().has(bvid)) markSeen(bvid, { kind: '看过', note: '读过字幕' })
+      } catch { /* 记账失败不影响取字幕 */ }
+      return r
+    },
   })
 
   tool({
@@ -405,59 +515,6 @@ export function apply(ctx, config) {
     },
   })
 
-  /* ─────────────── 判重表 seen.md（2026-10-16 加） ───────────────
-   *
-   * 🔴 为什么必须由**插件**来管、而不是写在章程里让模型自觉：
-   *    章程（duty.md）早就写着「判重 —— 已经看过的跳过（判重表就在家目录根下，叫 seen.md）」，
-   *    但实测**跑完一轮之后 `seen.md` 根本不存在**（2026-10-16 首次跑通那轮，4 条评论全发出去、
-   *    文件一个都没写）。原因是它只是**一句话约定**：模型要自己记得读写、自己拼格式，
-   *    而它在那一轮里正忙着重试被 ACL 挡住的 shell ⇒ 这件事就被丢了。
-   *    ⇒ 教训与 `bili_reply` 那次同源：**能由代码保证的事，不要交给模型的自觉**。
-   *
-   * 现在：**发评论前查、发成功后立刻写**，都在 `bili_reply` 里做掉，模型不需要记得做任何事。
-   * 另外仍然注册 `bili_seen` 工具，给模型**主动查/记**的余地（例如报告里想说明为什么跳过）。
-   *
-   * ⚠️ 格式刻意做成 markdown 表格（人可直接看、也可手改），但**解析只认 `|` 分隔的字段**，
-   *    所以手工增删行不会破坏它。
-   */
-  const seenFile = join(stateDir, 'seen.md')
-
-  /** 解析 seen.md → Map<bvid, {at, rpid, note}>（容错：任何一行读不懂就跳过） */
-  const readSeen = () => {
-    const map = new Map()
-    let text = ''
-    try { text = readFileSync(seenFile, 'utf8') } catch { return map }
-    for (const line of text.split(/\r?\n/)) {
-      // 形如：| BV1xx | 2026-10-16 | 320841605008 | 前 20 字 |
-      const m = /^\|\s*(BV[0-9A-Za-z]+)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/.exec(line.trim())
-      if (!m) continue
-      map.set(m[1], { at: m[2].trim(), rpid: m[3].trim(), note: m[4].trim() })
-    }
-    return map
-  }
-
-  /** 追加一行到 seen.md（文件不存在就先写表头） */
-  const markSeen = (bvid, { rpid = '', note = '' } = {}) => {
-    const id = String(bvid || '').trim()
-    if (!/^BV[0-9A-Za-z]+$/.test(id)) return false
-    try {
-      if (!existsSync(seenFile)) {
-        writeFileSync(seenFile,
-          '# 刷B站 · 判重表\n\n'
-          + '> 这个文件由**插件自动维护**（发过评论的视频会自动记在这里），也可以手工增删。\n'
-          + '> 只有「已经在表里」的 BV 会被拦下 —— 它表示**这个视频已经占用过使用者一次注意力**。\n\n'
-          + '| BV | 日期 | rpid | 备注 |\n|---|---|---|---|\n', 'utf8')
-      }
-      const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
-      appendFileSync(seenFile, `| ${id} | ${dayKey()} | ${clean(rpid)} | ${clean(note).slice(0, 40)} |\n`, 'utf8')
-      return true
-    } catch (e) {
-      log(`写判重表失败：${e?.message ?? e}`)
-      return false
-    }
-  }
-
-  const seenCount = () => readSeen().size
 
   /* ─────────────── 跨工作区读写（2026-10-16 加） ───────────────
    *
@@ -470,17 +527,25 @@ export function apply(ctx, config) {
    *
    * ⇒ 插件自己提供读写工具（插件在 apply() 里直接用 node:fs，**不经沙箱**）。
    *
-   * 🔴 **必须限定在插件自己的家目录内** —— 否则等于给模型开了一个绕过沙箱的任意读写口。
+   * 🔴 **路径白名单**（2026-10-16 扩了一次）：
+   *    最初只允许**插件家目录**内 —— 但使用者把产物目录改成了**选定的工作区**，
+   *    所以现在允许**两个根**：家目录（章程/人设/判重表）+ 前台工作区（产物）。
+   *    其余一律拒绝 —— 否则等于给模型开了一个绕过沙箱的任意读写口。
    */
-  /** 把一个（可能相对的）路径解析成家目录内的绝对路径；越界一律拒绝。 */
+  /** 允许读写的根（两个）。⚠️ 每次现算（工作区是可配置的）。 */
+  const allowedRoots = () => [stateDir, frontWorkspacePath()]
+
+  /** 把一个（可能相对的）路径解析成**白名单内**的绝对路径；越界一律拒绝。 */
   const resolveInHome = (p) => {
     const raw = String(p ?? '').trim()
     if (raw === '') return { ok: false, error: '路径是空的' }
-    const abs = resolve(isAbsolute(raw) ? raw : join(stateDir, raw))
-    const root = resolve(stateDir)
+    const roots = allowedRoots()
+    // 相对路径按**第一个根**（家目录）解析（章程/判重表都在那儿）
+    const abs = resolve(isAbsolute(raw) ? raw : join(roots[0], raw))
     // ⚠️ 用 `root + sep` 比对：防止 `/x/home-evil` 冒充 `/x/home` 的兄弟
-    if (abs !== root && !abs.startsWith(root + sep)) {
-      return { ok: false, error: `只允许读写插件家目录里的东西（${stateDir}），不接受：${abs}` }
+    const hit = roots.find((r) => { const rr = resolve(r); return abs === rr || abs.startsWith(rr + sep) })
+    if (!hit) {
+      return { ok: false, error: `只允许读写这两个目录里的东西（${roots.join(' 或 ')}），不接受：${abs}` }
     }
     return { ok: true, abs }
   }
@@ -575,20 +640,54 @@ export function apply(ctx, config) {
       if (args.reset) { poolStart(); return { ok: true, reset: true, count: 0, target: poolTarget(), enough: false } }
       if (candidatePool === null) return { ok: true, count: 0, target: poolTarget(), enough: false, list: [], hint: '还没搜过 —— 先调 bili_search' }
       const seen = readSeen()
-      const all = [...candidatePool.values()]
+      // ⭐ 池子里本身就**不含**看过的（`bili_search` 入池前已滤），这里再滤一次纯属兜底
+      const all = [...candidatePool.values()].filter((v) => !seen.has(v.bvid))
       const num = Math.max(1, Math.min(Number(args.num) || 50, 200))
       return {
         ok: true,
-        count: candidatePool.size,
+        count: all.length,
         target: poolTarget(),
         // ⭐ 这就是"够不够"的判据 —— 让模型**不用自己估**
-        enough: candidatePool.size >= poolTarget(),
-        alreadySeen: all.filter((v) => seen.has(v.bvid)).length,
+        enough: all.length >= poolTarget(),
         list: all.slice(0, num).map((v) => ({
           bvid: v.bvid, title: v.title, author: v.author, play: v.play,
-          seen: seen.has(v.bvid),
         })),
       }
+    },
+  })
+
+  /**
+   * ⭐ **「挑中」自动记账**（2026-10-16 加）。
+   *
+   * 使用者要求：候选里**所有值得看的**都该记下来（不只是发过评论的）。
+   *
+   * 做法：模型决定"这条值得看"时调 `bili_pick`（或 `bili_seen{kind:'挑中'}`），
+   * 插件把这条记进 `seen.md` —— **下轮就不再占它的候选预算**。
+   *
+   * ⚠️ 为什么不能"完全自动"：**"值得看"是模型的判断**，插件不知道它挑中了哪条
+   *    ⇒ 只能由它显式调一下。但**降级措施**在：只要它读了字幕（`bili_subtitle`），
+   *    就已经被记成「看过」（浏览判重）⇒ 漏调也不会被重复搜出来读。
+   */
+  tool({
+    name: 'bili_pick',
+    description: '**标记「这条值得看」** —— 挑中之后调它一下（不管后面发不发评论）。\n'
+      + '⭐ 为什么必须调：凡是**值得看的**都该进判重表，下一轮才不会再占候选预算。\n'
+      + '（发评论会自动记，但**没发评论的那些**只有你调了这个才记得下。）\n'
+      + '⚠️ 只**浏览过**（读过字幕）的不算挑中 —— 那种插件已经自动记成「看过」了。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号' },
+      note: { type: 'string', description: '一句话说明为什么值得看（会写进判重表的备注）' },
+    },
+    async execute(args) {
+      const bvid = String(args.bvid ?? '').trim()
+      if (!/^BV[0-9A-Za-z]+$/.test(bvid)) return { ok: false, error: `不是合法的 BV 号：${bvid}` }
+      const already = readSeen().get(bvid)
+      if (already && already.kind === '评论') {
+        // 已经发过评论 —— 那是比"挑中"更强的记录，不覆盖
+        return { ok: true, skipped: true, hint: `${bvid} 已经在表里（${already.kind}），不用重复记。` }
+      }
+      const ok = markSeen(bvid, { kind: '挑中', note: String(args.note ?? '').slice(0, 40) })
+      return { ok, bvid, kind: '挑中', total: seenCount() }
     },
   })
 
@@ -636,7 +735,11 @@ export function apply(ctx, config) {
         ? true
         : (typeof rec === 'object' ? rec.success !== false && rec.ok !== false : true)
       if (okNow) {
-        markSeen(bvid, { rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '', note: String(args.text ?? '').slice(0, 40) })
+        markSeen(bvid, {
+          kind: '评论',
+          rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '',
+          note: String(args.text ?? '').slice(0, 40),
+        })
       }
       return r
     },
@@ -645,12 +748,13 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_seen',
     description: '看/记「判重表」（家目录的 seen.md）：哪些视频已经占用过使用者的注意力。\n'
-      + '⭐ 发评论会**自动**记账，一般不用手调；这个工具是给你**主动查**用的'
-      + '（例如想在报告里说明"这条之前看过所以跳过"），或者明确要记一条时用。',
+      + '⭐ **大部分记账是插件自动做的**（读过字幕 ⇒「看过」；发评论 ⇒「评论」）——\n'
+      + '   这条工具主要给你**主动查**（例如在报告里说明"这条以前看过所以跳过"）。\n'
+      + '⚠️ 想标「挑中」用 `bili_pick` 更清楚；这里 mark 默认也记成「挑中」。',
     parameters: {
       list: { type: 'boolean', description: 'true = 列出全部（默认只回条数 + 最近几条）' },
       mark: { type: 'string', description: '要记进表的 BV 号（不填 = 只查不记）' },
-      note: { type: 'string', description: '备注（随 mark 一起记，比如挑中/跳过的原因）' },
+      note: { type: 'string', description: '备注（随 mark 一起记）' },
     },
     async execute(args) {
       // ⚠️ 顺序要紧：**先 mark，再读表**。
@@ -661,7 +765,7 @@ export function apply(ctx, config) {
       if (args.mark) {
         const id = String(args.mark).trim()
         alreadyThere = readSeen().has(id)
-        marked = markSeen(id, { note: String(args.note ?? '') })
+        marked = markSeen(id, { kind: '挑中', note: String(args.note ?? '') })
       }
       const map = readSeen()
       const out = {
@@ -886,17 +990,20 @@ export function apply(ctx, config) {
           + `  ⚠️ **必须用 \`bili_read\`** —— 前台会话的工作区是另一个目录，用普通文件工具 / playwright / `
           + `记事本**都读不到**家目录里的章程（实测：有人试了 4 种办法、最后开记事本靠 UIA 读窗口，白烧几轮）。\n`
         : `**先读章程** \`${duty}\`（你在插件家里跑，普通文件工具就能读）。按里面的要求刷一轮 B站。\n`)
-      + (cfg.reportLevel === 'brief'
-        ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。`
-        : cfg.reportLevel === 'off'
-          ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
-          : cfg.runMode === 'front'
-            ? `**写日报用 \`bili_write\`**，path 原样传 \`${reportPathFor()}\`。\n`
-              + `  ⚠️ 同样**别用别的办法写**：沙箱只让你写工作区，家目录得走 \`bili_write\``
-              + `（实测：那轮试了 cmd / powershell 全失败，**一份日报都没写出来**）。\n`
-              + `  ✅ 写完看回执里的 \`bytes\` —— 那是**写后的真实字节数**，不是"我以为写了"。`
-            : `**写日报**到 \`${reportPathFor()}\`（用你手上的文件写入工具即可）。`
-              + `\n  ✅ 写完看回执里的字节数 —— 那是写后的**真实**大小，不是"我以为写了"。`)
+      + (cfg.reportLevel === 'off'
+        ? `这一轮**不要写任何报告文件**；只有真发了评论就一句话记下。`
+        : `**产物：挑中的每一条，各写一份独立的 md**（⛔ **不再写汇总日报**）。\n`
+          + `  · 目录：\`${reportDirFor()}\`\n`
+          + `  · 文件名：**\`<标题>-\` + \`YYMMDD\`**（例：\`OSDI-2026-最佳论文-预训练数据管线-261016.md\`）—— `
+          + `标题在前、日期在后、日期无横杠；标题里的非法字符自己换成 \`-\`。\n`
+          + `  · 内容（每份就一条视频）：**标题 / UP / 链接 / 播放量 / 为什么值得（两三句）/ 你自己的一句话**。\n`
+          + (cfg.reportLevel === 'brief' ? `  · 薄版：正文一两行就够，别写长摘要。\n` : '')
+          + (cfg.runMode === 'front'
+            ? `  ⚠️ **用 \`bili_write\` 写**（沙箱只让你写工作区，家目录得走它）；`
+              + `path 传**绝对路径**。写完看回执里的 \`bytes\` —— 那是真实字节数。\n`
+            : `  用你手上的文件写入工具写即可。\n`)
+          + `  ⭐ 另外：**挑中一条就调一次 \`bili_pick\`**（不管后面发不发评论）—— `
+          + `它会把这条记进判重表，下一轮就不再占候选预算。\n`)
       + `今天最多挑 ${cfg.perDay} 条；` + kwLine + `。`
       + `搜索：看 ${Math.max(1, Math.min(Number(cfg.searchNum) || 20, 50))} 条；`
       + `排序用${({ totalrank: '综合', pubdate: '最新', click: '播放量', dm: '弹幕' })[cfg.searchOrder] || '综合'}；`
@@ -1053,19 +1160,49 @@ export function apply(ctx, config) {
   const frontWorkspaceIsCustom = () => String(cfg.frontWorkspace || '').trim() !== ''
 
   /**
-   * ⭐ **日报写到哪里**（2026-10-16 定，当天改过两次，这里记清结论）。
+   * ⭐ **产物（每条一份 md）写到哪里**（2026-10-16 使用者裁定，第三代方案）。
    *
-   * 🔴 **一份日报，永远在 `<家>\out\<日期>.md`** —— 不分前台后台。
+   * **路径**：`<工作区>\reports\<标题>-<YYMMDD>.md`
+   *   · **标题在前、日期在后**，日期是 `YYMMDD`（**无横杠**）—— 使用者明确要求；
+   *   · 「工作区」= `frontWorkspacePath()`（前台模式下就是那个会话的 cwd ⇒ 在他眼前）；
+   *   · ⚠️ 后台模式没有会话工作区 ⇒ 那一路仍退回家目录（见下面 `reportDirFor`）。
    *
-   * 中间走过一段弯路，值得记下：
-   *   前台会话的 cwd 是工作区，而沙箱 `workspace-write` 的**可写根 = 会话 cwd**
-   *   ⇒ 它写不了 `<家>\out\`，于是第一版把前台日报改到工作区里。
-   *   ⚠️ 但那样有两个坏处：① 面板的「看日报」得两处找；② 使用者一脸问号
-   *   （"我看到了 out 目录，但没看到实际的输出"——实测就这么反馈的）。
+   * **日报（那份汇总的）已取消**（使用者要求）—— 改成**每条值得看的单独一份**。
    *
-   * ⇒ 正解是**给工具**（`bili_write`，插件自己写、不经沙箱），而不是**搬家**。
-   *   现在路径统一了，面板与使用者看到的都是一个地方。
+   * 📌 这份产物当天改过三代，记下演化原因，别再来回改：
+   *   ① `<家>\out\<日期>.md`（一份汇总）—— 起点；
+   *   ② 搬进工作区（绕开沙箱）—— 使用者反馈"看到 out 目录但没看到输出"，是弯路；
+   *   ③ **给 `bili_write` 工具 + 每条一份**（本版）—— 产物跟着会话走，一眼能看到。
    */
+  const reportDirFor = () => (cfg.runMode === 'front'
+    ? join(frontWorkspacePath(), 'reports')
+    : join(outDir, 'reports'))
+
+  /**
+   * 把视频标题变成一个**能当文件名**的安全串。
+   *
+   * ⚠️ 必须处理：Windows 非法字符（`\ / : * ? " < > |`）+ 控制字符 + 首尾空格/点
+   *    （Windows 不允许文件名以点或空格结尾）+ 超长（路径有 260 上限）。
+   * ⭐ **保留中文** —— 使用者要能一眼看懂文件名。
+   */
+  const safeFileStem = (title, maxLen = 60) => {
+    let s = String(title ?? '')
+      .replace(/[\\/:*?"<>|]/g, '-')          // Windows 非法字符
+      .replace(/[\u0000-\u001f\u007f]/g, '')   // 控制字符
+      .replace(/\s+/g, ' ')                    // 连续空白压成一个
+      .replace(/^[\s.]+|[\s.]+$/g, '')         // 首尾空格/点（Windows 不允许结尾点）
+    if ([...s].length > maxLen) s = [...s].slice(0, maxLen).join('').replace(/[\s.]+$/g, '')
+    return s === '' ? 'untitled' : s
+  }
+
+  /** 一条视频的产物路径：`<reports>\<标题>-<YYMMDD>.md` */
+  const reportPathForVideo = (title, when = new Date()) => {
+    const p = (n) => String(n).padStart(2, '0')
+    const stamp = `${String(when.getFullYear()).slice(-2)}${p(when.getMonth() + 1)}${p(when.getDate())}`
+    return join(reportDirFor(), `${safeFileStem(title)}-${stamp}.md`)
+  }
+
+  /** 汇总日报的老路径 —— 仅用于兼容（面板「看日报」还指着它）。 */
   const reportPathFor = () => join(outDir, `${dayKey()}.md`)
 
   /**
@@ -1496,6 +1633,8 @@ export function apply(ctx, config) {
       // ⭐ 前台工作区（2026-10-16）：面板要显示"现在用哪个目录"与"是默认还是自定义"
       frontWorkspace: frontWorkspacePath(),
       frontWorkspaceCustom: frontWorkspaceIsCustom(),
+      // ⭐ 产物目录（每条一份 md 写在这里）
+      reportDir: reportDirFor(),
       lastFrontSessionId: String(readJson(dutyStateFile, {}).lastFrontSessionId || ''),
     }
   }
@@ -1614,6 +1753,40 @@ export function apply(ctx, config) {
     // 装"本地转写"那套（独立环境：faster-whisper + yt-dlp + Whisper 模型）
     if (req.method === 'POST' && path === '/api/bili-duty/install-asr') {
       return sendJson(res, 200, runAsrInstall())
+    }
+
+    // ⭐ **产物清单**（2026-10-16 加）：每条视频一份 md，列出来给面板。
+    //    （旧的「看今天的报告」那条路由留着不动 —— 兼容旧日报，但不再新写。）
+    if (req.method === 'GET' && path === '/api/bili-duty/reports') {
+      const dir = reportDirFor()
+      let files = []
+      try {
+        files = readdirSync(dir)
+          .filter((n) => n.toLowerCase().endsWith('.md'))
+          .map((n) => {
+            const full = join(dir, n)
+            let size = 0, mtime = 0
+            try { const st = statSync(full); size = st.size; mtime = st.mtimeMs } catch { /* 读不到就算了 */ }
+            return { name: n, size, mtime }
+          })
+          .sort((a, b) => b.mtime - a.mtime)
+          .slice(0, 200)
+      } catch { /* 目录还不存在 = 还没产物 */ }
+      return sendJson(res, 200, { ok: true, dir, count: files.length, files })
+    }
+
+    // 看某一份产物（按文件名取，**只认产物目录里的**）
+    if (req.method === 'GET' && path === '/api/bili-duty/report-file') {
+      const name = String(url.searchParams.get('name') || '')
+      // 🔴 防路径穿越：只接受**纯文件名**（不许带分隔符或 ..）
+      if (name === '' || name.includes('/') || name.includes('\\') || name.includes('..')) {
+        return sendJson(res, 400, { ok: false, error: '文件名不合法' })
+      }
+      const file = join(reportDirFor(), name)
+      let text = ''
+      let exists = false
+      try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 200000) } catch { /* 读不到就给空 */ }
+      return sendJson(res, 200, { ok: true, name, exists, text })
     }
 
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
