@@ -696,7 +696,8 @@ export function apply(ctx, config) {
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
       + '除非本人当场让你发（那时传 force: true）。\n'
-      + '🔁 判重：发过的视频会**自动**记进家目录的 `seen.md`，再发同一个 BV 会被拦下（要硬发传 repeat: true）。',
+      + '🔁 判重：**只有"真评论过"才会被拦**（已发成功的会记进 `seen.md`；再发同一个 BV 被拦，要硬发传 `repeat: true`）。\n'
+      + '   ⭐ 「看过」「挑中」**不算**评论过 —— 那些只是不进候选池，不影响你发评论。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
@@ -713,16 +714,34 @@ export function apply(ctx, config) {
         }
       }
       const bvid = String(args.bvid ?? '').trim()
-      // 🔁 判重闸：表里已有的 BV 直接拦下（force 也拦 —— force 管的是"自动评论开关"，
-      //    与"是不是发过"是两件事；要硬发得显式传 repeat）。
+      // 🔁 **发评论的判重闸 —— 只看「评论」这一层**（2026-10-16 修，重要）。
+      //
+      // 🔴 修之前是 `if (seen && !args.repeat)` —— 即「表里有**任何**记录就拦」。
+      //    那在"只有 bili_reply 会写表"的年代等价于"评论过没有"，是对的；
+      //    但我加了「挑中 / 看过」两层之后，这句话就**坏了**：
+      //    提示词要求「先 bili_pick、再发评论」⇒ 发评论时表里必然已有「挑中」
+      //    ⇒ **评论 100% 被自己拦下**（2026-10-16 实测那轮：5 条全拦，
+      //       报错还照着旧逻辑说"（…发过）"，其实根本没发过 —— 提示词一起骗人）。
+      //
+      // ⇒ 现在判据：**"真评论过" = `kind === '评论'` 或 `rpid` 非空**。
+      //    · `rpid` 只在评论**真发成功**后才会写上 ⇒ 它是"真发过"最硬的证据；
+      //    · 顺带兼容**旧的 4 列格式**（那时没有 kind 列 ⇒ 解析出 `kind:''`，
+      //      但真发过评论的那些行**都有 rpid** ⇒ 照样能认出来）；
+      //    · 而旧格式里"手工标的挑中"（无 rpid）**不会被误拦** ✓
+      //
+      // ⚠️ 与**搜索阶段**那个闸是两回事，别混：
+      //    搜索阶段「只要有记录就跳过」是对的（三种都算"占过使用者注意力"⇒ 不进候选池）；
+      //    这里管的是"要不要再发一条评论"，只有**真评论过**才算重复。
       const seen = readSeen().get(bvid)
-      if (seen && !args.repeat) {
+      const alreadyCommented = Boolean(seen) && (seen.kind === '评论' || String(seen.rpid || '') !== '')
+      if (alreadyCommented && !args.repeat) {
         return {
           ok: false,
           blocked: true,
           duplicate: true,
           seenAt: seen.at,
-          hint: `\`${bvid}\` 已经在判重表里了（${seen.at} 发过），不再重复评论。`
+          seenKind: seen.kind || '（旧记录·评论）',
+          hint: `\`${bvid}\` **已经评论过**了（${seen.at}${seen.rpid ? '，rpid ' + seen.rpid : ''}），不再重复评论。`
             + '确实要重发就传 repeat: true。',
         }
       }
