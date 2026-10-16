@@ -227,7 +227,13 @@ async def bili_check_credential() -> str:
 # ========== Tool 1: 搜索视频 ==========
 
 @mcp.tool()
-async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> str:
+async def bili_search(
+    keyword: str,
+    num: int = 10,
+    order: str = "totalrank",
+    time_start: str = "",
+    time_end: str = "",
+) -> str:
     """
     搜索B站视频
 
@@ -235,9 +241,17 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
         keyword: 搜索关键词，如"AI Agent"、"大模型教程"
         num: 返回视频数量，默认10，最大50
         order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
-    
+        time_start: 只要这个日期之后的（"YYYY-MM-DD"）；与 time_end 搭配，留空=不过滤
+        time_end: 只要这个日期之前的（"YYYY-MM-DD"）；与 time_start 搭配，留空=不过滤
+
     Returns:
         JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
+
+    ⚠️ 关于时间过滤为什么放在这一层（2026-10-16 加）：
+        实测 B站 **搜索结果里根本不返回发布时间**（字段只有 bvid/aid/title/author/
+        play/review/danmaku/duration/description）⇒ 拿回来之后**没法在本地按日期筛**，
+        只能用 `time_start`/`time_end` 让 B站 在服务端筛。
+        （底层 `search.search_by_type` 支持这两个参数，只是原来没往出暴露。）
     """
     order_map = {
         "totalrank": search.OrderVideo.TOTALRANK,
@@ -247,11 +261,19 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
     }
     order_enum = order_map.get(order, search.OrderVideo.TOTALRANK)
 
+    # 只把**非空**的传下去：实测给 None/空串都不如干脆不传这个 kwarg 稳。
+    extra = {}
+    if time_start:
+        extra["time_start"] = time_start
+    if time_end:
+        extra["time_end"] = time_end
+
     result = await search.search_by_type(
         keyword=keyword,
         search_type=search.SearchObjectType.VIDEO,
         page=1,
         order_type=order_enum,
+        **extra,
     )
 
     videos = []
@@ -269,7 +291,13 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "description": item.get("description", "")[:200],
         })
 
-    return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos}, ensure_ascii=False)
+    return json.dumps({
+        "keyword": keyword,
+        "count": len(videos),
+        "time_start": time_start,
+        "time_end": time_end,
+        "videos": videos,
+    }, ensure_ascii=False)
 
 
 # ========== Tool 2: 获取评论 ==========
@@ -509,7 +537,25 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 credential=cred,
             )
 
-        return json.dumps({"success": True, "message": "评论发送成功"}, ensure_ascii=False)
+        # ⭐ 把 rpid 回传出来（2026-10-16 修）——
+        #    这里原来只回一句 "评论发送成功"，把 `send_comment` 的返回值整个丢掉了，
+        #    而 **rpid 就在那个返回值里**（`Api(...).result` ⇒ 形如 `{"rpid": ..., "rpid_str": ...}`；
+        #    与 `bili_comments` 读回来的 `rpid` 是同一个东西，已实测两边都是 int64 数字）。
+        #    ⇒ 后果：调用方拿不到 rpid，去重表（seen.md）记不全 ⇒ **下一轮可能重复评论同一个视频**。
+        # ⚠️ rpid 是 **int64**（实测约 3.2e11，尚未超 2^53）——为确保将来也不丢精度，
+        #    除数字外**同时给一份 `rpid_str`**，调用方要精确比对时用字符串那份。
+        rpid_out = None
+        if isinstance(result, dict):
+            d = result.get("data")
+            if isinstance(d, dict):
+                rpid_out = d.get("rpid")
+            if rpid_out is None:
+                rpid_out = result.get("rpid")
+        payload = {"success": True, "message": "评论发送成功"}
+        if rpid_out is not None:
+            payload["rpid"] = rpid_out
+            payload["rpid_str"] = str(rpid_out)
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 

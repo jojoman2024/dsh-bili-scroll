@@ -157,6 +157,13 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [kws, setKws] = React.useState(null)
+      // ⭐ 搜索相关的四个新设置（2026-10-16 加）：草稿存在本地 state，
+      //    与 kws 一样**不能直接绑 cfg**（会被 5 秒轮询冲掉）
+      const [kwMode, setKwMode] = React.useState(null)   // llm=按主题让模型自己组合搜索词 / fixed=每行原样当词
+      const [sOrder, setSOrder] = React.useState(null)   // 搜索排序
+      const [sDays, setSDays] = React.useState(null)     // 只看最近几天（0=不过滤）
+      const [sNum, setSNum] = React.useState(null)       // 看多少条
+      const [seenNote, setSeenNote] = React.useState(null) // 判重表条数（从 /status 拿）
       const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -195,6 +202,11 @@ window.__ModuleLoader__.load({
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && kwMode === null) setKwMode(cfg.keywordMode || 'llm')
+        if (cfg && sOrder === null) setSOrder(cfg.searchOrder || 'totalrank')
+        if (cfg && sDays === null) setSDays(String(cfg.searchDays ?? 0))
+        if (cfg && sNum === null) setSNum(String(cfg.searchNum ?? 20))
+        if (st && seenNote === null) setSeenNote(Number(st.seenCount) || 0)
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -524,9 +536,20 @@ window.__ModuleLoader__.load({
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
           h('textarea', {
-            'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
+            'data-bd-input': '', rows: 5,
+            placeholder: '一行一个主题；留空用内置那几组\n例：\n有关大模型的论文\nDSH 插件',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
           }),
+          h('div', { 'data-bd-label': '' }, '这些字怎么用'),
+          h('select', {
+            'data-bd-input': '', value: kwMode ?? 'llm',
+            onChange: (e) => { setKwMode(e.target.value); patch({ keywordMode: e.target.value }, '关键词用法') },
+          },
+            h('option', { value: 'llm' }, '当「主题」—— 让模型自己组合出多种搜索词（推荐）'),
+            h('option', { value: 'fixed' }, '当「现成搜索词」—— 每行原样拿去搜')),
+          h('div', { 'data-bd-note': '' }, kwMode === 'fixed'
+            ? '每行会原样当搜索词。宽泛的词（如「有关大模型的论文」）搜回来多半是入门教程和水论文技巧。'
+            : '模型会按这些主题自己编几个更具体的搜索词、一轮里换 2~4 组去搜 —— 比原样丢一个宽泛词召回到的东西好得多。'),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',
@@ -538,6 +561,45 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
             msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
+
+        /* ── 怎么搜（2026-10-16 新增） ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '怎么搜'),
+          h('div', { 'data-bd-note': '' }, '决定它从 B站 捞回什么。改完下一轮生效。'),
+
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '看多少条'),
+              h('div', { 'data-bd-note': '' }, '每搜一轮取回几条来读；再从中挑「每天最多挑几条」')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 50,
+              value: sNum ?? '', onChange: (e) => setSNum(e.target.value),
+              onBlur: () => { const n = Math.max(1, Math.min(Number(sNum) || 20, 50)); setSNum(String(n)); patch({ searchNum: n }, '看多少条') },
+            })),
+
+          h('div', { 'data-bd-label': '' }, '按什么排序'),
+          h('select', {
+            'data-bd-input': '', value: sOrder ?? 'totalrank',
+            onChange: (e) => { setSOrder(e.target.value); patch({ searchOrder: e.target.value }, '搜索排序') },
+          },
+            h('option', { value: 'totalrank' }, '综合（B站 默认，偏热度）'),
+            h('option', { value: 'pubdate' }, '最新（按发布时间）'),
+            h('option', { value: 'click' }, '播放量'),
+            h('option', { value: 'dm' }, '弹幕数')),
+
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '只看最近几天'),
+              h('div', { 'data-bd-note': '' }, '0 = 不过滤（默认）。要按时间筛只能在这里设 —— B站 搜索结果里不带发布时间，捞回来本地没法再筛')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 365,
+              value: sDays ?? '', onChange: (e) => setSDays(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(sDays) || 0, 365)); setSDays(String(n)); patch({ searchDays: n }, '只看最近几天') },
+            })),
+
+          h('div', { 'data-bd-note': '' },
+            `判重表：已经记了 ${seenNote === null ? '…' : seenNote} 个视频`
+            + ' —— 发过评论的会自动记进家目录的 seen.md，同一个视频不会再评论一次。')),
 
         /* ── 用哪个模型（2026-10-15 新增） ── */
         (() => {

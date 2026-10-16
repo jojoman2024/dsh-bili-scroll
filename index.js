@@ -54,6 +54,31 @@ export const Config = z.object({
   mentionName: z.string().default('').extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
+  /**
+   * ⭐ 关键词怎么用（2026-10-16 加）。
+   *
+   * | 值 | 含义 |
+   * |---|---|
+   * | `llm`（默认） | 把「关注什么」那几行当作**主题**交给模型，让它自己**组合出多种搜索词**去搜 |
+   * | `fixed` | 把每一行当作**一个现成的搜索词**，原样拿去搜 |
+   *
+   * 为什么默认是 llm：实测「一个宽泛词搜出来的全是教程/毕设」（搜"有关大模型的论文"⇒
+   * 前 12 条里 8 条是入门课和水论文技巧）。让模型按主题拆成多个具体词组合，召回质量高得多。
+   */
+  keywordMode: z.string().default('llm').extra('volatile', true),
+  /** ⭐ 搜索排序：totalrank=综合（默认）/ pubdate=最新 / click=播放 / dm=弹幕 */
+  searchOrder: z.string().default('totalrank').extra('volatile', true),
+  /**
+   * ⭐ 只搜最近几天（**0 = 不过滤**，默认）。
+   *
+   * ⚠️ 为什么必须在这一层过滤：B站 **搜索结果里根本不带发布时间**（实测字段只有
+   *    bvid/aid/title/author/play/review/danmaku/duration/description）⇒
+   *    拿回来之后**没法在本地按日期筛**，只能在请求时交给 B站 自己筛
+   *    （底层 `search_by_type` 支持 `time_start`/`time_end`，格式 "YYYY-MM-DD"）。
+   */
+  searchDays: z.natural().default(0).extra('volatile', true),
+  /** ⭐「看多少条」：一轮从搜索结果里取多少条来**看**（后面再从中挑 perDay 条） */
+  searchNum: z.natural().default(20).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
   pythonPath: z.string().default('python').extra('volatile', true),
   /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
@@ -157,7 +182,8 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
+    commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     personaEnabled: true, personaMaxChars: 8000,
     llmProvider: '', llmModel: '', llmReasoningEffort: '',
   }
@@ -280,19 +306,35 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bili_search',
-    description: '搜 B站 视频（可排序）。返回标题 / BV号 / 播放量 / UP / 时长 等。\n'
-      + '⚠️ 刷一轮的用法：搜近 7 天的、按播放或最新都行，然后**读字幕原文**再判断（别看摘要下结论）。',
+    description: '搜 B站 视频（可排序、可按日期过滤）。返回标题 / BV号 / 播放量 / UP / 时长 等。\n'
+      + '⚠️ 刷一轮的用法：先按设置里的「搜索方式」与「只看最近几天」搜，然后**读字幕原文**再判断（别看摘要下结论）。\n'
+      + '⚠️ 返回里**没有发布时间** ⇒ 要按时间筛只能靠 days 参数让 B站 自己筛（本地没法再筛）。',
     parameters: {
       keyword: { type: 'string', description: '搜索关键词' },
-      num: { type: 'number', description: '返回几条（默认 10，最大 50）' },
-      order: { type: 'string', description: 'totalrank=综合（默认）/ click=播放 / pubdate=最新 / dm=弹幕' },
+      num: { type: 'number', description: '返回几条（默认取设置里的「看多少条」，最大 50）' },
+      order: { type: 'string', description: 'totalrank=综合 / click=播放 / pubdate=最新 / dm=弹幕（不填用设置里的）' },
+      days: { type: 'number', description: '只看最近几天（0/不填 = 不过滤；不填时用设置里的值）' },
     },
     async execute(args) {
-      return call('bili_search', {
-        keyword: String(args.keyword ?? ''),
-        num: Math.max(1, Math.min(Number(args.num) || 10, 50)),
-        order: String(args.order || 'totalrank'),
-      })
+      const order = String(args.order || cfg.searchOrder || 'totalrank')
+      // ⚠️ days 与 order 一样：**显式传 0 表示"这一搜不要过滤"**，
+      //    不能写 `Number(args.days) || cfg.searchDays` —— 那样传 0 会被当成"没填"而回落成设置值。
+      const days = args.days === undefined || args.days === null
+        ? Math.max(0, Number(cfg.searchDays) || 0)
+        : Math.max(0, Number(args.days) || 0)
+      const num = Math.max(1, Math.min(
+        Number(args.num) || Number(cfg.searchNum) || 20, 50,
+      ))
+      const payload = { keyword: String(args.keyword ?? ''), num, order }
+      // 日期过滤交给 B站（`time_start`/`time_end`，格式 YYYY-MM-DD）。
+      // ⭐ 用 dayKey()（**本地日期**）：它内部走 getFullYear/getMonth/getDate，
+      //    不能用 toISOString() —— 那是 UTC，在东八区凌晨会算成"昨天"。
+      if (days > 0) {
+        const today = new Date()
+        payload.time_start = dayKey(new Date(today.getTime() - days * 86400_000))
+        payload.time_end = dayKey(today)
+      }
+      return call('bili_search', payload)
     },
   })
 
@@ -316,16 +358,72 @@ export function apply(ctx, config) {
     },
   })
 
+  /* ─────────────── 判重表 seen.md（2026-10-16 加） ───────────────
+   *
+   * 🔴 为什么必须由**插件**来管、而不是写在章程里让模型自觉：
+   *    章程（duty.md）早就写着「判重 —— 已经看过的跳过（判重表就在家目录根下，叫 seen.md）」，
+   *    但实测**跑完一轮之后 `seen.md` 根本不存在**（2026-10-16 首次跑通那轮，4 条评论全发出去、
+   *    文件一个都没写）。原因是它只是**一句话约定**：模型要自己记得读写、自己拼格式，
+   *    而它在那一轮里正忙着重试被 ACL 挡住的 shell ⇒ 这件事就被丢了。
+   *    ⇒ 教训与 `bili_reply` 那次同源：**能由代码保证的事，不要交给模型的自觉**。
+   *
+   * 现在：**发评论前查、发成功后立刻写**，都在 `bili_reply` 里做掉，模型不需要记得做任何事。
+   * 另外仍然注册 `bili_seen` 工具，给模型**主动查/记**的余地（例如报告里想说明为什么跳过）。
+   *
+   * ⚠️ 格式刻意做成 markdown 表格（人可直接看、也可手改），但**解析只认 `|` 分隔的字段**，
+   *    所以手工增删行不会破坏它。
+   */
+  const seenFile = join(stateDir, 'seen.md')
+
+  /** 解析 seen.md → Map<bvid, {at, rpid, note}>（容错：任何一行读不懂就跳过） */
+  const readSeen = () => {
+    const map = new Map()
+    let text = ''
+    try { text = readFileSync(seenFile, 'utf8') } catch { return map }
+    for (const line of text.split(/\r?\n/)) {
+      // 形如：| BV1xx | 2026-10-16 | 320841605008 | 前 20 字 |
+      const m = /^\|\s*(BV[0-9A-Za-z]+)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/.exec(line.trim())
+      if (!m) continue
+      map.set(m[1], { at: m[2].trim(), rpid: m[3].trim(), note: m[4].trim() })
+    }
+    return map
+  }
+
+  /** 追加一行到 seen.md（文件不存在就先写表头） */
+  const markSeen = (bvid, { rpid = '', note = '' } = {}) => {
+    const id = String(bvid || '').trim()
+    if (!/^BV[0-9A-Za-z]+$/.test(id)) return false
+    try {
+      if (!existsSync(seenFile)) {
+        writeFileSync(seenFile,
+          '# 刷B站 · 判重表\n\n'
+          + '> 这个文件由**插件自动维护**（发过评论的视频会自动记在这里），也可以手工增删。\n'
+          + '> 只有「已经在表里」的 BV 会被拦下 —— 它表示**这个视频已经占用过使用者一次注意力**。\n\n'
+          + '| BV | 日期 | rpid | 备注 |\n|---|---|---|---|\n', 'utf8')
+      }
+      const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
+      appendFileSync(seenFile, `| ${id} | ${dayKey()} | ${clean(rpid)} | ${clean(note).slice(0, 40)} |\n`, 'utf8')
+      return true
+    } catch (e) {
+      log(`写判重表失败：${e?.message ?? e}`)
+      return false
+    }
+  }
+
+  const seenCount = () => readSeen().size
+
   tool({
     name: 'bili_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
-      + '除非本人当场让你发（那时传 force: true）。',
+      + '除非本人当场让你发（那时传 force: true）。\n'
+      + '🔁 判重：发过的视频会**自动**记进家目录的 `seen.md`，再发同一个 BV 会被拦下（要硬发传 repeat: true）。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
+      repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
     },
     async execute(args) {
       if ((!cfg.autoComment || !cfg.mentionName) && !args.force) {
@@ -335,11 +433,71 @@ export function apply(ctx, config) {
           hint: '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
         }
       }
-      return call('bili_reply', {
-        bvid: String(args.bvid ?? ''),
-        text: String(args.text ?? ''),
-        rpid: Number(args.rpid) || 0,
-      })
+      const bvid = String(args.bvid ?? '').trim()
+      // 🔁 判重闸：表里已有的 BV 直接拦下（force 也拦 —— force 管的是"自动评论开关"，
+      //    与"是不是发过"是两件事；要硬发得显式传 repeat）。
+      const seen = readSeen().get(bvid)
+      if (seen && !args.repeat) {
+        return {
+          ok: false,
+          blocked: true,
+          duplicate: true,
+          seenAt: seen.at,
+          hint: `\`${bvid}\` 已经在判重表里了（${seen.at} 发过），不再重复评论。`
+            + '确实要重发就传 repeat: true。',
+        }
+      }
+      const r = await call('bili_reply', { bvid, text: String(args.text ?? ''), rpid: Number(args.rpid) || 0 })
+      // ⭐ 发成功才记账（失败还记，会让一条本该重试的视频被永久跳过）。
+      //    ⚠️ 回执可能是字符串（MCP 返回 JSON 文本）——两种都认。
+      let rec = r
+      if (typeof rec === 'string') { try { rec = JSON.parse(rec) } catch { /* 保持原样 */ } }
+      const okNow = rec === undefined || rec === null
+        ? true
+        : (typeof rec === 'object' ? rec.success !== false && rec.ok !== false : true)
+      if (okNow) {
+        markSeen(bvid, { rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '', note: String(args.text ?? '').slice(0, 40) })
+      }
+      return r
+    },
+  })
+
+  tool({
+    name: 'bili_seen',
+    description: '看/记「判重表」（家目录的 seen.md）：哪些视频已经占用过使用者的注意力。\n'
+      + '⭐ 发评论会**自动**记账，一般不用手调；这个工具是给你**主动查**用的'
+      + '（例如想在报告里说明"这条之前看过所以跳过"），或者明确要记一条时用。',
+    parameters: {
+      list: { type: 'boolean', description: 'true = 列出全部（默认只回条数 + 最近几条）' },
+      mark: { type: 'string', description: '要记进表的 BV 号（不填 = 只查不记）' },
+      note: { type: 'string', description: '备注（随 mark 一起记，比如挑中/跳过的原因）' },
+    },
+    async execute(args) {
+      // ⚠️ 顺序要紧：**先 mark，再读表**。
+      //    反过来的话（先读后 mark）刚记进去的那条不在 count 里 ——
+      //    实测第一次就踩到：mark 回执报 count: 0，而 "/status" 里已经是 1，自相矛盾。
+      let marked = null
+      let alreadyThere = false
+      if (args.mark) {
+        const id = String(args.mark).trim()
+        alreadyThere = readSeen().has(id)
+        marked = markSeen(id, { note: String(args.note ?? '') })
+      }
+      const map = readSeen()
+      const out = {
+        ok: true,
+        file: seenFile,
+        count: map.size,
+      }
+      if (marked !== null) {
+        out.marked = marked
+        out.alreadyThere = alreadyThere
+      }
+      const all = [...map.entries()].map(([bvid, v]) => ({ bvid, ...v }))
+      // 默认只回最近 15 条（避免把整张表塞进上下文）；要看全量传 list: true
+      out.entries = args.list ? all.slice(-200) : all.slice(-15)
+      out.truncated = !args.list && all.length > 15
+      return out
     },
   })
 
@@ -486,6 +644,36 @@ export function apply(ctx, config) {
       if (existsSync(homeCopy) && statSync(homeCopy).mtimeMs > statSync(shipped).mtimeMs) duty = homeCopy
     } catch { /* 读不到就用 shipped 那份 */ }
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
+    /**
+     * ⭐ 关键词怎么交给那一轮用（2026-10-16 加，默认 `llm`）。
+     *
+     * 起因（实测）：原先把「关注什么」那几行**原样**当搜索词用。
+     * 使用者填的是 `有关大模型的论文` 这种**主题**，而它当关键词直接搜 ⇒
+     * 搜回来 12 条里 8 条是「零基础入门」「毕设怎么建模型」「水论文技巧」，
+     * 因为**宽泛词在 B站 的检索里就是会召回到那堆东西**。
+     *
+     * ⇒ 现在默认把这几行当作**主题**，让模型自己拆/组合出**多个具体搜索词**再搜
+     *   （例如「有关大模型的论文」⇒ `大模型 论文精读` / `LLM 顶会 解读` /
+     *   `ACL EMNLP 论文 讲解`…），并把"多试几组"写进要求。
+     * 想恢复原样（把每行当一个现成搜索词）就把设置里的「关键词怎么用」改成 fixed。
+     */
+    const kwLine = (() => {
+      if (kws.length === 0) {
+        return cfg.keywordMode === 'fixed'
+          ? '关键词用章程里的默认那几组'
+          : '关注主题没填 —— 就用章程里的默认那几组主题，照样自己拆成多个具体搜索词去搜'
+      }
+      if (cfg.keywordMode === 'fixed') {
+        return `关键词用这些（**原样**当搜索词，每行一个，别改写）：${kws.join('、')}`
+      }
+      return '下面这些是使用者填的**关注主题**（不是现成的搜索词）：'
+        + `\n  ${kws.join('\n  ')}`
+        + `\n  ⇒ **你自己把它们拆成多个更具体的搜索词**，分批去搜（一轮里换 2~4 组不同组合，
+          别只用一组就下结论）；每组的字要落在「领域 + 具体内容」上（例如主题是"大模型论文"，
+          可试 \`大模型 论文精读\`、\`LLM 顶会 解读\`、\`ACL 论文 讲解\` 这类），
+          避开「入门 / 教程 / 毕设 / 水论文」这些一看就是流量词的写法。
+          每次搜索都用 keyword 参数传你现编的那个词——**不要**把使用者这行原样丢进去。`
+    })()
     // ⭐ 人设：从**插件家目录**的 persona.md 现读（2026-10-15 改）
     //
     // 改之前是读「工作区的 AGENTS.md」—— 那个做法已被废除，两个原因：
@@ -519,7 +707,12 @@ export function apply(ctx, config) {
         : cfg.reportLevel === 'off'
           ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
           : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
-      + `今天最多挑 ${cfg.perDay} 条；关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + `今天最多挑 ${cfg.perDay} 条；` + kwLine + `。`
+      + `搜索：看 ${Math.max(1, Math.min(Number(cfg.searchNum) || 20, 50))} 条；`
+      + `排序用${({ totalrank: '综合', pubdate: '最新', click: '播放量', dm: '弹幕' })[cfg.searchOrder] || '综合'}；`
+      + (Number(cfg.searchDays) > 0
+        ? `只搜最近 ${Number(cfg.searchDays)} 天（**必须**给 bili_search 传 days=${Number(cfg.searchDays)}，返回里没有时间字段、不传就筛不了）。`
+        : `不限时间。`)
       + `本地转写是${cfg.transcribe ? '开着的（没字幕就用家目录里的 asr.py 转，命令见章程）' : '关着的（没字幕就跳过）'}；`
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${cfg.autoComment && cfg.mentionName
         ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
@@ -885,6 +1078,9 @@ export function apply(ctx, config) {
       installTail: (() => { try { return readFileSync(installLogFile, 'utf8').slice(-1400) } catch { return '' } })(),
       report: join(outDir, `${today}.md`),
       log: logFile,
+      // 判重表条数（设置页要显示"已经记了多少个视频"）
+      seenCount: seenCount(),
+      seenFile,
     }
   }
 
@@ -901,7 +1097,8 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
+        'pythonPath', 'dshBin', 'headlessProfile', 'reportLevel', 'replyToComments', 'replyPerRound',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
