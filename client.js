@@ -151,7 +151,11 @@ window.__ModuleLoader__.load({
 
     /* ────────────── 设置页正文 ────────────── */
 
-    function Panel() {
+    function Panel(props) {
+      // ⭐ 跳会话的能力由 apply() 注入。**传的是解析函数**（点击时才取服务）——
+      //    因为 `uiWorkspace` 是异步 inject 上来的，按值捕获会拿到 null（真机踩过）。
+      //    解析不出来返回 null ⇒ 面板**如实显示"这个环境不支持跳转"**，而不是点了没反应。
+      const resolveOpenSession = (props && props.resolveOpenSession) || (() => null)
       const [st, setSt] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
@@ -164,6 +168,8 @@ window.__ModuleLoader__.load({
       const [sDays, setSDays] = React.useState(null)     // 只看最近几天（0=不过滤）
       const [sNum, setSNum] = React.useState(null)       // 看多少条
       const [seenNote, setSeenNote] = React.useState(null) // 判重表条数（从 /status 拿）
+      // ⭐ 前台/后台（2026-10-16 加）：决定它跑在一个你看得见的会话里、还是后台子进程
+      const [runMode, setRunMode] = React.useState(null)
       const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -207,6 +213,7 @@ window.__ModuleLoader__.load({
         if (cfg && sDays === null) setSDays(String(cfg.searchDays ?? 0))
         if (cfg && sNum === null) setSNum(String(cfg.searchNum ?? 20))
         if (st && seenNote === null) setSeenNote(Number(st.seenCount) || 0)
+        if (cfg && runMode === null) setRunMode(cfg.runMode || 'headless')
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -346,7 +353,24 @@ window.__ModuleLoader__.load({
         setBusy('run')
         try {
           const r = await jpost('/run', {})
-          say(r?.started ? '已经在后台跑一轮了，报告会写在 out/ 里' : '没起来，看 duty.log', r?.started ? 'good' : 'warn')
+          if (r?.started) {
+            if (r.mode === 'front') {
+              // ⭐ 前台：会话已经建好了。**直接跳过去**，你就能看着它跑
+              //    （这正是前台模式的意义 —— 后台那轮你看不见）。
+              setRunNote({ tone: 'good', t: `已建前台会话（${r.sessionId || ''}），正在跳过去…` })
+              const openSession = resolveOpenSession()   // 点击时才取服务
+              if (openSession && r.sessionId) {
+                try { openSession(r.sessionId) } catch (e) { setRunNote({ tone: 'warn', t: `会话建好了，但跳转失败：${String(e?.message ?? e)}` }) }
+              } else if (r.sessionId) {
+                setRunNote({ tone: 'warn', t: `会话建好了（${r.sessionId}），但这个环境拿不到跳转能力 —— 去左侧会话列表里找「刷B站 …」` })
+              }
+            } else {
+              say('已经在后台跑一轮了，报告会写在 out/ 里', 'good')
+            }
+          } else {
+            // ⚠️ 如实回显失败原因（前台模式失败的原因往往是"服务拿不到"，不是"跑挂了"）
+            setRunNote({ tone: 'warn', t: r?.error ? `没起来：${r.error}` : '没起来，看 duty.log' })
+          }
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }
@@ -433,7 +457,35 @@ window.__ModuleLoader__.load({
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
 
-        /* ── 定时 ── */
+        /* ── 跑在哪（2026-10-16 新增） ── */
+      h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-h': '' }, '跑在哪'),
+        h('select', {
+          'data-bd-input': '', value: runMode ?? 'headless',
+          onChange: (e) => { setRunMode(e.target.value); patch({ runMode: e.target.value }, '跑在哪') },
+        },
+          h('option', { value: 'front' }, '前台 —— 在主应用里开一个会话（能看、能追溯）'),
+          h('option', { value: 'headless' }, '后台 —— 另起一个子进程（只留日报）')),
+        h('div', { 'data-bd-note': '' }, runMode === 'front'
+          ? '跑一轮会在主应用里**新建一个真实会话**（固定工作区 front-sessions），点「现在跑一轮」之后自动跳过去 —— '
+            + '你能看着它搜、看着它判断，会话也留在列表里能回看。定时器也会走这条。'
+          : '跑一轮会另起一个 dsh 子进程，你看不见它；跑完只留一份日报在 out/ 里。'
+            + '（这条需要下面那些「装依赖 / 登录 / 模型」都配好。）'),
+        st.lastFrontSessionId && (runMode ?? 'headless') === 'front'
+          ? h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-note': '' }, `最近一次前台会话：${st.lastFrontSessionId}`)),
+              h('button', {
+                'data-bd-btn': '',
+                onClick: () => {
+                  const openSession = resolveOpenSession()
+                  if (!openSession) { setRunNote({ tone: 'warn', t: '这个环境拿不到跳转能力（缺 uiWorkspace 服务）' }); return }
+                  try { openSession(st.lastFrontSessionId) } catch (e) { setRunNote({ tone: 'warn', t: `跳转失败：${String(e?.message ?? e)}` }) }
+                },
+              }, '去到那个会话'))
+          : null),
+
+      /* ── 定时 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
@@ -733,9 +785,26 @@ window.__ModuleLoader__.load({
      * 为什么不像别的插件那样嵌 iframe：本插件的面板**本来就是 React 组件**
      * （`Panel` 就在本文件里），直接复用最省事 —— 没有 iframe 的高度/滚动条打架问题，
      * 也不用再发一份页面出去。（若面板是独立 HTML，那才该用 iframe。）
+     *
+     * 🔴 **它必须定义在 `apply()` 里面**（2026-10-16 真机抓到的 bug）：
+     *    第一版把它放在这里（模块顶层），而 `openSession` 是 `apply()` 里的局部变量
+     *    ⇒ 渲染时抛 `ReferenceError: openSession is not defined`，
+     *    表现为 **右侧栏那个 tab 整块崩掉**（`slot entry crashed in 'sidebar.right.pane.tab'`）。
+     *    ⚠️ 离线探针与 `selfcheck` **都抓不到这个**（它们不渲染组件）——
+     *       只有真机点开面板才会暴露。⇒ 这类"作用域/渲染"问题**必须真机验**。
+     *    ⇒ 现在改成：`makeTab(resolveOpenSession)` 在 `apply()` 里调用，
+     *      而且传的是**解析函数**（点击时现取服务），不是那一刻的值。
      */
-    function BiliScrollTab() {
-      return h('div', { 'data-bd-tabwrap': '' }, h(Panel))
+    function makeTab(resolveOpenSession) {
+      return function BiliScrollTab() {
+        // 🔴 **必须现取，不能按值捕获**（2026-10-16 真机抓到）：
+        //    `openSession` 由 `ctx.inject(['uiWorkspace'], cb)` **异步**填上，
+        //    而 tab 本体在 `apply()` 里**同步**注册
+        //    ⇒ 按值传的话注册那刻拿到 `null`，之后填上也改不了已捕获那份
+        //      ⇒ 按钮永远说"拿不到跳转能力"。
+        //    ⚠️ 所以这里传的是**解析函数**，按钮**点击时**才真正取服务。
+        return h('div', { 'data-bd-tabwrap': '' }, h(Panel, { resolveOpenSession }))
+      }
     }
 
     return {
@@ -743,14 +812,51 @@ window.__ModuleLoader__.load({
        * ⚠️ 这里是**客户端服务短名**，不是包名。
        *    包名那份在 package.json 的 `dsh.client.inject`（两处含义不同）。
        *    `sidebarRightTabs` 由 `@deepseek-ai/dsh-client-ui-sidebar-right` 提供。
+       *    ⭐ `uiWorkspace`（2026-10-16 加）—— 前台跑完之后用它 `openSession()` 跳到那个会话。
+       *       ⚠️ 它由 `@deepseek-ai/dsh-client-ui-workspace` 提供 ⇒ package.json 那份也要加。
        */
-      inject: ['slots', 'sidebarRightTabs'],
+      inject: ['slots', 'sidebarRightTabs', 'uiWorkspace'],
       apply(ctx) {
         const style = document.createElement('style')
         style.setAttribute('data-plugin-css', 'dsh-bili-duty')
         style.textContent = CSS
         document.head.appendChild(style)
         ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 面板样式')
+
+        /**
+         * ⭐ **跳到某个会话**（前台跑完之后用）。
+         *
+         * 照 memj 的做法（库内条目 `8be4b18d`）：**必须走 `ctx.inject` + `scope.get`**，
+         * 不能 `ctx.uiWorkspace`（属性访问是 undefined）。
+         * `openSession(target: SessionTarget)` 是**同步**的、直接传 id 字符串即可
+         * —— 它就是"点侧栏里那条会话"走的那条路。
+         *
+         * 🔴 **这里是异步填上的**（inject 回调何时跑由 DSH 定）⇒ 不能按值传给组件，
+         *    必须给一个**解析函数**，点击时现取（真机踩过：按值传永远是 null）。
+         */
+        /** inject 那条路填上的跳转函数（可能一直是 null）。 */
+        let injectedOpenSession = null
+        const resolveOpenSession = () => {
+          if (injectedOpenSession) return injectedOpenSession
+          // 兜底：有些版本 `ctx.get` 直接拿得到
+          try {
+            const ws = ctx.get('uiWorkspace')
+            if (ws && typeof ws.openSession === 'function') return (id) => ws.openSession(id)
+          } catch { /* 取不到就是 null */ }
+          return null
+        }
+        // ⚠️ 两条路都试，谁先能拿到就用谁（`resolveOpenSession` 每次现查 ⇒ 后填上的也能用）。
+        try {
+          ctx.inject(['uiWorkspace'], (scope) => {
+            const ws = scope.get('uiWorkspace')
+            if (ws && typeof ws.openSession === 'function') {
+              injectedOpenSession = (id) => ws.openSession(id)
+            }
+          })
+        } catch (e) {
+          // ⚠️ 拿不到不算致命：面板上那个按钮会显示"这个环境不支持跳转"，而不是静默没反应。
+          console.warn('[dsh-bili-scroll] inject uiWorkspace 失败，改用 ctx.get 兜底：', e)
+        }
 
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
@@ -779,9 +885,12 @@ window.__ModuleLoader__.load({
 
         // ── ② tab 本体（🔴 只注册 ① 的卡是点不动的）──
         //    key 必须是 ① 里的 `id`，不是 `kind`。
+        //    ⭐ 组件在**这里**建，并把**解析函数**给它（`uiWorkspace` 是异步填上的，
+        //       按值传会拿到 null ⇒ 按钮永远说"拿不到跳转能力"，真机踩过）。
         try {
+          const Tab = makeTab(resolveOpenSession)
           ctx.effect(() => slots.inject('sidebar.right.pane.tab', () =>
-            slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, BiliScrollTab),
+            slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, Tab),
           ), 'bili-duty: 右侧栏 tab 本体')
         } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 本体失败：', e) }
 
