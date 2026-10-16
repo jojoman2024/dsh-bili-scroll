@@ -955,13 +955,24 @@ export function apply(ctx, config) {
   }
 
   const promptFor = () => {
-    // ⭐ 章程取哪一份：**插件里那份（永远跟版本一致）**；但家里那份如果**比它新**，说明使用者自己改过 ⇒ 听使用者的。
-    const shipped = join(pluginDir, 'prompts', 'duty.md')
-    const homeCopy = join(stateDir, 'duty.md')
-    let duty = shipped
-    try {
-      if (existsSync(homeCopy) && statSync(homeCopy).mtimeMs > statSync(shipped).mtimeMs) duty = homeCopy
-    } catch { /* 读不到就用 shipped 那份 */ }
+    /**
+     * ⭐ **章程固定读【家目录】那一份**（2026-10-16 定稿；当天改过两轮，这里记清）。
+     *
+     * 取哪一份、以及为什么：
+     *   · **家目录** = `<家>\bili-duty\duty.md` —— 这一份是**运行时唯一被读的**，
+     *     由 `ensureHomeFiles` 在启动时从仓库那份**按内容同步**过去
+     *     （⇒ 永远是最新版；"过时"这个问题从根上没了）。
+     *   · 仓库那份（`<插件包>\prompts\duty.md`）只是**出厂源**，不再直接读它。
+     *
+     * 🔴 修掉的两个毛病（都是实测撞出来的）：
+     *   ① 原来按「谁的 mtime 新」挑 ⇒ 挑到**插件包目录**那份，
+     *      而 `bili_read` 的白名单只有「家目录 + 工作区」⇒ **读章程被当场拒**：
+     *        `{ ok:false, error:"只允许读写这两个目录里的东西（…）" }`
+     *   ② 它只好**自己猜**才读得到 —— 实测那轮一共调了 3 次 `bili_read`：
+     *        包目录路径 ❌被拒 → `duty.md` ✅读到 → `prompts/duty.md` ❌不存在
+     *      ⇒ 使用者原话："不要每次执行任务的时候都白跑一遍"。
+     */
+    const duty = join(stateDir, 'duty.md')
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
     /**
      * ⭐ 关键词怎么交给那一轮用（2026-10-16 加，默认 `llm`）。
@@ -1021,9 +1032,11 @@ export function apply(ctx, config) {
         : `使用者还没写人设 —— 那就中性一点，别擅自扮演任何人格。`)
       + ownerDoc
       + (cfg.runMode === 'front'
-        ? `**先读章程**：用 \`bili_read\` 读 \`${duty}\`，按里面的要求刷一轮 B站。\n`
-          + `  ⚠️ **必须用 \`bili_read\`** —— 前台会话的工作区是另一个目录，用普通文件工具 / playwright / `
-          + `记事本**都读不到**家目录里的章程（实测：有人试了 4 种办法、最后开记事本靠 UIA 读窗口，白烧几轮）。\n`
+        ? `**先读章程**：直接调 \`bili_read\`，\`path\` 就传这一个：\n`
+          + `    ${duty}\n`
+          + `  🔴 **就用上面这个路径，不要试别的**（不要拼相对路径、不要试 \`prompts/duty.md\`、`
+          + `不要用 playwright / 记事本去翻）—— 那几种**都读不到**，只会白费几轮。\n`
+          + `  （这个路径在允许范围内，一次就能读到；章程就在插件自己的家目录里。）\n`
         : `**先读章程** \`${duty}\`（你在插件家里跑，普通文件工具就能读）。按里面的要求刷一轮 B站。\n`)
       + (cfg.reportLevel === 'off'
         ? `这一轮**不要写任何报告文件**；只有真发了评论就一句话记下。`
