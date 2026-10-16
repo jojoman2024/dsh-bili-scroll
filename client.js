@@ -86,11 +86,27 @@ window.__ModuleLoader__.load({
 [data-bd-h]{font-size:14px;font-weight:600;line-height:22px;
   color:var(--dsw-alias-label-primary,#0f1115);margin:0 0 4px;}
 
-/* ── 行：照官方规格（gap 8 / 上下 10 留白 / 底部细分隔线） ── */
-[data-bd-row]{display:flex;align-items:center;gap:8px;padding:10px 0;
-  border-bottom:1px solid var(--dsw-alias-border-l1,#0000000a);}
-[data-bd-row]:last-child{border-bottom:0;}
-[data-bd-row2]{display:flex;gap:8px;padding:10px 0 0;}
+/* ── 行：**官方设置行的实测规格**（2026-10-16 从运行实例量的）
+ *
+ *   官方那一行是：padding:16px 0 + gap:8px + border-bottom:1px solid rgba(0,0,0,.1)
+ *   ⇒ 令牌是 --dsw-alias-border-l2（#0000001a ≈ 10%）。
+ *
+ * 🔴 **上一版这里有两个错**（使用者截图指出"看不到分隔线"）：
+ *   ① 用了 --dsw-alias-border-l1（#0000000a ≈ **4%**）—— 比官方淡 2.5 倍，几乎看不见；
+ *   ② padding 只给 10px —— 官方是 16px，行间太挤。
+ *
+ * ⚠️ **分隔线只给「设置行」**，不给所有 data-bd-row：
+ *   行本身只是 flex 容器，同一个属性还用在状态徽章行 / 产物清单行上。
+ *   这里用「是 sec 或 sub 的直接子行」来挑出真正的设置行（纯 CSS，不改 JSX）。
+ */
+[data-bd-row]{display:flex;align-items:center;gap:8px;}
+[data-bd-sec]>[data-bd-row],[data-bd-sub]>[data-bd-row]{
+  padding:16px 0;
+  border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 一节的最后一行不再拖一条线（否则会和下一节的标题挤在一起显得多余） */
+[data-bd-sec]>[data-bd-row]:last-child{border-bottom:0;}
+
+[data-bd-row2]{display:flex;gap:8px;padding:12px 0 0;}
 [data-bd-row2]>*{flex:1;min-width:0;}
 [data-bd-grow]{flex:1 1 0%;min-width:0;}
 
@@ -122,9 +138,16 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-module-platform,#f5f6f7);
   color:var(--dsw-alias-label-secondary,#61666b);}
 
-/* ── 子区块：左侧一条细线（缩进表示"从属"） ── */
-[data-bd-sub]{margin:2px 0 2px 6px;padding-left:12px;display:flex;flex-direction:column;
-  border-left:2px solid var(--dsw-alias-border-l2,#0000001a);}
+/* ── 子区块（开关打开后展开的那些）──
+ *
+ * 🔴 **不再缩进、也不再画左侧竖线**（2026-10-16 使用者要求："去掉这种缩进，不要他"）。
+ *    旧写法是 margin-left:6px / padding-left:12px / border-left:2px solid …
+ *    ⇒ 展开项被推进去一截、左边多一条灰线，跟官方那种「平铺 + 细分隔线」的观感不一致。
+ *    ⭐ 现在**靠"顶部一条分隔线"表示从属关系**：展开块与它上面那行之间画一条线，
+ *      位置和普通设置行完全对齐，整个面板的重心是一致的。
+ */
+[data-bd-sub]{display:flex;flex-direction:column;
+  border-top:1px solid var(--dsw-alias-border-l2,#0000001a);}
 
 /* ── 输入类：统一高度/圆角/描边，聚焦用官方焦点环 ── */
 [data-bd-input],[data-bd-select]{width:100%;box-sizing:border-box;padding:7px 10px;

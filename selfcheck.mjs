@@ -55,6 +55,19 @@ for (const n of registered) console.log(`    - ${n}`)
 
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
+// 🔴 **先查 CSS 模板串**（2026-10-16 加）：`client.js` 的 CSS 是一个模板字符串，
+//    在它的注释里写**反引号**会提前闭合整个串 ⇒ 真机 `import failed`，
+//    而 `node --check` **完全查不到**（模板串本身语法合法）。
+//    这个坑一天踩了两次，所以提到最前面、做成硬检查。
+try {
+  const { execFileSync } = await import('node:child_process')
+  execFileSync(process.execPath, ['tools/check-client-css.mjs', 'client.js'], { stdio: 'pipe' })
+  console.log('✓ CSS 模板串 OK（没有会截断它的反引号）')
+} catch (e) {
+  const out = String(e?.stdout ?? '') + String(e?.stderr ?? '')
+  fail('CSS 模板串有问题 —— 真机里会是 `import failed`（把注释里的反引号去掉）', { message: out.trim() })
+}
+
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 let loaded = null
 const prevWindow = globalThis.window
