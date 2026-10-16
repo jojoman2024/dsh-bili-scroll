@@ -329,7 +329,18 @@ export function apply(ctx, config) {
       }
       // 旧格式（4 列，向后兼容）：| BV | 日期 | rpid | 备注 |
       m = /^\|\s*(BV[0-9A-Za-z]+)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/.exec(t)
-      if (m) map.set(m[1], { at: m[2].trim(), kind: '', rpid: m[3].trim(), note: m[4].trim() })
+      if (m) {
+        // 🔴 **旧格式要"猜"出 kind**（2026-10-16 补）：旧行没有「怎么来的」列。
+        //    原来一律给 `kind: ''`，但 `weight('') = 0` ⇒ **"不许降级"那条对旧行失效**，
+        //    于是一条旧格式的「评论」记录可能被后来的 `bili_pick` 覆盖成「挑中」
+        //    并把 rpid 清掉 ⇒ 之后 `alreadyCommented` 变 false ⇒ **会给已评论过的再发一条**。
+        //    猜法（有依据，不是瞎猜）：**有 rpid ⇒ 一定是评论过的**（rpid 只在真发成功后写）；
+        //    否则看备注里有没有「挑中」→ 挑中，其余留空。
+        const rpid = m[3].trim()
+        const note = m[4].trim()
+        const kind = rpid !== '' ? '评论' : (/挑中/.test(note) ? '挑中' : '')
+        map.set(m[1], { at: m[2].trim(), kind, rpid, note })
+      }
     }
     return map
   }
@@ -356,8 +367,13 @@ export function apply(ctx, config) {
     try {
       const old = readSeen().get(id)
       if (old && weight(old.kind) > weight(kind)) return false   // 不许降级
+      // ⭐ 保险：**别把已有的 rpid 清空**（2026-10-16 补）。
+      //    rpid 是"真评论过"的证据 ⇒ 一旦有，后续任何写入都不该抹掉它
+      //    （即使 kind 相等、或调用方没传 rpid）。
+      const keepRpid = old && String(old.rpid || '') !== '' ? String(old.rpid) : ''
+      const finalRpid = String(rpid || '') !== '' ? String(rpid) : keepRpid
       const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
-      const row = `| ${id} | ${dayKey()} | ${clean(kind).slice(0, 6)} | ${clean(rpid)} | ${clean(note).slice(0, 40)} |`
+      const row = `| ${id} | ${dayKey()} | ${clean(kind).slice(0, 6)} | ${clean(finalRpid)} | ${clean(note).slice(0, 40)} |`
       // 读出旧文件 → 保住所有**别的**数据行（含手写的）→ 去掉这个 BV 的旧行 → 新的追加到最后
       let others = []
       try {
