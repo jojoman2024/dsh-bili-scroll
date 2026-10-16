@@ -1,7 +1,7 @@
 {
   "name": "@jojoman2024/dsh-bili-scroll",
-  "version": "0.1.3",
-  "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
+  "version": "0.1.4",
+  "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、每条写一份笔记，值得的就 @ 你",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -34,7 +34,8 @@
     "prompts",
     "vendor",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",

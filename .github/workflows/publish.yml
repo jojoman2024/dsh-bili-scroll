@@ -102,7 +102,7 @@ jobs:
           set -eu
           npm pack --dry-run 2>&1 | tee /tmp/pack.txt
           missing=0
-          for need in index.js client.js cordis.patch.yml lib/hostdeps.mjs lib/pyenv.mjs prompts/duty.md vendor/bilibili-mcp/mcp_server.py; do
+          for need in index.js client.js cordis.patch.yml lib/hostdeps.mjs lib/pyenv.mjs prompts/duty.md prompts/reply.md vendor/bilibili-mcp/mcp_server.py; do
             if grep -q " $need\$" /tmp/pack.txt; then
               echo "  ✓ $need"
             else
@@ -112,6 +112,18 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
           echo "✅ 关键文件都在包里"
+
+      # ── 守卫四之二：README 引用的图**必须在包里**（2026-10-17 加）──
+      #    🔴 为什么单独一条：README 里的相对路径图在**三个地方被三套解析器读**
+      #       （本地 / GitHub / **npm 页面**），而**只有 npm 那个用户看得见图裂**
+      #       —— 且**那个人不会来告诉你**。本地与 GitHub 都是绿的 ⇒ 靠肉眼永远发现不了。
+      #    ⭐ 逻辑写在 `tools/check-readme-images.mjs` 里（**本地 selfcheck 也调它**），
+      #       这里只负责在 CI 里**硬失败**。
+      #    ⚠️ 刻意不在这儿写 shell 抽路径：实测 `sed -E 's/.*\]\((.*)\)$/\1/'` 这类
+      #       分组替换在不同实现下行为不一致（本机就抽不出纯路径）⇒ 那种守卫会**静默失效**。
+      #       放进 .mjs 用 JS 正则抽，跨平台一致、本地可测。
+      - name: README 引用的图必须在包里
+        run: node tools/check-readme-images.mjs /tmp/pack.txt
 
       # ── 守卫五：OIDC 上下文打到日志里 ──
       #    npm 的失败信息只说「404 PUT」，真正的原因是

@@ -128,5 +128,24 @@ if (!styleNodes.length) fail('client.js 的 apply 没有把样式挂上（页面
 console.log(`✓ client 半端 OK：id=${loaded.id}  注入=${JSON.stringify(clientMod.inject)}`)
 for (const s of slotsReg) console.log(`    slot ${s.name}  id=${s.id}  order=${s.order}  组件=${s.hasComponent ? '有' : '无 ✗'}`)
 
+/* ────────────── ③ README 引用的图必须在包里（2026-10-17 加）────────────── */
+
+// 🔴 为什么也要在这儿查一遍（不只是 CI 里）：
+//    README 的相对路径图**本地看、GitHub 看都是绿的**，只有 **npm 页面**会裂 ——
+//    而那个用户不会来告诉你 ⇒ **越早在本地拦住越好**。
+//    ⚠️ 它要真跑一次 `npm pack --dry-run`（几百毫秒），所以放在最后、且失败也只告警不拦：
+//       本地可能还没登录 npm / 没网络 —— 那种情况下不该让预检整个挂掉。
+//       （CI 里那条是**硬失败**，见 .github/workflows/publish.yml）
+try {
+  const { execFileSync } = await import('node:child_process')
+  const out = execFileSync(process.execPath, ['tools/check-readme-images.mjs'], { stdio: 'pipe', encoding: 'utf8' })
+  for (const line of String(out).split('\n')) if (line.trim()) console.log(line)
+} catch (e) {
+  const out = String(e?.stdout ?? '') + String(e?.stderr ?? '')
+  console.log('⚠️ README 图片检查没过（CI 里会硬失败）:')
+  for (const line of out.split('\n')) if (line.trim()) console.log('    ' + line)
+  process.exitCode = 1
+}
+
 try { rmSync(SANDBOX_HOME, { recursive: true, force: true }) } catch { /* 留着也无所谓 */ }
 console.log(`\n（预检不碰真家目录：host 用 ${SANDBOX_HOME}）`)
