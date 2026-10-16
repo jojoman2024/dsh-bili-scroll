@@ -191,6 +191,10 @@ export function apply(ctx, config) {
   const logFile = join(stateDir, 'duty.log')
   const outDir = join(stateDir, 'out')
   mkdirSync(outDir, { recursive: true })
+  // ⭐ 产物目录（`<家>\reports\`）启动就建好 —— 两条路都写这里。
+  //    ⚠️ 后台那条用的是**普通文件工具**（不是 bili_write），它不一定会建父目录
+  //       ⇒ 在这里先建好最稳（bili_write 自己也建，但它只在有工具时会跑）。
+  try { mkdirSync(join(stateDir, 'reports'), { recursive: true }) } catch { /* 建不了后面写的时候会报 */ }
 
   const log = (msg) => {
     const line = `${new Date().toISOString()}  ${msg}`
@@ -923,19 +927,23 @@ export function apply(ctx, config) {
   const runUpgrade = () => {
     if (upgrading) return { ok: true, busy: true, log: installLogFile, hint: '正在升级，别重复点' }
     upgrading = true
-    appendInstall('\n=== ' + new Date().toISOString() + ' 开始升级（add dsh-bili-scroll）===\n')
+    // 🔴 **必须装我们自己的仓库**，不能是 npm 上的 `dsh-bili-scroll`
+    //    （那是上游的包，装下去会把本分支的改动整个覆盖掉 —— 2026-10-16 改）。
+    //    与 `/update`（那个查的是 jojoman2024/dsh-bili-scroll）配套。
+    const SPEC = 'github:jojoman2024/dsh-bili-scroll'
+    appendInstall('\n=== ' + new Date().toISOString() + ' 开始升级（add ' + SPEC + '）===\n')
     ;(async () => {
       try {
         const dsh = resolveDsh()
         // ⭐ 照抄那一轮的形状：resolveDsh 返回 { command, args, shell }
         //    （写错就退化成裸 'dsh'，而宿主 PATH 里常常没有它 ⇒ 静默失败）
         let cmd = dsh.command || 'dsh'
-        let args = [...(dsh.args || []), 'plugin', '--profile', 'web', 'add', 'dsh-bili-scroll']
+        let args = [...(dsh.args || []), 'plugin', '--profile', 'web', 'add', SPEC]
         if (dsh.shell) { args = ['/c', cmd, ...args]; cmd = 'cmd.exe' }
         appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
         const code = await spawnTo(cmd, args, { sink: appendInstall })
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
-        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add dsh-bili-scroll ===\n')
+        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add ' + SPEC + ' ===\n')
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
     })()
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
@@ -1062,9 +1070,12 @@ export function apply(ctx, config) {
             ? `  · ⚠️ 现在是**薄版**：上面的结构保留，但「讲了什么」「关键点」各压到两三行为止。\n`
             : '')
           + (cfg.runMode === 'front'
-            ? `  ⚠️ **用 \`bili_write\` 写**（沙箱只让你写工作区，家目录得走它）；`
+            // ⚠️ 前台**必须**用 bili_write：它的 cwd 是工作区，沙箱不让它写家目录。
+            //    （产物现在固定在家目录的 reports/ ⇒ 普通文件工具写不进去。）
+            ? `  ⚠️ **用 \`bili_write\` 写**（你的工作区是另一个目录，沙箱不让你写家目录，`
+              + `而这个产物目录在家目录里 ⇒ 只能走它）；`
               + `path 传**绝对路径**。写完看回执里的 \`bytes\` —— 那是真实字节数。\n`
-            : `  用你手上的文件写入工具写即可。\n`)
+            : `  用你手上的文件写入工具写即可（这个目录在你自己的家目录里）。\n`)
           + `  ⭐ 另外：**挑中一条就调一次 \`bili_pick\`**（不管后面发不发评论）—— `
           + `它会把这条记进判重表，下一轮就不再占候选预算。\n`)
       + `今天最多挑 ${cfg.perDay} 条；` + kwLine + `。`
@@ -1225,23 +1236,25 @@ export function apply(ctx, config) {
   const frontWorkspaceIsCustom = () => String(cfg.frontWorkspace || '').trim() !== ''
 
   /**
-   * ⭐ **产物（每条一份 md）写到哪里**（2026-10-16 使用者裁定，第三代方案）。
+   * ⭐ **产物（每条一份 md）写到哪里** —— **固定 `<家>\reports\`**（2026-10-16 使用者裁定）。
    *
-   * **路径**：`<工作区>\reports\<标题>-<YYMMDD>.md`
+   * **路径**：`<家>\reports\<标题>-<YYMMDD>.md`
    *   · **标题在前、日期在后**，日期是 `YYMMDD`（**无横杠**）—— 使用者明确要求；
-   *   · 「工作区」= `frontWorkspacePath()`（前台模式下就是那个会话的 cwd ⇒ 在他眼前）；
-   *   · ⚠️ 后台模式没有会话工作区 ⇒ 那一路仍退回家目录（见下面 `reportDirFor`）。
+   *   · **两条路（前台 / 后台）写的是同一个目录** ⇒ 面板一眼能看全，
+   *     不会再出现"换了个模式，以前的产物就看不见了"。
    *
-   * **日报（那份汇总的）已取消**（使用者要求）—— 改成**每条值得看的单独一份**。
+   * 🔴 **为什么能统一**（这是第三代才成立的原因）：
+   *    前台会话的 cwd 是工作区、沙箱不让它写家目录 ——
+   *    但**我们有 `bili_write`**（插件自己用 node:fs，**不经沙箱**，白名单里有家目录）
+   *    ⇒ 前台也用 `bili_write` 写到这个家目录路径即可，不再需要"搬进工作区"那种绕法。
    *
    * 📌 这份产物当天改过三代，记下演化原因，别再来回改：
-   *   ① `<家>\out\<日期>.md`（一份汇总）—— 起点；
-   *   ② 搬进工作区（绕开沙箱）—— 使用者反馈"看到 out 目录但没看到输出"，是弯路；
-   *   ③ **给 `bili_write` 工具 + 每条一份**（本版）—— 产物跟着会话走，一眼能看到。
+   *   ① `<家>\out\<日期>.md`（一份汇总日报）—— 起点；
+   *   ② 搬进工作区（绕开沙箱）—— 是因为当时**还没有** `bili_write`；
+   *   ③ **统一回 `<家>\reports\`**（本版）—— 有了跨工作区写工具，
+   *      "搬进工作区"这个绕法就不必要了，而且它造成了**两处产物、面板看不全**。
    */
-  const reportDirFor = () => (cfg.runMode === 'front'
-    ? join(frontWorkspacePath(), 'reports')
-    : join(outDir, 'reports'))
+  const reportDirFor = () => join(stateDir, 'reports')
 
   /**
    * 把视频标题变成一个**能当文件名**的安全串。
@@ -1867,10 +1880,24 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, day, exists, file, text })
     }
 
-    // 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开（只认 out / home 两个，别的不受理）
+    /**
+     * 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开。
+     *
+     * 🔴 **`what` 现在认三个值**（2026-10-16 修）：
+     *    · `'out'`（面板上叫「打开产物文件夹」）⇒ **产物目录** = `<家>\reports`
+     *    · `'home'` ⇒ 插件家目录
+     *    · `'legacy-out'` ⇒ 老的 `<家>\out`（只在还有旧日报时要看）
+     *    ⚠️ **原来 `'out'` 被解析成 `outDir`（`<家>\out`）** ——
+     *      那是"汇总日报"时代的目录。产物改成 `<家>\reports` 之后，
+     *      这个按钮**一直在开错文件夹**（使用者截图指出："打开产物文件夹按钮打开的目录也不对"）。
+     *      ⇒ 现在 `'out'` 指向真正的产物目录；老的 `out` 单独给个名字。
+     */
     if (req.method === 'POST' && path === '/api/bili-duty/open') {
       const body = await readBody(req)
-      const dir = String(body?.what || 'out') === 'home' ? stateDir : outDir
+      const what = String(body?.what || 'out')
+      const dir = what === 'home' ? stateDir
+        : what === 'legacy-out' ? outDir
+        : reportDirFor()
       if (process.platform !== 'win32') return sendJson(res, 200, { ok: false, error: '这个按钮目前只做了 Windows' })
       // ⭐ 三种方式依次试（PATH 不全时 explorer.exe 会找不到 ✗；spawn 的失败是**异步**的，
       //    try/catch 抓不到 ⇒ 必须挂 'error' 监听，否则会升级成未捕获异常）
@@ -1900,29 +1927,116 @@ export function apply(ctx, config) {
     // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）
     if (req.method === 'POST' && path === '/api/bili-duty/upgrade') return sendJson(res, 200, runUpgrade())
 
-    // 「检查更新」：⚠️ 只在用户点按钮时才联网（不偷偷发请求 ✓），结果缓存一天 ✓
-    if (req.method === 'GET' && path === '/api/bili-duty/update') {
-      const out = { ok: true, current: myVersion(), latest: '', hasNew: false, page: 'https://www.npmjs.com/package/dsh-bili-scroll' }
+    /**
+     * ⭐ **「检查更新」查的是我们自己的仓库**（2026-10-16 改）。
+     *
+     * 🔴 为什么必须改：原来查 `registry.npmjs.org/dsh-bili-scroll` —— 那是**上游**的包。
+     *    而这个分支（`jojoman2024/dsh-bili-scroll`）跟上游**差的不是一点**：
+     *    前台会话、`bili_read/bili_write`、产物改成"每条一份笔记"、面板整块重排……
+     *    ⇒ 它**永远**提示"有新版 v0.1.5"，而那一个「一键升级」装下去
+     *      **会把我们这些改动整个覆盖掉**（而且是装到 `--profile web`，跟我们这份 link 装的还不是一处）。
+     *    ⚠️ **检查与升级是一对**：只改检查不改升级 ⇒ 更危险
+     *      （"说有新版"却去装上游）。所以 `runUpgrade()` 也一并改掉了。
+     *
+     * 📌 **判据用 commit sha，不用版本号**：
+     *    我们 fork 之后 `package.json` 的 version 一直没动（还是 0.1.3），
+     *    两边版本号可能相同而代码完全不同 ⇒ **版本号比不出新旧的**。
+     *    ⇒ 用 GitHub 的 `compare` 接口拿方向：
+     *      · `identical`     = 本地那份就是 main（最新）
+     *      · `behind`        = 本地落后 main ⇒ 有新版
+     *      · `ahead`/`diverged` = 本地不在 main 线上（自己改过 / 不在主干）
+     *    ⚠️ 本地 sha 从**插件目录自己的 git** 读（`.git/HEAD`）——
+     *      本插件通常是 `link:` 装的，`pluginDir` 就是一个真 git 仓；
+     *      读不到（比如从 npm 装的、没有 .git）⇒ **如实说"查不了"**，不要瞎报有新版。
+     *
+     * ⚠️ 只在点按钮时联网（不偷偷发请求）；结果缓存 24 小时。
+     */
+    const GH_REPO = 'jojoman2024/dsh-bili-scroll'
+
+    /** 读本插件目录自己那一份 git 的当前 commit（读不到返回 ''）。 */
+    const myCommit = () => {
       try {
-        if (updateCache && Date.now() - updateCache.at < 24 * 3600 * 1000) out.latest = updateCache.latest
-        else {
-          const ctrl = new AbortController()
-          const timer = setTimeout(() => ctrl.abort(), 8000)
-          const r = await fetch('https://registry.npmjs.org/dsh-bili-scroll/latest', { signal: ctrl.signal })
-          clearTimeout(timer)
-          const j = await r.json()
-          out.latest = String(j.version || '')
-          updateCache = { at: Date.now(), latest: out.latest }
+        // .git 可能是**文件**（worktree / submodule）：里面写着 `gitdir: <路径>`
+        let gitPath = join(pluginDir, '.git')
+        if (!existsSync(gitPath)) return ''
+        let headFile = join(gitPath, 'HEAD')
+        if (statSync(gitPath).isFile()) {
+          const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitPath, 'utf8'))
+          if (!m) return ''
+          const real = resolve(pluginDir, m[1].trim())
+          headFile = join(real, 'HEAD')
+        }
+        const head = readFileSync(headFile, 'utf8').trim()
+        // 正常是 `ref: refs/heads/main`；直接在 detached HEAD 上时是裸 sha
+        if (!head.startsWith('ref:')) return /^[0-9a-f]{7,40}$/i.test(head) ? head : ''
+        const ref = head.slice(4).trim()
+        const refFile = join(dirname(headFile), ref)
+        return existsSync(refFile) ? readFileSync(refFile, 'utf8').trim() : ''
+      } catch { return '' }
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/update') {
+      const localSha = myCommit()
+      const out = {
+        ok: true,
+        current: myVersion(),
+        currentSha: localSha ? localSha.slice(0, 7) : '',
+        latest: '',
+        hasNew: false,
+        page: 'https://github.com/' + GH_REPO,
+      }
+      try {
+        if (updateCache && updateCache.sha === localSha && Date.now() - updateCache.at < 24 * 3600 * 1000) {
+          out.latest = updateCache.latest
+          out.behindBy = updateCache.behindBy
+          out.direction = updateCache.direction
+        } else {
+          const get = async (url) => {
+            const ctrl = new AbortController()
+            const timer = setTimeout(() => ctrl.abort(), 8000)
+            try {
+              const r = await fetch(url, {
+                signal: ctrl.signal,
+                headers: { 'User-Agent': 'dsh-bili-scroll', Accept: 'application/vnd.github+json' },
+              })
+              if (!r.ok) throw new Error('HTTP ' + r.status)
+              return await r.json()
+            } finally { clearTimeout(timer) }
+          }
+          if (!localSha) {
+            // 没有本地 git ⇒ 退回"只看 main 最新那个 commit"，方向判不了
+            const j = await get(`https://api.github.com/repos/${GH_REPO}/commits/main`)
+            out.latest = String(j.sha || '').slice(0, 7)
+            out.direction = 'unknown'
+          } else {
+            const j = await get(`https://api.github.com/repos/${GH_REPO}/compare/${localSha}...main`)
+            out.latest = String(j.commits?.length ? j.commits[j.commits.length - 1].sha : localSha).slice(0, 7)
+            out.direction = String(j.status || '')
+            out.behindBy = Number(j.behind_by || 0)
+            out.aheadBy = Number(j.ahead_by || 0)
+          }
+          updateCache = {
+            at: Date.now(), sha: localSha, latest: out.latest,
+            direction: out.direction, behindBy: out.behindBy,
+          }
         }
       } catch (e) { out.ok = false; out.error = String(e?.message ?? e); return sendJson(res, 200, out) }
-      // ⭐ 要比谁更新，不能只比不相等 —— 否则本地版本高于 npm 时会误报有新版
-      const vnum = (v) => String(v || '').split('.').map((x) => parseInt(x, 10) || 0)
-      const cmp = (a, b) => {
-        const x = vnum(a), y = vnum(b)
-        for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0) }
-        return 0
-      }
-      out.hasNew = Boolean(out.latest) && cmp(out.latest, out.current) > 0
+      /**
+       * 🔴 **方向判据（2026-10-16 实测确认，别凭直觉改）**：
+       *
+       * `compare/<本地sha>...<main>` 返回的 `status` 描述的是 **head（第二个 ref）相对 base**：
+       *   · `ahead`     = main 领先本地 ⇒ **有新版** ← 这才是"该升级"
+       *   · `behind`    = main 落后本地 ⇒ 本地更超前，**不用升**
+       *   · `identical` = 一样 ⇒ 最新
+       *   · `diverged`  = 两边各有提交（分了叉）
+       * ⚠️ **第一版我写成了 `=== 'behind'`，正好写反了** —— 那会永远判不出有新版
+       *    （实测：本地落后的 sha 对比 main 得到的是 `ahead`）。
+       *    实测数据：
+       *      compare/OLD...main → status=ahead,  ahead_by=14, behind_by=0
+       *      compare/main...OLD → status=behind, ahead_by=0,  behind_by=14
+       *    ⇒ 记住：**status 说的是第二个 ref（head）相对第一个（base）**。
+       */
+      out.hasNew = out.direction === 'ahead'
       return sendJson(res, 200, out)
     }
 

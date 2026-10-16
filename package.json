@@ -10,9 +10,9 @@
     "mcp",
     "duty"
   ],
-  "repository": { "type": "git", "url": "git+https://github.com/c1overzz/dsh-bili-scroll.git" },
-  "homepage": "https://github.com/c1overzz/dsh-bili-scroll#readme",
-  "bugs": { "url": "https://github.com/c1overzz/dsh-bili-scroll/issues" },
+  "repository": { "type": "git", "url": "git+https://github.com/jojoman2024/dsh-bili-scroll.git" },
+  "homepage": "https://github.com/jojoman2024/dsh-bili-scroll#readme",
+  "bugs": { "url": "https://github.com/jojoman2024/dsh-bili-scroll/issues" },
   "license": "MIT",
   "type": "module",
   "main": "index.js",

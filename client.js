@@ -77,50 +77,191 @@ window.__ModuleLoader__.load({
      * ⚠️ 模板字符串里**不要写裸反引号**（会截断整个 CSS；库内 `a641d97c` 记过这个坑）。
      */
     const CSS = `
-/* ── 外层：撑满并自己滚（右侧栏比设置页窄，别写死 max-width） ── */
-[data-bd-tabwrap]{display:block;height:100%;overflow:auto;box-sizing:border-box;padding:16px 16px 28px;}
+/* ══════════════════════════════════════════════════════════════════════════
+ * 间距体系 —— **只有一条规则**（2026-10-16 第三次改，照官方实测值重做）
+ *
+ * 🔴 **上一版为什么"间隔全都不统一"**（使用者截图指出）：
+ *    我在**枚举「行型」** —— data-bd-row 给一套 padding、row2 给另一套、
+ *    foot 又一套，而**裸平铺的 label / textarea / select 什么都没有**
+ *    ⇒ 留白取决于"这一项恰好用了哪个包装"，于是有的挤成一团、有的空一块。
+ *
+ * ⭐ **官方的做法（从运行实例量出来的）**：**根本没有多种行型** ——
+ *    每一行都是同一个模板，只有一种间距：
+ *      padding: 16px 0  +  border-bottom: 1px solid rgba(0,0,0,.1)
+ *    行与行之间 margin = 0（节奏完全由 padding + 分隔线给出）。
+ *    实测：连续 6 行高 77/69/147/77/77/75，而行间距恒为 0、padding 恒为 16px 0、
+ *    底线恒为 1px rgba(0,0,0,0.1)。
+ *
+ * ⇒ **改法**：不再枚举「行型」，改成「**分节里的每个直接子元素都算一行**」——
+ *    不管它是 row / label / textarea / select / 按钮组，**一律**拿同一个间距。
+ *    这样"整齐"由**结构**保证，不靠我记得给每个新加的项套对包装。
+ *
+ * ⚠️ 例外只有两个：分节标题（data-bd-h）与紧跟它的那句说明 —— 它们是**标题**不是行。
+ * ⚠️ 本段注释**不能出现反引号**：那会提前闭合整个 CSS 模板串
+ *    （本文件踩过三次，所以有 tools/check-client-css.mjs 那道硬检查）。
+ * ══════════════════════════════════════════════════════════════════════════ */
 
-/* ── 页面与分节 ── */
-[data-bd-page]{display:flex;flex-direction:column;gap:20px;}
-[data-bd-sec]{display:flex;flex-direction:column;}
-[data-bd-h]{font-size:14px;font-weight:600;line-height:22px;
-  color:var(--dsw-alias-label-primary,#0f1115);margin:0 0 4px;}
+/* 外层：撑满并自己滚（右侧栏比设置页窄，别写死 max-width）
+   ⚠️ 上下 padding 交给**顶栏自己**给：见下面 [data-bd-top] 的注释。
+   这里只留左右与底部。 */
+[data-bd-tabwrap]{display:block;height:100%;overflow:auto;box-sizing:border-box;padding:0 16px 32px;}
 
-/* ── 行：**官方设置行的实测规格**（2026-10-16 从运行实例量的）
+/* ── 顶栏：**固定在面板顶部、不跟着滚**（2026-10-16 使用者要求：
+ *    "现在跑一轮和几个状态标识，应该固定浮在顶部不跟着滑动，看要不要有顶满宽度的线分隔"）。
  *
- *   官方那一行是：padding:16px 0 + gap:8px + border-bottom:1px solid rgba(0,0,0,.1)
- *   ⇒ 令牌是 --dsw-alias-border-l2（#0000001a ≈ 10%）。
+ * 为什么要它：状态徽章 + 「现在跑一轮」是**随时要按/要看**的东西，
+ *   滚到下面改设置时就够不着了 ⇒ 钉在顶上。
  *
- * 🔴 **上一版这里有两个错**（使用者截图指出"看不到分隔线"）：
- *   ① 用了 --dsw-alias-border-l1（#0000000a ≈ **4%**）—— 比官方淡 2.5 倍，几乎看不见；
- *   ② padding 只给 10px —— 官方是 16px，行间太挤。
- *
- * ⚠️ **分隔线只给「设置行」**，不给所有 data-bd-row：
- *   行本身只是 flex 容器，同一个属性还用在状态徽章行 / 产物清单行上。
- *   这里用「是 sec 或 sub 的直接子行」来挑出真正的设置行（纯 CSS，不改 JSX）。
+ * 🔴 **它必须占掉自己在文档流里的高度，不能只靠负 margin 提上去**
+ *    （2026-10-16 实测踩到）：第一版写的是
+ *      position:sticky; top:0; margin:-16px -16px 0; padding:16px 16px 12px
+ *    ⇒ 负 margin 把它"提"到了内容流的上方，可 **sticky 仍然占着原来的位置**，
+ *      于是它**盖住了第一个分节的标题**（量出来重叠 16px，「怎么跑」只露半截）。
+ *    ⇒ 现在改为：**tabwrap 不再给上下 padding**（见上），
+ *      由顶栏自己给 padding:16px 0 12px，并**只左右出边**（负 margin 左右各 -16）。
+ *      这样它在流里占的就是自己真实的高度，下面的内容自然排在它下方、不会被盖。
+ * ⭐ 顶满宽度的分隔线：用 box-shadow 画 —— 它**不吃布局**，
+ *   而 border-bottom 会让这一行的宽度比别的行少 1px（右边就露不出头了）；
+ *   而且 sticky 元素的线要跟着它一起走，shadow 最省事。
+ * ⚠️ 背景必须给不透明色：否则下面的内容会从它底下透出来（sticky 经典坑）。
+ * ⚠️ 下面还要留 8px：顶栏与第一个分节的标题紧贴会显得挤（实测量过，原来是 0px）。
  */
-[data-bd-row]{display:flex;align-items:center;gap:8px;}
-[data-bd-sec]>[data-bd-row],[data-bd-sub]>[data-bd-row]{
+[data-bd-top]{position:sticky;top:0;z-index:6;
+  margin:0 -16px 8px;padding:16px 16px 12px;
+  background:var(--dsw-alias-bg-base,#fff);
+  box-shadow:0 1px 0 0 var(--dsw-alias-border-l2,#0000001a);}
+
+/* ── 页面 ── */
+[data-bd-page]{display:flex;flex-direction:column;}
+[data-bd-sec]{display:flex;flex-direction:column;}
+
+/* ⭐⭐⭐ **唯一那条间距规则**：分节 / 子块里的每个直接子元素 = 一行。
+   ⚠️ 顺序要紧：后面几条覆盖必须写在它**之后**才生效。 */
+[data-bd-sec]>*,[data-bd-sub]>*{
   padding:16px 0;
   border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
-/* 一节的最后一行不再拖一条线（否则会和下一节的标题挤在一起显得多余） */
-[data-bd-sec]>[data-bd-row]:last-child{border-bottom:0;}
+/* 一节的最后一项不拖线：否则它会和下一节的上边线贴成"双线" */
+[data-bd-sec]>*:last-child{border-bottom:0;}
 
-[data-bd-row2]{display:flex;gap:8px;padding:12px 0 0;}
+/* 🔴 **sub 内部的每一行都要有线**（2026-10-16 修：使用者截图指出
+ *    「最近一次」和「峰谷时段自动刷」之间没有分隔线）。
+ *    原来这条写的是 [data-bd-sub]>*:last-child **也去线**，
+ *    但 sub 常常**在分节的中间**（它后面还有别的行）⇒ 那条线一去掉就**断了**。
+ *    ⚠️ 只有 sub 本身就是**这一节的最后一项**时，它的最后一行才不该有线
+ *       （否则会和下一节的上边线贴成双线）。这一条已由上面那句覆盖不到，
+ *       所以在这里补一条精确的。
+ */
+[data-bd-sec]>[data-bd-sub]:last-child>*:last-child{border-bottom:0;}
+
+/* 🔴 **[data-bd-sub] 只是个分组壳，不吃行间距、也不画线**（2026-10-16 使用者截图指出
+ *    "上下两条灰边的距离不一样"）：
+ *    它是上面那条规则的直接子元素 ⇒ **自己也会拿到 padding:16px 0 + 底线**，
+ *    而它内部的每个行**又各拿一次** ⇒ 上下叠加成：
+ *      上面 = 16(sub) + 16(row) = 32，下面 = 16(row)（最后一行不画线）
+ *    ⇒ 视觉上就是"上面空一大截、下面贴着线"。
+ *    ⇒ 把它自己的那份去掉，只让**内部的行走那一套规则**。
+ */
+[data-bd-sec]>[data-bd-sub]{padding:0;border-bottom:0;}
+
+/* 🔴 **分节标题上方要有一条线，把"新的一块"隔开**（2026-10-16 使用者要求：
+ *    "大标题跟前面板块的分隔也应该有灰线" → 后来又说"干脆顶满宽度用来做区分"）。
+ *    原来只靠 28px 的空隙区分，太弱、扫一眼看不出换节了。
+ * ⭐ **顶满宽度**：分节本身左右出边（负 margin 抵消 tabwrap 的左右 padding），
+ *    这样那条 border-top 就从面板最左画到最右。
+ *    ⚠️ 出边后要把左右内边距补回来，否则文字会贴到面板边缘。
+ *    ⚠️ 这条要用 border-top 而不是给上一节的最后一行加底线 ——
+ *      后者会让"一节的最后一项不拖线"那条失效、又变成双线。
+ */
+[data-bd-sec]{margin:28px -16px 0;padding:20px 16px 0;
+  border-top:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 第一个分节上面不画（它上面是固定的顶栏，已经有自己的线了） */
+[data-bd-top]+[data-bd-sec]{border-top:0;margin:0 -16px;padding:0 16px;}
+
+/* ── 分节大标题 ──
+   ⭐ **比正文大一号**（2026-10-16 使用者要求："所有大标题的字号都大一号"）。
+      正文那档是官方 font-s-14（14px/22）⇒ 标题用**下一档** font-base-16（16px/24）。
+      ⚠️ 用令牌而不是写死 px —— 尺寸跟着官方设计系统走。
+   ⚠️ 它「不算一行」：不画线、不吃 16px 上下留白（见下面两条覆盖）。 */
+[data-bd-h]{font-size:var(--dsw-font-base-16-font-size,16px);
+  line-height:var(--dsw-font-base-16-line-height,24px);font-weight:600;
+  color:var(--dsw-alias-label-primary,#0f1115);}
+/* 分节标题 + 紧随其后的说明：不算「行」（不画线、不吃 16px 上下留白）
+   🔴 **标题↔说明的间距也要跟别处一样是 4px**（2026-10-16 使用者指出：
+      "大标题和他的描述的间隔也要和其他区统一"）。
+      原来这里写的是标题 padding-bottom:10px + 说明 padding-bottom:2px ⇒ 实际 12px，
+      而普通的「标签↔描述」是 4px ⇒ 大小标题的间距**不是一个数**。
+      ⇒ 改成用与下面那条**同一条规则**（[data-bd-label]+[data-bd-note] 的 4px），
+        这里只管"不画线、不占行间距"。 */
+[data-bd-sec]>[data-bd-h],[data-bd-sub]>[data-bd-h]{padding:0;border-bottom:0;}
+[data-bd-sec]>[data-bd-h]+[data-bd-note],[data-bd-sub]>[data-bd-h]+[data-bd-note]{
+  padding:0;border-bottom:0;margin-top:4px;}
+/* 标题下面到第一个设置项之间留一点，别和上一条混在一起 */
+[data-bd-sec]>[data-bd-h]+[data-bd-note]+*,[data-bd-sec]>[data-bd-h]+*:not([data-bd-note]){
+  margin-top:8px;}
+
+/* ⭐ **「标签 + 描述」这一对，间距恒为 4px**（2026-10-16 实测官方值，修不统一）。
+ *
+ * 🔴 之前的问题是**这个间距取决于 label 恰好被放在哪个容器里**：
+ *      · 放在 [data-bd-row] 的 grow 里 ⇒ 容器是 block、**没有任何间距（0px）**；
+ *      · 放在 [data-bd-field] 里           ⇒ 容器 gap 6px；
+ *      · 官方实测却是恒定的 **4px**（连量 6 行，flex-direction:column 且 gap:4px）。
+ *   ⇒ 所以截图里"标题与描述的间距不统一"—— 有的贴着、有的空一截。
+ *
+ * 现在**不再依赖容器**：直接用相邻兄弟选择器给这一对固定间距。
+ *   · 父容器一律 flex column、**gap 归零**，把间距的职责收回到这里一处；
+ *   · 用 margin-top 而不是 gap，这样 label 后面**没有**描述时不留多余的 4px。
+ *
+ * 🔴🔴 **flex:1 1 0% 是必须的，千万别弄丢**（2026-10-16 我就在这里翻过车）：
+ *    这一条同时管着 grow 与 field 两个容器，我上一版**漏写了 flex:1**
+ *    ⇒ 文字列不再撑满剩余空间 ⇒ **右边的控件（下拉 / 数字框 / 开关）全部左移**、
+ *      各自停在不同位置 —— 截图里一眼就是"全都没右对齐"。
+ *    ⇒ [data-bd-grow] 必须 flex:1（撑满、把控件顶到最右）；
+ *      [data-bd-field] 是**竖排**（控件在下面占满整行），本来就不需要 flex:1。
+ */
+[data-bd-grow],[data-bd-field]{display:flex;flex-direction:column;gap:0;min-width:0;}
+[data-bd-grow]{flex:1 1 0%;}
+[data-bd-label]+[data-bd-note]{margin-top:4px;}
+/* label 后面直接跟控件（field 里那种）：控件与文字之间留 8px */
+[data-bd-label]+[data-bd-ctl],[data-bd-note]+[data-bd-ctl]{margin-top:8px;}
+
+/* 行 / 并排组 / 竖排项：只负责**内部排布**，间距一律由上面那条「唯一规则」给。
+   ⚠️ 这里**不要再写 padding/margin** —— 那正是上一版"间隔不统一"的病根。 */
+[data-bd-row]{display:flex;align-items:center;gap:8px;}
+[data-bd-row2]{display:flex;gap:20px;}
 [data-bd-row2]>*{flex:1;min-width:0;}
-[data-bd-grow]{flex:1 1 0%;min-width:0;}
+/* ⭐ 三等分一行（模型那三个下拉用）：provider / 模型 / 思考档位 各占 1/3。
+   ⚠️ gap 给 8px（比 row2 的 20px 小）—— 右侧栏窄，三个一起排要省地方。
+   ⚠️ 每个 min-width:0 是必须的：不然 select 的长 option 会把格子撑开、挤出容器。 */
+[data-bd-trio]{display:flex;gap:8px;padding-top:8px;}
+[data-bd-trio]>*{flex:1 1 0%;min-width:0;}
+[data-bd-foot]{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+[data-bd-foot] [data-bd-msg]{flex:1 1 100%;}
+
+/* 「竖排项」：label+note 在上、控件占满整行在下（长文本 / 文本域用）。
+   它与 [data-bd-row] 的外间距**完全一样**（同属分节的直接子元素）⇒ 两种形状混着排也齐。
+   ⚠️ 这里**不给 gap** —— 文字与控件之间的间距由上面那条
+      「[data-bd-label]+[data-bd-note] / +[data-bd-ctl]」统一负责，
+      否则这一处又会和别处不一样（这正是上一版"间距不统一"的成因）。 */
+[data-bd-field]{display:flex;flex-direction:column;}
+[data-bd-ctl]{display:flex;gap:8px;}
+[data-bd-ctl]>*{min-width:0;}
+/* 控件在竖排项里可以占满（不像行内那样要跟文字抢宽度） */
+[data-bd-field] [data-bd-input],[data-bd-field] [data-bd-select]{width:100%;}
 
 /* 🔴 行内的控件**不能 width:100%**（2026-10-16 真机截图抓到的布局 bug）：
-   那个 width:100% 在 flex 行里会抢满整行宽，把左边的文字列
-   挤到只剩一个字宽 ⇒ 标题与说明**竖着排成一列字**（截图里「跑在哪」就是那样）。
-   ⇒ 行内一律改成「按内容宽度、可缩、带上下限」，把剩余空间留给文字。
+   那个 width 会抢满整行宽，把左边的文字列挤到只剩一个字宽
+   ⇒ 标题与说明**竖着排成一列字**（截图里「跑在哪」就是那样）。
+   ⇒ 行内一律「按内容宽度、可缩、带上下限」，把剩余空间留给文字。
    ⚠️ 本注释里**不能写反引号** —— 它会提前闭合整个 CSS 模板串，
-      而且报错指向不相干的词（本文件刚踩过，见库内 a641d97c）。 */
+      而且报错指向不相干的词（本文件踩过三次，见库内 a641d97c）。 */
 [data-bd-row]>[data-bd-input],[data-bd-row]>[data-bd-select]{width:auto;flex:0 1 auto;
   min-width:104px;max-width:54%;}
 [data-bd-row]>[data-bd-num]{width:92px;min-width:92px;max-width:92px;text-align:center;}
+/* ⚠️ 行内的按钮**不许被挤到换行**（真机截图抓到过：路径一长，「选择目录」就掉到下一行）。
+   ⇒ 给按钮 flex:none（不参与压缩）+ 让左边的文字列自己缩、自己断词。 */
+[data-bd-row]>[data-bd-btn]{flex:none;}
 [data-bd-row] [data-bd-grow],[data-bd-row] [data-bd-label],[data-bd-row] [data-bd-note]{
-  min-width:0;word-break:break-word;}
+  min-width:0;overflow-wrap:anywhere;}
 
 /* ── 文字：官方那两档（标题 14/22 主色，说明 12/18 三级色） ── */
 [data-bd-label]{font-size:var(--dsw-font-s-14-font-size,14px);line-height:var(--dsw-font-s-14-line-height,22px);
@@ -142,12 +283,13 @@ window.__ModuleLoader__.load({
  *
  * 🔴 **不再缩进、也不再画左侧竖线**（2026-10-16 使用者要求："去掉这种缩进，不要他"）。
  *    旧写法是 margin-left:6px / padding-left:12px / border-left:2px solid …
- *    ⇒ 展开项被推进去一截、左边多一条灰线，跟官方那种「平铺 + 细分隔线」的观感不一致。
- *    ⭐ 现在**靠"顶部一条分隔线"表示从属关系**：展开块与它上面那行之间画一条线，
- *      位置和普通设置行完全对齐，整个面板的重心是一致的。
+ *    ⇒ 展开项被推进去一截、左边多一条灰线，跟官方「平铺 + 细分隔线」的观感不一致。
+ *
+ * ⚠️ **这里也不再自带 border-top**：它的每一行都已被上面那条「唯一规则」
+ *    给了 16px 上下留白 + 底线 ⇒ 展开块的边界本来就清楚。
+ *    再加一条顶线只会和「开关那一行的底线」贴成**双线**。
  */
-[data-bd-sub]{display:flex;flex-direction:column;
-  border-top:1px solid var(--dsw-alias-border-l2,#0000001a);}
+[data-bd-sub]{display:flex;flex-direction:column;}
 
 /* ── 输入类：统一高度/圆角/描边，聚焦用官方焦点环 ── */
 [data-bd-input],[data-bd-select]{width:100%;box-sizing:border-box;padding:7px 10px;
@@ -189,25 +331,53 @@ window.__ModuleLoader__.load({
 [data-bd-sw][data-on] i{left:18px;}
 [data-bd-sw][disabled]{opacity:.45;cursor:default;}
 
-/* ── 提示条：区分 good / warn，用官方语义色 ── */
-[data-bd-msg]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;padding:7px 10px;margin-top:8px;
-  border-radius:var(--dsw-radius-sm,8px);word-break:break-all;
+/* ── 提示条：**浮现式 toast**（2026-10-16）
+ *
+ * 🔴 改之前：提示是**塞在面板里的整块绿条**（runNote / msg / personaMsg 各占一行）
+ *    ⇒ ① 它自己**占排版**，弹一条就把下面的设置往下推、点一次跳一下；
+ *      ② 只有当前滚动到的地方看得见，别处触发的提示等于白弹。
+ *
+ * ⭐ 现在：**浮在面板正中偏下**、**不吃排版**、2.6 秒自动消失（见 say()）。
+ *
+ * 🎨 **样式不沿用它自己那套官方配色**（2026-10-16 使用者要求：
+ *    "不用沿用他之前的风格，就最常见的圆角黑底白字，黑底半透明的那种"）
+ *    ⇒ 半透明黑底 + 白字 + 圆角 + 一点模糊，就是最常见那种 toast。
+ *
+ * 📍 **位置**：横向在**面板**中心、纵向在**屏幕 2/3 处**（= 距屏幕底部 1/3 屏高）。
+ *    这两个尺子不一样，必须靠 JS 量（见 say() 的注释）——
+ *    面板只是屏幕右半边，纯 CSS 的 50% 会落到聊天区。
+ *    ⚠️ 这里 CSS 里的 50% / 66.7% 只是**兜底**（JS 量不到时用）：
+ *      absolute 会被面板那个**滚动容器**带着滚走，所以用 fixed。
+ *    ⚠️ transform 是 -50%,-50%（以 JS 给的坐标为**中心**），与那边算法配套。
+ */
+[data-bd-toast]{position:fixed;z-index:9999;pointer-events:none;
+  left:50%;top:66.667%;transform:translate(-50%,-50%);
+  max-width:min(78%,440px);display:flex;justify-content:center;}
+[data-bd-toast]>div{
+  font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  padding:9px 16px;border-radius:10px;text-align:center;word-break:break-word;
+  color:#fff;background:rgba(0,0,0,.78);
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  box-shadow:0 6px 20px rgba(0,0,0,.22);
+  animation:bd-toast-in .16s ease-out;}
+@keyframes bd-toast-in{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
+
+/* 旧的「占排版的提示条」还留着 —— 少数地方需要**常驻**（比如二维码过期、
+   安装日志这种要看一会儿的），那些仍用 data-bd-msg。 */
+[data-bd-msg]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;padding:8px 10px;
+  border-radius:var(--dsw-radius-sm,8px);word-break:break-word;
   background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary,#61666b);}
 [data-bd-msg][data-good]{color:var(--dsw-alias-state-success-primary,#22c55e);}
 [data-bd-msg][data-warn]{color:var(--dsw-alias-state-warn-primary,#f59e0b);}
 
 /* ── 二维码 ── */
-[data-bd-qr]{display:flex;gap:14px;align-items:flex-start;padding:10px 0;}
+[data-bd-qr]{display:flex;gap:14px;align-items:flex-start;}
 [data-bd-qr] img{width:150px;height:150px;border-radius:var(--dsw-radius-md,12px);background:#fff;padding:6px;}
 
 /* ── 日志块 ── */
-[data-bd-pre]{margin:8px 0 0;padding:9px 10px;border-radius:var(--dsw-radius-sm,8px);max-height:170px;
-  overflow:auto;font-size:11px;line-height:15px;white-space:pre-wrap;word-break:break-all;
+[data-bd-pre]{margin:0;padding:10px;border-radius:var(--dsw-radius-sm,8px);max-height:180px;
+  overflow:auto;font-size:11px;line-height:16px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary,#61666b);}
-
-/* ── 节脚：保存按钮那一行 ── */
-[data-bd-foot]{display:flex;align-items:center;gap:8px;padding-top:12px;flex-wrap:wrap;}
-[data-bd-foot] [data-bd-msg]{margin-top:0;flex:1 1 100%;}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -234,6 +404,34 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-label': '' }, label),
           note ? h('div', { 'data-bd-note': '' }, note) : null),
         h(Switch, { on, onChange, disabled }))
+    }
+
+    /**
+     * ⭐ **一个设置项 = 一个行容器**（2026-10-16 加，修「间隔全都不统一」的结构病根）
+     *
+     * 🔴 **为什么需要它**：原来的面板里，一个设置项有时写成
+     *    `label` + `控件` **两个平级子元素**（比如「关注什么」是一个 label 加一个 textarea）。
+     *    而间距是按「分节的直接子元素」给的 ⇒ **一项被拆成两行、各画一条分隔线**，
+     *    看起来就像两个不相干的设置项；另一些项（ToggleRow）又自带行包装 ⇒ 间距对不上。
+     *
+     * ⇒ 用它把所有项包成**同一个形状**：
+     *    · `row`    —— 一行：左边 label+note，右边控件（开关 / 数字 / 下拉）
+     *    · `stack`  —— 一行：label+note 在上，控件占满整行在下（长文本 / 文本域用）
+     *    两条路的**外间距完全一样**（都由 CSS 那条「唯一规则」给），所以怎么混都齐。
+     *
+     * ⚠️ 别在调用处再写 padding/margin —— 那正是上一版乱掉的原因。
+     */
+    function Field({ label, note, children, stack }) {
+      const text = h('div', { 'data-bd-grow': '' },
+        h('div', { 'data-bd-label': '' }, label),
+        note ? h('div', { 'data-bd-note': '' }, note) : null)
+      if (stack) {
+        return h('div', { 'data-bd-field': '' },
+          h('div', { 'data-bd-label': '' }, label),
+          note ? h('div', { 'data-bd-note': '' }, note) : null,
+          h('div', { 'data-bd-ctl': '' }, children))
+      }
+      return h('div', { 'data-bd-row': '' }, text, children)
     }
 
     function useStatus(intervalMs) {
@@ -264,8 +462,7 @@ window.__ModuleLoader__.load({
       const doPickDirectory = (props && props.doPickDirectory) || null
       const [st, setSt] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
-      const [msg, setMsg] = React.useState('')
-      const [msgTone, setMsgTone] = React.useState('')
+      // （旧的 msg/msgTone 已删：提示统一走 runNote 那个浮现式 toast，见 say()）
       const [kws, setKws] = React.useState(null)
       // ⭐ 搜索相关的四个新设置（2026-10-16 加）：草稿存在本地 state，
       //    与 kws 一样**不能直接绑 cfg**（会被 5 秒轮询冲掉）
@@ -302,8 +499,7 @@ window.__ModuleLoader__.load({
       const [personaSaved, setPersonaSaved] = React.useState(null)   // 服务端那份（用来判"有没有未保存改动"）
       const [personaFile, setPersonaFile] = React.useState('')
       const [personaChars, setPersonaChars] = React.useState(null)
-      const [personaMsg, setPersonaMsg] = React.useState('')
-      const [personaTone, setPersonaTone] = React.useState('')
+      // （旧的 personaMsg/personaTone 已删：保存结果统一走浮现式 toast）
       // ── 模型（2026-10-15 新增）──
       // 清单从 /models 拉（**不硬编码**：DSH 的 provider/模型由使用者装的路由决定）
       const [models, setModels] = React.useState(null)          // [{id,name,models:[{id,name}]}]
@@ -366,10 +562,55 @@ window.__ModuleLoader__.load({
         return () => { alive = false }
       }, [])
 
+      /**
+       * ⭐ **统一的「浮现式」提示**（2026-10-16）。
+       *
+       * 改之前：提示是**塞在面板里的整块绿条**，两个毛病 ——
+       *   ① 它自己**占排版**，弹一条就把下面的设置往下推、点一次跳一下；
+       *   ② 只有当前滚动到的地方看得见，别处触发的提示等于白弹
+       *      （原来还要"镜像到顶部"来打补丁，那正是因为块状提示的毛病）。
+       *
+       * 现在：浮在**面板**正中偏下、**不吃排版**、几秒后自己消失。
+       *
+       * 📍 **为什么坐标要 JS 算**：面板是**右边栏**（只占屏幕右半边）。
+       *    若用纯 CSS 的 `top:68%`，那是**视口**的 68% —— 中间那块是聊天区，
+       *    不是面板。⇒ 先量面板外框（`[data-bd-tabwrap]`），
+       * 📍 **坐标为什么要 JS 算**（横向和纵向用的尺子**不是同一个**，别混）：
+       *    · **横向 = 面板的中心** —— 面板是**右边栏**（只占屏幕右半边）。
+       *      若用 CSS 的 50%，那是**视口**的 50%，落点在聊天区、不是面板。
+       *    · **纵向 = 屏幕的 2/3 处**（即**距屏幕底部 1/3 屏高**，2026-10-16 使用者指定：
+       *      "再往下，应该距离底部 1/3 屏幕高度"）⇒ 这里用 **window.innerHeight**，
+       *      而**不是**面板高度 —— 使用者说的是**屏幕**高度。
+       *    ⚠️ 量不到时（还没挂载完）退回 CSS 里那组默认值，不要不显示。
+       *
+       * ⚠️ 计时器存进 ref，**新提示要清掉旧的** ——
+       *    否则连续保存两次时，第一条的定时器会把第二条提前收走。
+       */
+      const toastTimer = React.useRef(null)
+      const toastBox = React.useRef(null)
       const say = (text, tone) => {
-        setMsg(text); setMsgTone(tone || '')
-        setRunNote(text ? { t: text, tone: tone || '' } : null)   // ⭐ 同时镜像到顶部，免得提示掉到页面最底下看不见
+        if (!text) { setRunNote(null); return }
+        // ⭐ 横向量面板、纵向量屏幕（两把尺子，见上面的注释）
+        let style = null
+        try {
+          const el = toastBox.current?.closest('[data-bd-tabwrap]') || document.querySelector('[data-bd-tabwrap]')
+          const r = el?.getBoundingClientRect()
+          if (r && r.width > 0) {
+            style = {
+              left: Math.round(r.left + r.width / 2) + 'px',
+              // 距屏幕底部 1/3 屏高 ⇒ 屏幕从上往下 2/3 的位置
+              top: Math.round(window.innerHeight * (2 / 3)) + 'px',
+            }
+          }
+        } catch { /* 量不到就用 CSS 默认（视口居中偏下） */ }
+        setRunNote({ t: text, tone: tone || '', style })
+        if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null }
+        // 错误提示留久一点（要看清），成功提示 2.6s 够读
+        const ms = (tone === 'warn' ? 6000 : 2600)
+        toastTimer.current = setTimeout(() => { setRunNote(null); toastTimer.current = null }, ms)
       }
+      // 组件卸载时清掉定时器（不清的话，卸载后 setState 会报警告）
+      React.useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
 
       const patch = async (p, what) => {
         setBusy(JSON.stringify(p))
@@ -422,17 +663,38 @@ window.__ModuleLoader__.load({
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
+      /**
+       * 「检查更新」—— ⭐ 查的是**我们自己的仓库**（`jojoman2024/dsh-bili-scroll`），
+       * 判据是 **commit sha**（不是版本号：fork 之后 version 一直没动，比不出来）。
+       *
+       * 🔴 `direction` 的语义（后端实测确认，别凭直觉改）：
+       *    `ahead`     = 仓库 main 领先本地 ⇒ **有新版**
+       *    `behind`    = main 落后本地     ⇒ 本地更超前，不用升
+       *    `identical` = 一样             ⇒ 最新
+       */
       const onCheckUpdate = async () => {
         setBusy('update')
         try {
           const r = await jget('/update')
-          if (r && r.ok && r.latest) {
-            if (r.hasNew) {
-              setNewVer(r.latest)
-              say('有新版 v' + r.latest + '（你的是 v' + r.current + '）—— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
-            } else say('已经是最新版 v' + r.current, 'good')
+          if (!r || !r.ok) {
+            say('查不到最新版（可能网络不通）：' + ((r && r.error) || '未知原因'), 'warn')
+            return
+          }
+          const mine = r.currentSha ? '（你这版 ' + r.currentSha + '）' : ''
+          if (r.hasNew) {
+            setNewVer(r.latest || '有新版')
+            say('仓库有新版' + (r.latest ? ' ' + r.latest : '') + (r.aheadBy ? '，领先你 ' + r.aheadBy + ' 个提交' : '')
+              + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
+          } else if (!r.currentSha) {
+            // 没有本地 git（比如从 npm 装的）⇒ 只能说"仓库最新到哪儿"
+            say('你这版没带 git 信息，没法比新旧；仓库 main 最新是 ' + (r.latest || '?'), 'warn')
+          } else if (r.direction === 'identical') {
+            say('已经是最新版' + mine, 'good')
+          } else if (r.direction === 'behind') {
+            // main 落后本地（自己改过还没推）⇒ 别谎报"有新版本"
+            say('你这版比仓库 main 还超前' + (r.behindBy ? ' ' + r.behindBy + ' 个提交' : '') + ' —— 不用升级', 'good')
           } else {
-            say('查不到最新版（可能网络不通）—— 你现在的版本是 v' + ((r && r.current) || '?'))
+            say('当前状态：' + (r.direction || '未知') + mine, 'good')
           }
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
@@ -531,19 +793,17 @@ window.__ModuleLoader__.load({
       const onSavePersona = async () => {
         const text = String(persona || '')
         setBusy('persona')
-        setPersonaMsg('')
         try {
           const r = await jpost('/persona', { text })
           if (r?.ok) {
             setPersonaSaved(text)
             setPersonaChars(r.chars ?? text.length)
-            setPersonaTone('good')
-            setPersonaMsg('人设已保存 —— 下一轮就用新的（不用重启）')
-            say('人设已保存', 'good')
+            // ⭐ 走统一的浮现式提示（原来这里还塞了个常驻的 personaMsg 绿条，已去掉）
+            say('人设已保存 —— 下一轮就用新的（不用重启）', 'good')
           } else {
-            setPersonaTone('warn'); setPersonaMsg(r?.error || '保存失败')
+            say(r?.error || '人设保存失败', 'warn')
           }
-        } catch (e) { setPersonaTone('warn'); setPersonaMsg(String(e?.message ?? e)) }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }
 
@@ -583,17 +843,23 @@ window.__ModuleLoader__.load({
        * ══════════════════════════════════════════════════════════════════ */
       return h('div', { 'data-bd-page': '' },
 
-        /* ── 顶部：状态 + 手动跑 ── */
-        h('div', null,
+        /* ⭐ **浮现式提示**：整块面板共用**一个** toast。
+           半透明黑底白字、浮在**面板**正中偏下（屏幕 2/3 处）、不吃排版、2.6 秒自己消失
+           —— 坐标是 say() 量了面板外框与屏幕高度算出来的（见那边的注释）。 */
+        runNote ? h('div', { 'data-bd-toast': '', ref: toastBox, style: runNote.style || undefined },
+          h('div', null, runNote.t)) : null,
+
+        /* ── 顶栏：状态 + 手动跑（⭐ sticky，不跟着滚）── */
+        h('div', { 'data-bd-top': '' },
           h('div', { 'data-bd-row': '' },
-            h('span', { 'data-bd-badge': '' }, `今天已挑 ${st.ranToday} / ${cfg.perDay} 条`),
+            // ⭐ 「今天已挑 N / M 条」那个计数据使用者要求**去掉了**（2026-10-16）——
+            //    它每天归零、又和「拉多少次/记多少条」不是一回事，摆在这儿反而费解。
+            //    ⚠️ `st.ranToday` 后端仍照常统计（`/status` 里有），只是面板不显示了。
             h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
             h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
             h('div', { 'data-bd-grow': '' }),
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
-          runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
-            'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null),
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮'))),
 
         /* ════════ 一、怎么跑（跑在哪 / 什么时候跑 / 一轮挑几条 —— 都是"运行"）════════ */
         h('div', { 'data-bd-sec': '' },
@@ -618,7 +884,17 @@ window.__ModuleLoader__.load({
                 h('div', { 'data-bd-row': '' },
                   h('div', { 'data-bd-grow': '' },
                     h('div', { 'data-bd-label': '' }, '会话建在哪个目录'),
-                    h('div', { 'data-bd-note': '' }, st.frontWorkspace || '（读不到）')),
+                    // 🔴 **这句是上面那项的描述，不是独立一项**（2026-10-16 使用者指出：
+                    //    "下面那句跟上面的设置是一个语义的，不应该被分隔"）。
+                    //    原来它是 sub 的直接子元素 ⇒ 被当成一行、还画了分隔线 ⇒ 看着像两个设置。
+                    //    ⇒ 收进同一个 grow 里，与 label 就是"标题 + 描述"这一对，
+                    //      间距由那条统一的 4px 规则给；没设过目录时才显示。
+                    (cfg.frontWorkspace
+                      ? h('div', { 'data-bd-note': '' }, st.frontWorkspace || '（读不到）')
+                      : h('div', { 'data-bd-note': '' },
+                          '默认放插件家目录下的 front-sessions。',
+                          h('br'),
+                          st.frontWorkspace || ''))),
                   h('button', {
                     'data-bd-btn': '', disabled: wsBusy,
                     onClick: async () => {
@@ -645,7 +921,6 @@ window.__ModuleLoader__.load({
                         },
                       }, '用默认')
                     : null),
-                cfg.frontWorkspace ? null : h('div', { 'data-bd-note': '' }, '默认放插件家目录下的 front-sessions（绝对路径）。'),
                 st.lastFrontSessionId
                   ? h('div', { 'data-bd-row': '' },
                       h('div', { 'data-bd-grow': '' },
@@ -675,71 +950,148 @@ window.__ModuleLoader__.load({
               on: sw(k),
               onChange: (v) => patch({ [k]: v }, win[k].label),
             }))) : null,
+          // ⭐「每天最多挑几条」已挪到「怎么找」那一节的「每次搜取回几条」下面
+          //   （2026-10-16 使用者要求：它与"捞回来怎么挑"是一件事，和"什么时候跑"不是）
+          ),
 
-          h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-grow': '' },
-              h('div', { 'data-bd-label': '' }, '每天最多挑几条'),
-              h('div', { 'data-bd-note': '' }, '填 0 = 不自动刷（还是能手动跑）'
-                + (st.lastRunAt ? `　·　上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}` : ''))),
-            h('input', {
-              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
-              value: perDay ?? '',
-              onChange: (e) => setPerDay(e.target.value),
-              onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
-            }))),
+        /* ════════ 二、用哪个模型（成组 ⇒ 留保存按钮；2026-10-16 挪到「怎么跑」下面）════════
+         *
+         * 挪动的理由（使用者要求）：它和「怎么跑」是一件事 —— 都是"这一轮怎么起"。
+         * 而「怎么找」是"捞回什么"，中间夹着一个模型选择很跳。
+         * ⭐ 同时**压缩成一行**：provider 与模型**并排**、思考档位单独一行，
+         *    不再三项各占一整行（右侧栏窄，三项各一行太占地方）。
+         */
+        (() => {
+          const provs = models || []
+          const cur = provs.find((p) => p.id === mProvider)
+          const mlist = cur?.models || []
+          const isCustom = Boolean(mProvider) && !cur            // 存着一个下拉里没有的 provider（自定义/已下线）
+          return h('div', { 'data-bd-sec': '' },
+            h('div', { 'data-bd-h': '' }, '用哪个模型'),
+            h('div', { 'data-bd-note': '' },
+              '跑一轮时用这里选的模型（覆盖 profile 的默认）。留空 = 用 profile 原本的默认。'),
+            modelsNote ? h('div', { 'data-bd-note': '', 'data-warn': '' }, modelsNote) : null,
 
+            /* ⭐⭐ **三个下拉并排一行**（2026-10-16 使用者要求：
+             *    "模型选择和思考档位并排放一行"、"紧凑一点"）。
+             *    provider / 模型 / 思考档位 各占 1/3 宽。
+             *    ⚠️ 右侧栏窄 ⇒ 每个只有 ~170px，长模型名会被 select 自己截断
+             *      （`title` 属性给了悬停提示，所以不至于看不全）。
+             *    ⚠️ 不再给每个加 label —— 那样又变回三行。
+             *      它是什么，靠下拉里的第一个 option 文字说
+             *      （"（provider 默认）" / "（该 provider 默认）" / "（不指定）"）。
+             */
+            h('div', { 'data-bd-trio': '' },
+              h('select', {
+                'data-bd-select': '', title: 'provider',
+                value: mProvider ?? '',
+                onChange: (e) => { setMProvider(e.target.value); setMModel('') },   // 换 provider 要清掉 model
+              },
+                h('option', { value: '' }, '（provider 默认）'),
+                ...provs.map((p) => h('option', { key: p.id, value: p.id }, `${p.name}（${p.id}）`)),
+                isCustom ? h('option', { value: mProvider }, `${mProvider}（当前值，已不在清单里）`) : null),
+              h('select', {
+                'data-bd-select': '', title: '模型',
+                value: mModel ?? '',
+                disabled: !mProvider,
+                onChange: (e) => setMModel(e.target.value),
+              },
+                h('option', { value: '' }, mProvider ? '（该 provider 默认）' : '（先选 provider）'),
+                ...mlist.map((m) => h('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? `${m.name}（${m.id}）` : m.id)),
+                (mModel && !mlist.some((m) => m.id === mModel))
+                  ? h('option', { value: mModel }, `${mModel}（当前值，已不在清单里）`) : null),
+              h('select', {
+                'data-bd-select': '', title: '思考档位',
+                value: mEffort ?? '',
+                onChange: (e) => setMEffort(e.target.value),
+              },
+                h('option', { value: '' }, '（思考档位）'),
+                ...['off', 'low', 'medium', 'high', 'max'].map((x) => h('option', { key: x, value: x }, x)))),
+
+            h('div', { 'data-bd-foot': '' },
+              h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveModel }, '保存模型'),
+              h('div', { 'data-bd-note': '' },
+                mProvider && mModel ? `当前：${mProvider} / ${mModel}${mEffort ? ` · ${mEffort}` : ''}`
+                  : '当前：未指定（用 profile 默认）')))
+        })(),
         /* ════════ 二、怎么找（关注什么 + 怎么搜 —— 都是"捞什么回来"）════════ */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '怎么找'),
           h('div', { 'data-bd-note': '' }, '决定它从 B站 捞回什么。改完下一轮生效。'),
 
-          h('div', { 'data-bd-label': '' }, '关注什么（一行一个）'),
-          h('textarea', {
-            'data-bd-input': '', rows: 5,
-            placeholder: '一行一个主题；留空用内置那几组\n例：\n有关大模型的论文\nDSH 插件',
-            value: kws ?? '', onChange: (e) => setKws(e.target.value),
+          h(Field, {
+            label: '关注什么（一行一个）',
+            stack: true,
+            children: h('textarea', {
+              'data-bd-input': '', rows: 5,
+              placeholder: '一行一个主题；留空用内置那几组\n例：\n有关大模型的论文\nDSH 插件',
+              value: kws ?? '', onChange: (e) => setKws(e.target.value),
+            }),
           }),
-          h('div', { 'data-bd-label': '' }, '这些字怎么用'),
-          h('select', {
-            'data-bd-input': '', value: kwMode ?? 'llm',
-            onChange: (e) => { setKwMode(e.target.value); patch({ keywordMode: e.target.value }, '关键词用法') },
-          },
-            h('option', { value: 'llm' }, '当「主题」—— 让模型自己组合出多种搜索词（推荐）'),
-            h('option', { value: 'fixed' }, '当「现成搜索词」—— 每行原样拿去搜')),
-          h('div', { 'data-bd-note': '' }, kwMode === 'fixed'
-            ? '每行会原样当搜索词。宽泛的词（如「有关大模型的论文」）搜回来多半是入门教程和水论文技巧。'
-            : '模型会按这些主题自己编几个更具体的搜索词、一轮里换 3~5 组去搜，攒够候选才开始筛。'),
+          h(Field, {
+            label: '这些字怎么用',
+            note: kwMode === 'fixed'
+              ? '每行会原样当搜索词。宽泛的词（如「有关大模型的论文」）搜回来多半是入门教程和水论文技巧。'
+              : '模型会按这些主题自己编几个更具体的搜索词、一轮里换 3~5 组去搜，攒够候选才开始筛。',
+            stack: true,
+            children: h('select', {
+              'data-bd-input': '', value: kwMode ?? 'llm',
+              onChange: (e) => { setKwMode(e.target.value); patch({ keywordMode: e.target.value }, '关键词用法') },
+            },
+              h('option', { value: 'llm' }, '当「主题」—— 让模型自己组合出多种搜索词（推荐）'),
+              h('option', { value: 'fixed' }, '当「现成搜索词」—— 每行原样拿去搜')),
+          }),
 
-          h('div', { 'data-bd-row2': '' },
-            h('div', null,
-              h('div', { 'data-bd-label': '' }, '按什么排序'),
-              h('select', {
-                'data-bd-input': '', value: sOrder ?? 'totalrank',
-                onChange: (e) => { setSOrder(e.target.value); patch({ searchOrder: e.target.value }, '搜索排序') },
-              },
-                h('option', { value: 'totalrank' }, '综合（B站 默认，偏热度）'),
-                h('option', { value: 'pubdate' }, '最新（按发布时间）'),
-                h('option', { value: 'click' }, '播放量'),
-                h('option', { value: 'dm' }, '弹幕数'))),
-            h('div', null,
-              h('div', { 'data-bd-label': '' }, '只看最近几天'),
-              h('input', {
-                'data-bd-input': '', type: 'number', min: 0, max: 365,
-                value: sDays ?? '', onChange: (e) => setSDays(e.target.value),
-                onBlur: () => { const n = Math.max(0, Math.min(Number(sDays) || 0, 365)); setSDays(String(n)); patch({ searchDays: n }, '只看最近几天') },
-              }))),
-          h('div', { 'data-bd-note': '' },
-            '「只看最近几天」：0 = 不过滤。'
-            + '要按时间筛**只能**在这里设 —— B站 搜索结果里不带发布时间，捞回来本地没法再筛。'),
+          h(Field, {
+            label: '按什么排序',
+            stack: true,
+            children: h('select', {
+              'data-bd-input': '', value: sOrder ?? 'totalrank',
+              onChange: (e) => { setSOrder(e.target.value); patch({ searchOrder: e.target.value }, '搜索排序') },
+            },
+              h('option', { value: 'totalrank' }, '综合（B站 默认，偏热度）'),
+              h('option', { value: 'pubdate' }, '最新（按发布时间）'),
+              h('option', { value: 'click' }, '播放量'),
+              h('option', { value: 'dm' }, '弹幕数')),
+          }),
+          h(Field, {
+            label: '只看最近几天',
+            note: '0 = 不过滤。要按时间筛**只能**在这里设 —— B站 搜索结果里不带发布时间，捞回来本地没法再筛。',
+            children: h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 365,
+              value: sDays ?? '', onChange: (e) => setSDays(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(sDays) || 0, 365)); setSDays(String(n)); patch({ searchDays: n }, '只看最近几天') },
+            }),
+          }),
 
           h('div', { 'data-bd-row': '' },
             h('div', { 'data-bd-grow': '' },
               h('div', { 'data-bd-label': '' }, '每次搜取回几条'),
-              h('div', { 'data-bd-note': '' }, '每搜一组取回几条来读；再从中挑「每天最多挑几条」')),
+              h('div', { 'data-bd-note': '' }, '每搜一组取回几条来读')),
             h('input', {
               'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 50,
               value: sNum ?? '', onChange: (e) => setSNum(e.target.value),
               onBlur: () => { const n = Math.max(1, Math.min(Number(sNum) || 20, 50)); setSNum(String(n)); patch({ searchNum: n }, '每次取回几条') },
+            })),
+
+          /* ⭐ 「每天最多挑几条」从「怎么跑」挪到这儿（2026-10-16 使用者要求）：
+             它与上面那条是**同一件事的两端**（捞回来多少 → 最后留下几条），
+             而和「什么时候跑」不是一回事。
+             ⚠️ 标题按使用者后来指定的叫法改成「**每次**最多记几条」（2026-10-16）。
+                注意语义：`perDay` 在后端其实仍是**每日**上限
+                （`ranToday` 是当天计数、跨天清零），
+                所以这个"每次"是**使用者的叫法**，不是后端行为。
+                真要改成"每轮"上限，得同时改后端计数器。 */
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '每次最多记几条'),
+              h('div', { 'data-bd-note': '' }, '填 0 = 不自动跑（还是能手动跑）'
+                + (st.lastRunAt ? `　·　上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}` : ''))),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
+              value: perDay ?? '',
+              onChange: (e) => setPerDay(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每次最多记几条') },
             })),
 
           h('div', { 'data-bd-note': '' },
@@ -748,24 +1100,26 @@ window.__ModuleLoader__.load({
 
           h('div', { 'data-bd-foot': '' },
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存关键词'),
-            h('div', { 'data-bd-note': '' }, '（上面这些是长文本 / 成组的，所以要点保存；其余改完即时生效）'),
-            msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
+            h('div', { 'data-bd-note': '' }, '（上面这些是长文本 / 成组的，所以要点保存；其余改完即时生效）'))),
 
         /* ════════ 三、怎么写（产物形态 —— 独立一档，不再塞在「关注什么」里）════════ */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '怎么写'),
           h('div', { 'data-bd-note': '' }, '挑中的每条视频各写一份 md 笔记；改完即时生效。'),
-          h('div', { 'data-bd-label': '' }, '写多细'),
-          h('select', {
-            'data-bd-input': '', value: rl ?? 'full',
-            onChange: (e) => { setRl(e.target.value); patch({ reportLevel: e.target.value }, '产物形态') },
-          },
-            h('option', { value: 'full' }, '完整笔记 —— 讲了什么 / 关键点 / 为什么值得（默认）'),
-            h('option', { value: 'brief' }, '薄 —— 结构保留，但正文各压到两三行'),
-            h('option', { value: 'off' }, '不写 —— 只发评论，不生成文件')),
-          h('div', { 'data-bd-note': '' }, rl === 'off'
-            ? '不写任何文件（挑中仍会记进判重表）。'
-            : '写进产物目录，文件名是「标题-YYMMDD.md」。')),
+          h(Field, {
+            label: '写多细',
+            note: rl === 'off'
+              ? '不写任何文件（挑中仍会记进判重表）。'
+              : '写进产物目录，文件名是「标题-YYMMDD.md」。',
+            stack: true,
+            children: h('select', {
+              'data-bd-input': '', value: rl ?? 'full',
+              onChange: (e) => { setRl(e.target.value); patch({ reportLevel: e.target.value }, '产物形态') },
+            },
+              h('option', { value: 'full' }, '完整笔记 —— 讲了什么 / 关键点 / 为什么值得（默认）'),
+              h('option', { value: 'brief' }, '薄 —— 结构保留，但正文各压到两三行'),
+              h('option', { value: 'off' }, '不写 —— 只发评论，不生成文件')),
+          })),
 
         /* ════════ 四、说不说话（评论 —— 纯"说"的事）════════ */
         h('div', { 'data-bd-sec': '' },
@@ -789,15 +1143,17 @@ window.__ModuleLoader__.load({
                 onChange: (e) => setPerRound(e.target.value),
                 onBlur: () => { const n = Math.max(1, Math.min(Number(perRound) || 1, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
               })),
-            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
-            h('input', {
-              'data-bd-input': '', value: mention ?? '',
-              placeholder: '填 B站 昵称；留空 = 不发评论',
-              onChange: (e) => setMention(e.target.value),
-              onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
-            }),
-            h('div', { 'data-bd-note': '' }, '留空就不发评论了 —— 评论存在的意义就是 @ 那一下。'
-              + '⚠️ 要跟 B站 昵称**逐字一致**。')) : null,
+            h(Field, {
+              label: '要 @ 谁（B站 昵称）',
+              note: '留空就不发评论了 —— 评论存在的意义就是 @ 那一下。⚠️ 要跟 B站 昵称**逐字一致**。',
+              stack: true,
+              children: h('input', {
+                'data-bd-input': '', value: mention ?? '',
+                placeholder: '填 B站 昵称；留空 = 不发评论',
+                onChange: (e) => setMention(e.target.value),
+                onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
+              }),
+            })) : null,
 
           h(ToggleRow, {
             label: '回复评论（只回楼中楼）',
@@ -839,50 +1195,6 @@ window.__ModuleLoader__.load({
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装（进度）：' : '转写依赖的日志（末尾）：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
-        /* ════════ 六、用哪个模型（成组 ⇒ 留保存按钮）════════ */
-        (() => {
-          const provs = models || []
-          const cur = provs.find((p) => p.id === mProvider)
-          const mlist = cur?.models || []
-          const isCustom = Boolean(mProvider) && !cur            // 存着一个下拉里没有的 provider（自定义/已下线）
-          return h('div', { 'data-bd-sec': '' },
-            h('div', { 'data-bd-h': '' }, '用哪个模型'),
-            h('div', { 'data-bd-note': '' },
-              '跑一轮时用这里选的模型（覆盖 profile 的默认）。留空 = 用那个 profile 原本的默认。'),
-            modelsNote ? h('div', { 'data-bd-note': '', 'data-warn': '' }, modelsNote) : null,
-            h('div', { 'data-bd-row2': '' },
-              h('select', {
-                'data-bd-select': '',
-                value: mProvider ?? '',
-                onChange: (e) => { setMProvider(e.target.value); setMModel('') },   // 换 provider 要清掉 model
-              },
-                h('option', { value: '' }, '（不指定，用 profile 默认）'),
-                ...provs.map((p) => h('option', { key: p.id, value: p.id }, `${p.name}（${p.id}）`)),
-                isCustom ? h('option', { value: mProvider }, `${mProvider}（当前值，已不在清单里）`) : null),
-              h('select', {
-                'data-bd-select': '',
-                value: mModel ?? '',
-                disabled: !mProvider,
-                onChange: (e) => setMModel(e.target.value),
-              },
-                h('option', { value: '' }, mProvider ? '（该 provider 默认）' : '（先选 provider）'),
-                ...mlist.map((m) => h('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? `${m.name}（${m.id}）` : m.id)),
-                (mModel && !mlist.some((m) => m.id === mModel))
-                  ? h('option', { value: mModel }, `${mModel}（当前值，已不在清单里）`) : null)),
-            h('div', { 'data-bd-row2': '' },
-              h('select', {
-                'data-bd-select': '',
-                value: mEffort ?? '',
-                onChange: (e) => setMEffort(e.target.value),
-              },
-                h('option', { value: '' }, '（思考档位：不指定）'),
-                ...['off', 'low', 'medium', 'high', 'max'].map((x) => h('option', { key: x, value: x }, x)))),
-            h('div', { 'data-bd-foot': '' },
-              h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveModel }, '保存模型'),
-              h('div', { 'data-bd-note': '' },
-                mProvider && mModel ? `当前：${mProvider} / ${mModel}${mEffort ? ` · ${mEffort}` : ''}`
-                  : '当前：未指定（用 profile 默认）')))
-        })(),
 
         /* ════════ 七、它的人设（长文本 ⇒ 留保存按钮）════════ */
         h('div', { 'data-bd-sec': '' },
@@ -913,12 +1225,7 @@ window.__ModuleLoader__.load({
               personaChars != null ? h('br') : null,
               '存本地：', h('code', null, personaFile || ''),
               h('br'),
-              '每一轮开始前现读这个文件 —— 保存后**立刻生效**，不用重启 dsh。'),
-            personaMsg ? h('div', {
-              'data-bd-msg': '',
-              'data-good': personaTone === 'good' ? '' : undefined,
-              'data-warn': personaTone === 'warn' ? '' : undefined,
-            }, personaMsg) : null) : null),
+              '每一轮开始前现读这个文件 —— 保存后**立刻生效**，不用重启 dsh。')) : null),
 
         /* ════════ 八、环境与账号 ════════ */
         h('div', { 'data-bd-sec': '' },
@@ -932,7 +1239,9 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: busy === 'login', onClick: onLoginStart }, '扫码登录'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'check', onClick: onCheck }, '测一下'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'update', onClick: onCheckUpdate }, '检查更新'),
-            newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade }, '升级到 v' + newVer) : null),
+            // ⚠️ `newVer` 现在装的是 **commit sha 前 7 位**（不是版本号）——
+            //    所以按钮上**不要**再写 "v" 前缀（那会看着像个版本号）。
+            newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade }, '升级到 ' + newVer) : null),
           loginState ? h('div', { 'data-bd-msg': '', 'data-good': loginTone === 'good' ? '' : undefined, 'data-warn': loginTone === 'warn' ? '' : undefined }, loginState) : null,
           login?.qr ? h('div', { 'data-bd-qr': '' },
             h('img', { src: login.qr, alt: 'B站登录二维码' }),
