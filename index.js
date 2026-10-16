@@ -30,7 +30,7 @@ const createUserMessage = hostDeps.createUserMessage
 
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname, resolve, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
@@ -298,6 +298,37 @@ export function apply(ctx, config) {
     return capped
   }
 
+  /* ─────────────── 回复细则（reply） ───────────────
+   * `reply.md` 与 `duty.md` / `persona.md` 都不同，它是**两者的混合体**：
+   *   · 有**出厂源**（`<插件包>\prompts\reply.md`）—— 像章程；
+   *   · 又**允许使用者在面板里改**、改了不被覆盖 —— 像人设。
+   *
+   * 于是 `ensureHomeFiles` 里给它的是 `overwrite: false`（只铺一次）：
+   *   ① 全新安装 ⇒ 家目录里有出厂那份，开箱能用 ✓
+   *   ② 使用者改过 ⇒ **永不覆盖** ✓（这是"可编辑"的前提）
+   *   ③ 想让家目录那份回到出厂 ⇒ 面板的「恢复默认」（走 readReplyDefault）
+   *
+   * ⭐ 每轮**现读**（见 promptFor）⇒ 改完即时生效，与 persona 一样是热加载。
+   * 🔴 **只在「回复评论」开着时才注入**（那 1000+ 字不进不开的轮次）。
+   */
+  const replyFile = join(stateDir, 'reply.md')
+  /** 出厂源（只读；用来铺初值 + 「恢复默认」） */
+  const replyDefaultFile = join(pluginDir, 'prompts', 'reply.md')
+
+  const readReply = () => {
+    try { return readFileSync(replyFile, 'utf8') } catch { return '' }
+  }
+  const readReplyDefault = () => {
+    try { return readFileSync(replyDefaultFile, 'utf8') } catch { return '' }
+  }
+  const writeReply = (text) => {
+    const s = String(text ?? '')
+    // 上限保护：它整份会被塞进每轮提示词
+    const capped = s.length > 200_000 ? s.slice(0, 200_000) : s
+    writeFileSync(replyFile, capped, 'utf8')
+    return capped
+  }
+
   ensureHomeFiles(pluginDir, stateDir, log)
 
   /* ── 设置命名空间：让 DSH 自带的「插件设置」能编辑这份 Config ──
@@ -358,6 +389,114 @@ export function apply(ctx, config) {
    *    所以手工增删行不会破坏它。
    */
   const seenFile = join(stateDir, 'seen.md')
+
+  /**
+   * ⭐ **对外发言账本**（`replies.json`，2026-10-16 两轮迭代后的最终结构）。
+   *
+   * 为什么**独立于 seen.md**：
+   *   · `seen.md` 的键是 **BV 号**（"这条视频占过使用者注意力"），
+   *     而且是**手工可编辑的 markdown 表** ⇒ 往里加机器字段会弄乱人的表格；
+   *   · 本账本要记的是**发言**（回谁、评论了哪条）＋**每轮额度**，键与语义都不同。
+   *
+   * ── 结构 ──
+   * {
+   *   "rounds": {                        // ⭐ 每轮一条（配额靠它，O(1) 查）
+   *     "<roundId>": { at, why, replies: ["<source_id>"], comments: ["<BV>"] }
+   *   },
+   *   "replies": {                       // ⭐ 收到的回复（去重靠它）
+   *     "<source_id>": { at, bvid, myRpid, user, mid, snippet, repliedAt?, roundId? }
+   *   }
+   * }
+   *
+   * ── 为什么这么分（这是被"要快速取所需信息"逼出来的）──
+   *   ⭐ **配额查询只读 `rounds`**：`rounds[id].replies.length` 一次读完，
+   *      不用去扫 `replies` 那几十上百条（那是 O(n)，每轮回一条就重扫一次）。
+   *   ⭐ **去重查询只读 `replies`**：`replies[source_id].repliedAt` 有没有 ⇒ 回没回过。
+   *   ⭐ 两边都带 `roundId` ⇒ **能交叉核对**（排查"配额说回了 2 条、可 replies 里只有 1 条"这类不一致）。
+   *
+   * ── 两个额度**分开算**（使用者定的）──
+   *   `rounds[id].replies.length`  ↔ `cfg.replyPerRound`
+   *   `rounds[id].comments.length` ↔ `cfg.commentPerRound`
+   *   （两个旋钮各自独立，所以额度也各自独立，不共享总额。）
+   *
+   * 🔴 **这套硬闸只在前台模式生效** —— 后台（headless）那一轮用的是 **MCP 原始工具**，
+   *    插件根本没加载，拦不住（那一路只能靠提示词，见 charter 里的说明）。
+   */
+  const ledgerFile = join(stateDir, 'replies.json')
+
+  /** 整个账本（读不到/坏了就当空的，别让它拦着自己的活干） */
+  const readLedger = () => {
+    const d = readJson(ledgerFile, {})
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return { rounds: {}, replies: {} }
+    return {
+      rounds: d.rounds && typeof d.rounds === 'object' && !Array.isArray(d.rounds) ? d.rounds : {},
+      replies: d.replies && typeof d.replies === 'object' && !Array.isArray(d.replies) ? d.replies : {},
+      // ⚠️ **兼容旧结构**（第一版是 `{ "<source_id>": {...} }` 直接摊在顶层）。
+      //    本机当时还没有真数据（生产家目录里根本没这个文件），但**万一**有人已经跑过，
+      //    那些顶层键就当成旧 replies 收进来 —— 别让它们凭空消失。
+      ...(() => {
+        const legacy = {}
+        for (const [k, v] of Object.entries(d)) {
+          if (k === 'rounds' || k === 'replies') continue
+          if (v && typeof v === 'object' && (v.repliedAt || v.myRpid)) legacy[k] = v
+        }
+        return Object.keys(legacy).length ? { replies: { ...legacy, ...d.replies } } : {}
+      })(),
+    }
+  }
+  const writeLedger = (obj) => {
+    try { writeJson(ledgerFile, obj); return true } catch { return false }
+  }
+
+  /**
+   * ⭐ **当前轮次 id** —— 由 `runDuty()` 在每轮开头写进 `round.json`。
+   *
+   * 为什么要落盘一个文件：**工具在另一个进程里执行**（前台是主应用里那个会话、
+   * 后台是 headless 子进程），它**不知道**自己是哪一轮 ——
+   * `execute` 的上下文里只有 `callId` / `agent`，**没有轮次 id**（查过 dsh-tools 的类型定义）。
+   * ⇒ 只能由插件在起轮时把 id 写下去，工具执行时读回来。
+   *
+   * ⚠️ 读不到（比如手工单独调工具、或刚升级还没跑过一轮）⇒ 返回 ''，
+   *    那时**不做配额判断**（宁可放行也不要因为拿不到 id 就把功能锁死）。
+   */
+  const roundFile = join(stateDir, 'round.json')
+  const readRoundId = () => {
+    try {
+      const r = readJson(roundFile, {})
+      return String(r?.id ?? '')
+    } catch { return '' }
+  }
+
+  /** 本轮已用掉的额度（读 `rounds`，O(1)） */
+  const roundUsage = (kind) => {
+    const id = readRoundId()
+    if (!id) return { id: '', used: 0, limit: 0, over: false, known: false }
+    const led = readLedger()
+    const r = led.rounds[id] || {}
+    const used = Array.isArray(r[kind]) ? r[kind].length : 0
+    const limit = kind === 'comments'
+      ? Math.max(1, Math.floor(Number(cfg.commentPerRound) || 1))
+      : Math.max(1, Math.floor(Number(cfg.replyPerRound) || 1))
+    return { id, used, limit, over: used >= limit, known: true }
+  }
+
+  /**
+   * 记一笔"本轮用了一个额度"。
+   * ⚠️ **只在真发成功之后调** —— 先记后发的话，发失败也会占掉额度。
+   */
+  const markRoundUse = (kind, key) => {
+    const id = readRoundId()
+    if (!id) return false
+    const led = readLedger()
+    const r = led.rounds[id] || { at: new Date().toISOString(), why: '', replies: [], comments: [] }
+    const arr = Array.isArray(r[kind]) ? r[kind] : []
+    if (!arr.includes(key)) arr.push(key)
+    led.rounds[id] = { ...r, [kind]: arr }
+    // 轮次记录别无限攒：只留最近 60 轮
+    const ids = Object.keys(led.rounds)
+    if (ids.length > 60) for (const k of ids.slice(0, ids.length - 60)) delete led.rounds[k]
+    return writeLedger(led)
+  }
 
   /**
    * 解析 seen.md → Map<bvid, {at, kind, rpid, note}>
@@ -616,7 +755,7 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bili_read',
-    description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 判重表 seen.md / 日报 out/*.md …）。\n'
+    description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 回复细则 reply.md / 判重表 seen.md / 产物 reports/*.md …）。\n'
       + '⭐ **刷一轮读章程就用它** —— 前台会话的工作区是另一个目录，普通文件工具**读不到**家目录里的章程。',
     parameters: {
       path: { type: 'string', description: '文件路径：相对家目录（如 `duty.md`）或绝对路径，都行' },
@@ -761,11 +900,18 @@ export function apply(ctx, config) {
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
       + '除非本人当场让你发（那时传 force: true）。\n'
       + '🔁 判重：**只有"真评论过"才会被拦**（已发成功的会记进 `seen.md`；再发同一个 BV 被拦，要硬发传 `repeat: true`）。\n'
-      + '   ⭐ 「看过」「挑中」**不算**评论过 —— 那些只是不进候选池，不影响你发评论。',
+      + '   ⭐ 「看过」「挑中」**不算**评论过 —— 那些只是不进候选池，不影响你发评论。\n'
+      + '🔴🔴 **每轮额度是硬闸**（设置页那两个「每轮最多…」旋钮）：\n'
+      + '   · 带 `rpid` 或 `replyTo` ⇒ 算**回复**，跟「每轮最多回几条」比；\n'
+      + '   · 都不带 ⇒ 算**新评论**，跟「每轮最多发几条评论」比。\n'
+      + '   超了会**直接打回**（回执里 `quotaExceeded: true` + 已用/上限），不是提醒 —— 别硬试。\n'
+      + '   ⚠️ 额度**按轮算**，下一轮重新开始。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
-      rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
+      rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）；回楼中楼时传 bili_replies 给的 myRpid' },
+      root: { type: 'number', description: '楼层根评论 id（回楼中楼时传 bili_replies 给的 hisRpid；不填就退回用 rpid，实测也能落对）' },
+      replyTo: { type: 'string', description: '⭐ 回楼中楼时**必传**：bili_replies 给的 hisRpid（他新写那条的 id）—— 插件靠它记账、免得重复回复同一个人' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
       repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
     },
@@ -809,7 +955,55 @@ export function apply(ctx, config) {
             + '确实要重发就传 repeat: true。',
         }
       }
-      const r = await call('bili_reply', { bvid, text: String(args.text ?? ''), rpid: Number(args.rpid) || 0 })
+      /**
+       * ⭐⭐ **每轮额度硬闸**（2026-10-16 加，使用者要求："超过时要打回，
+       *      并且回执已经超过设置的限额"）。
+       *
+       * 判据 —— 这一下到底是"回别人的评论"还是"发新评论"：
+       *   · **回复**：带了 `rpid`（回某条评论）或 `replyTo`（= 通知里的 source_id）；
+       *   · **新评论**：两者都没有。
+       * ⇒ 两个额度**分开算**（使用者定的：两个旋钮各自设置，所以各自独立）。
+       *
+       * 🔴 **只在发之前查、发成功后才记** —— 顺序反了的话，发失败也会占掉额度。
+       * ⚠️ 拿不到轮次 id（手工单独调工具、或刚升级还没跑过一轮）⇒ `known=false`
+       *    ⇒ **不做判断、放行**（宁可放行，也不要因为读不到 id 就把功能锁死）。
+       * ⚠️ **前台专属**：后台那轮用的是 MCP 原始工具，根本不经过这里。
+       */
+      const isReply = (Number(args.rpid) || 0) !== 0 || String(args.replyTo ?? '').trim() !== ''
+      const quota = roundUsage(isReply ? 'replies' : 'comments')
+      if (quota.known && quota.over) {
+        return {
+          ok: false,
+          blocked: true,
+          quotaExceeded: true,
+          kind: isReply ? 'reply' : 'comment',
+          used: quota.used,
+          limit: quota.limit,
+          hint: (isReply
+            ? `本轮**回复额度已用完**：设置里「每轮最多回几条」= ${quota.limit} 条，你已经回了 ${quota.used} 条。`
+            : `本轮**评论额度已用完**：设置里「每轮最多发几条评论」= ${quota.limit} 条，你已经发了 ${quota.used} 条。`)
+            + ' ⇒ **这一条不再发**（额度按"轮"算，下一轮重新开始）。'
+            + '确实要超发就调大设置页对应的那个数字。',
+        }
+      }
+
+      let r
+      try {
+        r = await call('bili_reply', {
+          bvid, text: String(args.text ?? ''), rpid: Number(args.rpid) || 0,
+          // ⭐ `root`（2026-10-16）：回**楼中楼**时要带上"楼层根"。
+          //    实测（同年同日，真发+读回+删）：传 `root=parent=rpid` 能正确落在楼中楼；
+          //    传 `root=rpid, parent` 省略**也能**落对 ⇒ 两种都行。
+          //    但从 `bili_replies` 拿到的是**通知里的 source_id**（他新写的那条），
+          //    它才是"要回的那条"；而 `root` 应当是**楼层根**。
+          //    ⇒ 让调用方显式传，拿不到就退回 rpid（与 MCP 的默认行为一致）。
+          root: Number(args.root) || 0,
+        })
+      } catch (e) {
+        // ⚠️ 与 bili_replies 同理：MCP 不可用时 `call` 会抛，包起来给人话。
+        //    ⚠️ 这里**不能** markSeen —— 评论没发出去，记了会让这条被永久跳过。
+        return { ok: false, error: `发评论失败：${e?.message ?? e}`, hint: '可能是 MCP 没起来、B站 登录过期、或被风控。这条**没发出去**，没记账，可以稍后重试。' }
+      }
       // ⭐ 发成功才记账（失败还记，会让一条本该重试的视频被永久跳过）。
       //    ⚠️ 回执可能是字符串（MCP 返回 JSON 文本）——两种都认。
       let rec = r
@@ -823,8 +1017,140 @@ export function apply(ctx, config) {
           rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '',
           note: String(args.text ?? '').slice(0, 40),
         })
+        // ⭐ **记本轮的额度用量**（两种都记，但记在各自的格子里）——
+        //    ⚠️ 必须在**真发成功之后**：先记后发的话，发失败也占掉额度。
+        //    ⚠️ 索引键：**回复**用 source_id（`replyTo`，没有就退回 rpid），**新评论**用 BV。
+        markRoundUse(isReply ? 'replies' : 'comments',
+          isReply ? (String(args.replyTo ?? '').trim() || String(Number(args.rpid) || '')) : bvid)
+
+        // ⭐ 回复账本：只在**真回成功**时写 `repliedAt` ⇒ `bili_replies` 才会把这条摘掉。
+        //    用 `args.replyTo`（= 通知里的 source_id / hisRpid）当键。
+        //    ⚠️ 不写的话，同一条会被反复列出来 ⇒ 可能重复回复同一个人。
+        const rt = String(args.replyTo ?? '').trim()
+        if (rt) {
+          try {
+            const led = readLedger()
+            led.replies[rt] = {
+              ...(led.replies[rt] || {}),
+              repliedAt: new Date().toISOString(),
+              at: led.replies[rt]?.at || dayKey(),
+              roundId: readRoundId(),          // ⭐ 与 rounds 交叉核对用
+            }
+            writeLedger(led)
+          } catch { /* 记账失败不该让"已发出的评论"变成失败 */ }
+        }
       }
       return r
+    },
+  })
+
+  tool({
+    name: 'bili_replies',
+    description: '⭐ **看谁回复了「插件自己发的那条评论」** —— 想回评论时先调这个。\n'
+      + '🔴 **只返回"回插件那条评论"的**：回复**使用者本人**（人工发的评论）的**不会给你** ——\n'
+      + '   那种一律不要回（这是硬过滤，不是让你自己判断）。\n'
+      + '🔁 **已经回过的不会再返回**（去重账本 `replies.json`）。\n'
+      + '⭐ 回的时候：把返回里的 `myRpid` 当 `rpid`、`hisRpid` 当 `root`，传给 `bili_reply`。\n'
+      + '⚠️ 这里**不含 @ 和点赞通知**（只看回复），那是两回事。',
+    parameters: {
+      all: { type: 'boolean', description: 'true = 连"已回过的"也列出来（默认只给还没回的）' },
+    },
+    async execute(args) {
+      // ⚠️ **必须包 try**：MCP 子进程没起来 / 登录过期时 `call` 会**抛异常**，
+      //    而工具抛异常在那一轮里是个难看的失败。其它工具都返回结构化错误，这里也照做。
+      //    （2026-10-16 探针实测：沙箱里没 venv ⇒ `MCP 子进程退出（code=1）` 直接抛出来。）
+      let r
+      try {
+        r = await call('bili_received_replies', {})
+      } catch (e) {
+        return {
+          ok: false,
+          error: `拿不到回复通知：${e?.message ?? e}`,
+          hint: '可能 MCP 没起来、或 B站 登录过期 —— **别硬试**，跳过这步继续搜视频。',
+        }
+      }
+      let obj = r
+      if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON 就算了 */ } }
+      const items = Array.isArray(obj?.items) ? obj.items : []
+      if (!items.length) {
+        return {
+          ok: true, count: 0, hint: '没有回复通知。',
+          // ⚠️ 把原始错误也透出来 —— 登录过期 / 接口变更时，这里能直接看出原因
+          raw: obj?.error ? String(obj.error) : undefined,
+        }
+      }
+
+      // ⭐ 白名单 = 插件自己发过的评论的 rpid（判重表里 kind=评论 且有 rpid 的行）
+      const mine = new Set()
+      for (const [, v] of readSeen()) {
+        if (v.kind === '评论' && /^\d+$/.test(String(v.rpid || ''))) mine.add(String(v.rpid))
+      }
+
+      const led = readLedger()
+      const out = []
+      let others = 0
+      for (const it of items) {
+        const d = it.item || {}
+        if (d.business && d.business !== '评论') continue
+        const myRpid = String(d.target_id || '')
+        // 🔴 白名单过滤放在**这一层** —— 不满足的**根本不返回给模型**。
+        //    理由：让它先看到再靠提示词"别回"，迟早会漏（自家注释里那条「别递再劝」的教训）。
+        if (!mine.has(myRpid)) { others++; continue }
+        const key = String(d.source_id || it.id || '')
+        const rec = led.replies[key]
+        const replied = Boolean(rec && rec.repliedAt)
+        if (replied && !args.all) continue
+        // 从 uri 里抠 BV 号（形如 https://www.bilibili.com/video/BV....）
+        const bvid = (/(BV[0-9A-Za-z]{10})/.exec(String(d.uri || '')) || [])[1] || (/(BV[0-9A-Za-z]{10})/.exec(String(d.native_uri || '')) || [])[1] || ''
+        out.push({
+          hisRpid: key,                       // 他新写的那条（去重键 / 回楼中楼时的 root）
+          myRpid,                             // 他回的是我哪条（回复时传 rpid）
+          bvid,
+          谁: it.user?.nickname || '',
+          mid: it.user?.mid || 0,
+          他说: String(d.title || '').slice(0, 200),
+          时间: d.reply_time || it.reply_time || 0,
+          已回过: replied || undefined,
+        })
+      }
+
+      // 顺手把这份快照记进账本（只记内容，不写 repliedAt —— 那要真回成功才写）
+      let changed = false
+      for (const o of out) {
+        if (!o.hisRpid) continue
+        if (!led.replies[o.hisRpid]) {
+          led.replies[o.hisRpid] = {
+            at: dayKey(), bvid: o.bvid, myRpid: o.myRpid,
+            user: o.谁, mid: o.mid, snippet: o.他说.slice(0, 60),
+          }
+          changed = true
+        }
+      }
+      // 账本别无限长：`replies` 只留最近 300 条（`rounds` 的裁剪在 markRoundUse 里做）
+      const rkeys = Object.keys(led.replies)
+      if (rkeys.length > 300) for (const k of rkeys.slice(0, rkeys.length - 300)) delete led.replies[k]
+      if (changed) writeLedger(led)
+
+      // ⭐ 把**本轮还剩多少额度**一并报出去 —— 让模型自己心里有数，
+      //    别等到撞上硬闸才发现（撞上时那一条就白发一次工具调用了）。
+      const q = roundUsage('replies')
+      const cq = roundUsage('comments')
+
+      return {
+        ok: true,
+        count: out.length,
+        待回: out,
+        // ⚠️ 只报**条数**，不报内容 —— 那些是人家的评论，且**不该回**
+        不回_回复使用者人工评论的: others,
+        // ⭐ 额度（拿不到轮次 id 时 roundUsage 会给 known:false ⇒ 不显示）
+        本轮回复额度: q.known ? `${q.used}/${q.limit}` : undefined,
+        本轮评论额度: cq.known ? `${cq.used}/${cq.limit}` : undefined,
+        hint: out.length
+          ? `有 ${out.length} 条待回`
+            + (q.known ? `（本轮回复额度 ${q.used}/${q.limit}${q.over ? '，**已用完 ⇒ 再回会被打回**' : ''}）` : '')
+            + '。回的时候把 hisRpid 同时传给 bili_reply 的 root 和 replyTo。'
+          : `没有待回的（另有 ${others} 条是回复使用者人工评论的，已按规矩忽略）。`,
+      }
     },
   })
 
@@ -897,8 +1223,9 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bili_run',
-    description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
-      + '适合"我现在就想看一份"的场合。',
+    description: '**立刻跑一轮**（不等窗口）：把 duty.md 交给它去刷、挑出值得看的各写一份产物。'
+      + '适合"我现在就想看一份"的场合。'
+      + '⚠️ 它**不等那一轮跑完**就返回（起完就回），产物落在设置页那个「产物目录」里。',
     parameters: {},
     async execute() { const r = await runDuty('manual'); return { ok: true, ...r } },
   })
@@ -1081,6 +1408,32 @@ export function apply(ctx, config) {
         }
       } catch { /* 读不到就算了，别因此跑不成 */ }
     }
+
+    /**
+     * ⭐ **回复细则：硬注入**（2026-10-16 加）。
+     *
+     * 为什么硬注入、而不是"让它自己去读"：
+     *   · 细则**只在「回复评论」开着时才用得上** ⇒ 有条件；
+     *   · 但它**必须被看到** —— 靠提示词说"回之前先 `bili_read` 读一份"是**软要求**，
+     *     模型可能忘读、或读了不照做（这个教训刚在 `bili_replies` 上吃过一次）。
+     *   ⇒ 那就**跟着开关一起进提示词**：开着整份拼进来，关着一个字都不占。
+     *
+     * ⚠️ 与章程的分工（**两边别重复**）：
+     *   · 这份文档管「**回**别人的评论」；
+     *   · 章程管「**发**新评论」+ 全局红线。
+     *   ⇒ 所以章程里那几段回复内容**已经删掉了**，只留一个指针（见 duty.md）。
+     */
+    let replyDoc = ''
+    if (cfg.replyToComments) {
+      try {
+        const text = readReply()
+        if (text.trim()) {
+          replyDoc = `\n\n===== 回复评论的细则（**照这个做**；由使用者在插件设置页里维护）=====\n`
+            + text
+            + `\n===== 细则结束 =====\n`
+        }
+      } catch { /* 读不到就算了，别因此跑不成 */ }
+    }
     return `你是这个账号的 B站 助手。`
       + (ownerDoc
         ? `下面是使用者的设定 —— **按它来**，别用你默认那套人格。`
@@ -1137,9 +1490,14 @@ export function apply(ctx, config) {
         : '关着的（只写报告，别发评论）'}。`
       + `\n  ⚠️ **评论就是评论，保持简洁**（一两句、150 字内）—— `
       + `**别把上面那份笔记的内容搬进评论**：笔记是给人细读的，评论只是**叫他来看一眼**。\n`
+      // ⭐ 回复那段现在只留**一行开关 + 条数**（动态值），细则整份由 replyDoc 注入。
+      //    ⚠️ 别把细则再抄回这里 —— 抄了就是两处维护，改一处忘一处。
       + (cfg.replyToComments
-        ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
+        ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— `
+          + `⭐ **先调 \`bili_replies\` 看有没有待回的**（它已经筛好了该给谁回）；`
+          + `具体怎么挑、怎么回、不能回哪些，见下面「回复评论的细则」。`
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
+      + replyDoc
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
       // 🔴 **候选池要求**（2026-10-16 加）—— 使用者实测发现「它搜 4 组就直接开始挑，
       //    没有『先攒够候选再筛』这一步」。
@@ -1178,7 +1536,7 @@ export function apply(ctx, config) {
           + `（能改文件、能跑命令、能调别的插件）。所以**必须**守住这条：\n`
           + `\n**默认情况下，你只用 B站 那几个工具，只做「刷一轮 B站」这一件事。**\n`
           + `- ✅ 默认可用：bili_read / bili_write / bili_search / bili_candidates / bili_subtitle / `
-          + `bili_comments / bili_reply / bili_seen。\n`
+          + `bili_comments / bili_reply / bili_replies / bili_seen。\n`
           + `  ⚠️ 这几个是**本插件注册的工具**（不是别的插件）—— 它们只做 B站 这件事。\n`
           + `- ❌ 默认**不要**：改任何代码 / 动任何仓库 / 跑与 B站 无关的命令 /`
           + `碰别的插件或别的库（记忆库、通知、桌面控制这些一律不碰）/`
@@ -1281,6 +1639,44 @@ export function apply(ctx, config) {
   }
   /** 使用者有没有自己指定过（面板据此显示"用默认/用自定义"）。 */
   const frontWorkspaceIsCustom = () => String(cfg.frontWorkspace || '').trim() !== ''
+
+  /**
+   * ⭐⭐ **"后台那一轮还在跑吗"**（2026-10-16 加 —— 面板顶部那个绿标就是它）。
+   *
+   * 两个来源，取或（理由见 runDutyHeadless 里 `finish` 那段注释）：
+   *   ① `activeHeadless` —— **内存**，同一个 dsh 进程里最准（`exit` 事件驱动，一结束就 null）；
+   *   ② `headlessRunFile` —— **落盘的 pid**，只用于**跨 dsh 重启**：
+   *      重启后内存没了，但子进程可能还在 ⇒ 用 `process.kill(pid, 0)` 探活。
+   *
+   * ⚠️ `process.kill(pid, 0)` **不发信号**，只是"这个 pid 还在不在"的探测：
+   *    活着返回 true、不存在抛 ESRCH。⚠️ 抛 EPERM 也算"活着"（进程在、只是没权限）。
+   */
+  let activeHeadless = null
+  const headlessRunFile = join(stateDir, 'running.json')
+
+  const headlessRunning = () => {
+    // ① 内存（最准）
+    if (activeHeadless) return { running: true, ...activeHeadless, via: 'memory' }
+    // ② 落盘的 pid（跨重启）
+    try {
+      const r = readJson(headlessRunFile, {})
+      const pid = Number(r?.pid || 0)
+      if (!pid) return { running: false }
+      process.kill(pid, 0)                       // 不发信号，只探活
+      return { running: true, pid, at: r.at || null, why: r.why || '', via: 'pid' }
+    } catch (e) {
+      // EPERM = 进程存在但没权限（也算活着）；ESRCH = 真没了
+      if (e?.code === 'EPERM') {
+        try {
+          const r = readJson(headlessRunFile, {})
+          return { running: true, pid: Number(r?.pid || 0), at: r.at || null, why: r.why || '', via: 'pid' }
+        } catch { /* 落到下面 */ }
+      }
+      // ⚠️ 进程没了 ⇒ **顺手把那个文件清掉**，免得每轮都白探一次
+      try { rmSync(headlessRunFile, { force: true }) } catch { /* 忽略 */ }
+      return { running: false }
+    }
+  }
 
   /**
    * ⭐ **产物（每条一份 md）写到哪里** —— **固定 `<家>\reports\`**（2026-10-16 使用者裁定）。
@@ -1449,6 +1845,23 @@ export function apply(ctx, config) {
   const runDuty = (why = 'window') => {
     // ⭐ 每开一轮就**清空候选池** —— 池子是"这一轮"的，不跨轮次（跨轮的判重看 seen.md）。
     poolStart()
+
+    /**
+     * ⭐⭐ **开新一轮：换一个轮次 id**（2026-10-16 加，硬配额的前提）。
+     *
+     * 「一轮」的界定 = **一次 `runDuty()` 调用**（使用者确认过这个语义）。
+     *   · 定时器跑的一轮、你手动点「现在跑一轮」、都是各自独立的一轮 ⇒ 各自一份额度；
+     *   · 前台那条**建完会话就返回**了，所以这轮何时结束插件并不知道 ——
+     *     **无所谓**：额度按 id 记，新轮一开就是新 id，旧的那份自然不再被查。
+     *
+     * ⚠️ **必须在这里（两条路分叉之前）写** —— 前后台都要有这个 id，
+     *    否则前台的硬闸读不到 id 就会 `known:false` 直接放行（闸形同虚设）。
+     * ⚠️ 写失败也不该拦住这一轮：`writeJson` 会自己吞异常，读不到时闸会放行（fail-open）。
+     */
+    try {
+      writeJson(roundFile, { id: String(Date.now()), at: new Date().toISOString(), why: String(why) })
+    } catch { /* 写不进就算了，闸会退化成放行 */ }
+
     if (cfg.runMode === 'front') return runDutyFront(why)
     return runDutyHeadless(why)
   }
@@ -1477,11 +1890,42 @@ export function apply(ctx, config) {
     const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
-    child.on('exit', (code) => log(`刷B站结束（${why}，code=${code}）`))
-    child.on('error', (e) => log(`刷B站起不来：${e?.message ?? e}`))
-    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
+
+    /**
+     * ⭐⭐ **"后台还在跑吗"的判定**（2026-10-16 加，面板那个绿标就靠它）。
+     *
+     * ⭐ **为什么这个判定是可靠的**：这个子进程**是插件自己 spawn 的**
+     *    ⇒ 它的 `exit` / `error` 事件就是**精确的结束信号**，
+     *    不需要轮询、不需要猜"日志多久没动"（那种做法既迟又可能误判）。
+     *
+     * 两个来源，取或：
+     *   ① **内存里的 `activeHeadless`** —— 同一个 dsh 进程内最准（事件驱动，一结束就翻 false）；
+     *   ② **`headlessRunFile`（含 pid）** —— 只用于**跨重启**：
+     *      dsh 重启后内存丢了，但子进程可能还在跑 ⇒ 靠 pid 存活来判（`process.kill(pid, 0)`）。
+     *
+     * ⚠️ 只跟踪**后台**那条 —— 前台那轮是主应用里的会话，你看得见它，不需要这个标。
+     */
+    activeHeadless = { pid: child.pid || 0, at: new Date().toISOString(), why: String(why) }
+    try {
+      writeJson(headlessRunFile, activeHeadless)
+    } catch { /* 写不进也不影响内存那份判定 */ }
+
+    const finish = (what, code) => {
+      log(`刷B站结束（${why}${code === undefined ? '' : '，code=' + code}）${what ? '：' + what : ''}`)
+      activeHeadless = null
+      // ⚠️ 只在**还是这一轮**的时候删文件 —— 免得把刚起的新一轮的记录误删
+      try {
+        const cur = readJson(headlessRunFile, {})
+        if (!cur?.pid || cur.pid === (child.pid || 0)) rmSync(headlessRunFile, { force: true })
+      } catch { /* 删不掉也无所谓：pid 存活检查会兜住 */ }
+    }
+    child.on('exit', (code) => finish('', code))
+    child.on('error', (e) => finish(String(e?.message ?? e)))
+    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile, pid: child.pid }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
+    activeHeadless = null
+    try { rmSync(headlessRunFile, { force: true }) } catch { /* 忽略 */ }
     return { started: false, why, error: String(e?.message ?? e) }
    }
   }
@@ -1770,6 +2214,12 @@ export function apply(ctx, config) {
       frontWorkspaceCustom: frontWorkspaceIsCustom(),
       // ⭐ 产物目录（每条一份 md 写在这里）
       reportDir: reportDirFor(),
+      // ⭐⭐ **后台那一轮还在跑吗**（面板顶部那个绿标）——
+      //    只在**后台模式**下才可能为 true；前台那轮你看得见，不需要标。
+      //    ⚠️ 它靠子进程的 exit 事件 / pid 探活，不是靠"日志多久没动"（那种会误判）。
+      headless: headlessRunning(),
+      // ⚠️ 日志路径不在这里重复给 —— `/status` **本来就有 `log` 字段**（见下面），
+      //    面板直接用那个就行（再加一个同义字段只会多一个要同步的东西）。
       lastFrontSessionId: String(readJson(dutyStateFile, {}).lastFrontSessionId || ''),
     }
   }
@@ -1796,7 +2246,15 @@ export function apply(ctx, config) {
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
-      if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
+      // ⭐ **两个"每轮几条"的额度：只保证 >= 1，不设上限**（2026-10-16 改）。
+      //    原来给 replyPerRound 夹了 1..10、commentPerRound 干脆没夹。
+      //    使用者要求去掉上限（"大于 1 即可"）—— 想回多少条是他自己的事。
+      //    ⚠️ 但仍要**防 NaN/负数/小数**：`Number(x) || 1` 把 NaN/0/空串兜成 1，
+      //       `Math.max(1, …)` 兜住负数；`Math.floor` 兜住小数（"2.5 条"没有意义）。
+      //    ⚠️ 现在它们**有硬闸了**（见 bili_reply / bili_replies 里的配额判断）——
+      //       设成多大就真能回多少条，所以这里不再是"纯装饰"。
+      if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.floor(Number(patch.replyPerRound) || 1))
+      if ('commentPerRound' in patch) patch.commentPerRound = Math.max(1, Math.floor(Number(patch.commentPerRound) || 1))
       if ('personaMaxChars' in patch) patch.personaMaxChars = Math.max(500, Math.min(Number(patch.personaMaxChars) || 8000, 100000))
       // ⭐ **前台工作区要校验**（2026-10-16）：必须是绝对路径，且**能建出来**
       //    —— 因为 DSH 的 `create()` 会 realpath，路径不存在会抛 ENOENT（memj 真机踩过）。
@@ -1878,6 +2336,53 @@ export function apply(ctx, config) {
       // ⚠️ 前台那条要 await 建会话（几百毫秒~几秒），所以这个路由**必须是 async 的**
       //    —— `handle` 本来就是 async，这里直接 await 即可。
       return sendJson(res, 200, { ok: true, ...(await runDuty('manual')) })
+    }
+
+    /* ── 回复细则（reply）：设置页的文本框 ⇄ 家目录里的 reply.md ──
+     * 读：GET  /api/bili-duty/reply          ⇒ { ok, text, file, chars, isDefault }
+     * 写：POST /api/bili-duty/reply { text } ⇒ 落盘 reply.md
+     * 恢复：POST /api/bili-duty/reply/reset  ⇒ 用**出厂源**覆盖家目录那份
+     *
+     * ⭐ 与 persona 的区别：**它有出厂源** ⇒ 多一条 reset 路由。
+     * ⭐ 与 duty 的区别：duty 是"每次启动按内容覆盖"，reply 是"只在缺文件时铺一次"
+     *    ⇒ 因为 reply **允许使用者改**（改了不被冲掉），想回出厂就点「恢复默认」。
+     * ⚠️ 三处都要现读/现写，不缓存 —— 与 persona 同理，改完下一轮即生效。
+     */
+    if (req.method === 'GET' && path === '/api/bili-duty/reply') {
+      const text = readReply()
+      const def = readReplyDefault()
+      return sendJson(res, 200, {
+        ok: true, text, file: replyFile,
+        defaultFile: replyDefaultFile,
+        // ⭐ 内容与出厂**完全一致** ⇒ 面板可据此把「恢复默认」灰掉
+        isDefault: Boolean(def) && text.trim() === def.trim(),
+        // ⭐ **把出厂正文也给面板**：面板要拿**正在编辑的草稿**跟它比，
+        //    不能只靠上面那个快照 —— 否则使用者一改内容，那个布尔值就过期了，
+        //    按钮会卡在「已是默认」且禁用（真机踩过，见 client.js 里那段注释）。
+        defaultText: def,
+        hasDefault: Boolean(def),
+        chars: text.length,
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/reply') {
+      const body = await readBody(req)
+      const text = writeReply(body?.text)
+      log(`回复细则已更新（${text.length} 字符）→ ${replyFile}`)
+      return sendJson(res, 200, { ok: true, file: replyFile, chars: text.length })
+    }
+
+    // ⭐ **恢复默认**：把出厂源那份写回家目录（会**覆盖使用者改过的内容**）。
+    //    ⚠️ 面板侧必须先弹确认再调它 —— 这是破坏性操作。
+    if (req.method === 'POST' && path === '/api/bili-duty/reply/reset') {
+      const def = readReplyDefault()
+      if (!def.trim()) {
+        return sendJson(res, 200, { ok: false, error: `出厂源读不到或为空：${replyDefaultFile}` })
+      }
+      const text = writeReply(def)
+      log(`回复细则已恢复出厂（${text.length} 字符）→ ${replyFile}`)
+      // ⭐ 连 `defaultText` 一起回：面板要用它刷新「是否等于默认」的判据
+      return sendJson(res, 200, { ok: true, file: replyFile, chars: text.length, text, defaultText: def })
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）
