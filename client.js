@@ -156,6 +156,8 @@ window.__ModuleLoader__.load({
       //    因为 `uiWorkspace` 是异步 inject 上来的，按值捕获会拿到 null（真机踩过）。
       //    解析不出来返回 null ⇒ 面板**如实显示"这个环境不支持跳转"**，而不是点了没反应。
       const resolveOpenSession = (props && props.resolveOpenSession) || (() => null)
+      // ⭐ 目录选择器（给「前台工作区」用）；拿不到就是 null
+      const doPickDirectory = (props && props.doPickDirectory) || null
       const [st, setSt] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
@@ -170,6 +172,9 @@ window.__ModuleLoader__.load({
       const [seenNote, setSeenNote] = React.useState(null) // 判重表条数（从 /status 拿）
       // ⭐ 前台/后台（2026-10-16 加）：决定它跑在一个你看得见的会话里、还是后台子进程
       const [runMode, setRunMode] = React.useState(null)
+      // ⭐ 前台会话的工作区（2026-10-16 加）：空 = 用默认（家目录下的 front-sessions）
+      const [wsPath, setWsPath] = React.useState(null)
+      const [wsBusy, setWsBusy] = React.useState(false)
       const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -214,6 +219,7 @@ window.__ModuleLoader__.load({
         if (cfg && sNum === null) setSNum(String(cfg.searchNum ?? 20))
         if (st && seenNote === null) setSeenNote(Number(st.seenCount) || 0)
         if (cfg && runMode === null) setRunMode(cfg.runMode || 'headless')
+        if (st && wsPath === null) setWsPath(String(st.frontWorkspace || ''))
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -483,6 +489,49 @@ window.__ModuleLoader__.load({
                   try { openSession(st.lastFrontSessionId) } catch (e) { setRunNote({ tone: 'warn', t: `跳转失败：${String(e?.message ?? e)}` }) }
                 },
               }, '去到那个会话'))
+          : null,
+
+        /* ⭐ 前台会话的工作区（只有前台模式才显示；2026-10-16 加） */
+        (runMode ?? 'headless') === 'front'
+          ? h('div', { 'data-bd-sub': '' },
+              h('div', { 'data-bd-row': '' },
+                h('div', { 'data-bd-grow': '' },
+                  h('div', { 'data-bd-label': '' }, '会话建在哪个目录'),
+                  h('div', { 'data-bd-note': '' },
+                    (cfg && cfg.frontWorkspace ? '你自己选的目录' : '默认（插件家目录下的 front-sessions）'))),
+                h('button', {
+                  'data-bd-btn': '', disabled: wsBusy,
+                  onClick: async () => {
+                    if (!doPickDirectory) { setRunNote({ tone: 'warn', t: '这个环境拿不到目录选择器（缺 uiWorkspace 服务）' }); return }
+                    setWsBusy(true)
+                    try {
+                      const picked = await doPickDirectory()
+                      if (picked === null) return              // 用户取消
+                      await patch({ frontWorkspace: picked }, '会话目录')
+                      setWsPath(picked)
+                      setRunNote({ tone: 'good', t: `会话目录已设为：${picked}` })
+                    } catch (e) { setRunNote({ tone: 'warn', t: String(e?.message ?? e) }) }
+                    finally { setWsBusy(false) }
+                  },
+                }, wsBusy ? '正在选…' : (cfg && cfg.frontWorkspace ? '改目录' : '选择目录'))),
+              h('div', { 'data-bd-note': '' },
+                `当前：${st.frontWorkspace || '（读不到）'}`),
+              (cfg && cfg.frontWorkspace)
+                ? h('div', { 'data-bd-row': '' },
+                    h('div', { 'data-bd-grow': '' },
+                      h('div', { 'data-bd-note': '' }, '想用回默认目录就点右边')),
+                    h('button', {
+                      'data-bd-btn': '', disabled: wsBusy,
+                      onClick: async () => {
+                        setWsBusy(true)
+                        try { await patch({ frontWorkspace: '' }, '会话目录'); setWsPath(''); setRunNote({ tone: 'good', t: '已改回默认目录（家目录下的 front-sessions）' }) }
+                        catch (e) { setRunNote({ tone: 'warn', t: String(e?.message ?? e) }) }
+                        finally { setWsBusy(false) }
+                      },
+                    }, '用默认'))
+                : null,
+              h('div', { 'data-bd-note': '' },
+                '⚠️ 必须是绝对路径；每轮会在这里**新建一个会话**（工作区本身不变）。'))
           : null),
 
       /* ── 定时 ── */
@@ -795,7 +844,7 @@ window.__ModuleLoader__.load({
      *    ⇒ 现在改成：`makeTab(resolveOpenSession)` 在 `apply()` 里调用，
      *      而且传的是**解析函数**（点击时现取服务），不是那一刻的值。
      */
-    function makeTab(resolveOpenSession) {
+    function makeTab(resolveOpenSession, doPickDirectory) {
       return function BiliScrollTab() {
         // 🔴 **必须现取，不能按值捕获**（2026-10-16 真机抓到）：
         //    `openSession` 由 `ctx.inject(['uiWorkspace'], cb)` **异步**填上，
@@ -803,7 +852,7 @@ window.__ModuleLoader__.load({
         //    ⇒ 按值传的话注册那刻拿到 `null`，之后填上也改不了已捕获那份
         //      ⇒ 按钮永远说"拿不到跳转能力"。
         //    ⚠️ 所以这里传的是**解析函数**，按钮**点击时**才真正取服务。
-        return h('div', { 'data-bd-tabwrap': '' }, h(Panel, { resolveOpenSession }))
+        return h('div', { 'data-bd-tabwrap': '' }, h(Panel, { resolveOpenSession, doPickDirectory }))
       }
     }
 
@@ -822,6 +871,22 @@ window.__ModuleLoader__.load({
         style.textContent = CSS
         document.head.appendChild(style)
         ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 面板样式')
+
+        /**
+         * ⭐ **打开 DSH 原生的目录选择器**（2026-10-16 加，给"前台工作区"用）。
+         *
+         * 照 `dsh-workspace-auto` 的现成做法（`src/client/WorkspaceRootSetting.tsx`）：
+         *   目录选择器挂在 **`ctx.uiWorkspace.pickDirectory()`** ——
+         *   ⚠️ **不是** `ctx.workspaces`（那个在新版只剩纯数据命令 list/create/rename…）。
+         *   签名 `pickDirectory(): Promise<string | null>`（null = 用户取消）。
+         *
+         * ⚠️ 与 `openSession` 同样：**异步 inject** ⇒ 每次现取，别按值捕获。
+         */
+        const pickDirectory = async () => {
+          const ws = ctx.get('uiWorkspace')
+          if (ws && typeof ws.pickDirectory === 'function') return await ws.pickDirectory()
+          throw new Error('这个环境拿不到目录选择器（缺 uiWorkspace 服务）')
+        }
 
         /**
          * ⭐ **跳到某个会话**（前台跑完之后用）。
@@ -888,7 +953,7 @@ window.__ModuleLoader__.load({
         //    ⭐ 组件在**这里**建，并把**解析函数**给它（`uiWorkspace` 是异步填上的，
         //       按值传会拿到 null ⇒ 按钮永远说"拿不到跳转能力"，真机踩过）。
         try {
-          const Tab = makeTab(resolveOpenSession)
+          const Tab = makeTab(resolveOpenSession, pickDirectory)
           ctx.effect(() => slots.inject('sidebar.right.pane.tab', () =>
             slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, Tab),
           ), 'bili-duty: 右侧栏 tab 本体')

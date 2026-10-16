@@ -102,6 +102,17 @@ export const Config = z.object({
    * ⚠️ 前台模式**不需要** `dshBin` / `headlessProfile` / overlay，那几项只服务 headless 那条路。
    */
   runMode: z.string().default('headless').extra('volatile', true),
+  /**
+   * ⭐ **前台会话的工作区放哪儿**（2026-10-16 加）。
+   *
+   * 留空 = 用插件家目录下的 `front-sessions`（默认，向后兼容）。
+   * 非空 = 用使用者选的那个**绝对路径**（面板上的「选择目录」按钮调 DSH 原生
+   *       目录选择器 `ctx.uiWorkspace.pickDirectory()` 填进来）。
+   *
+   * ⚠️ 必须是绝对路径 —— DSH 的 `workspaceRegistry.create()` 会硬校验（memj 真机踩过：
+   *    相对路径报 `Workspace path is not fully qualified`）。
+   */
+  frontWorkspace: z.string().default('').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
@@ -200,7 +211,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
-    commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     personaEnabled: true, personaMaxChars: 8000,
     llmProvider: '', llmModel: '', llmReasoningEffort: '',
   }
@@ -1021,10 +1032,25 @@ export function apply(ctx, config) {
    *   ④ sessionTitle.rename + agent.followup    设标题 + 提交首轮
    */
 
-  /** 前台会话专用工作区的**目录名**（相对插件家）。固定一个，每次往里开新会话。 */
-  const FRONT_WS_DIR = 'front-sessions'
-  /** 绝对路径。⚠️ 必须绝对 —— `create()` 会做 `isAbsolute` 硬校验（memj 实测报 "not fully qualified"）。 */
-  const frontWorkspacePath = () => join(stateDir, FRONT_WS_DIR)
+  /* ─────────────── 前台会话的工作区（2026-10-16 加，可配置） ───────────────
+   *
+   * ⭐ **为什么做成可配置**（使用者要求）：起初是硬编码的 `<家>\front-sessions`，
+   *    但"会话工作区放哪儿"是使用者的地盘 —— 有人想放统一的地方、有人想放别的盘。
+   *    ⇒ 给一个配置项 `frontWorkspace`，**默认空 = 用家目录下的 `front-sessions`**（向后兼容）；
+   *      非空就用他选的那个目录（由面板上的「选择目录」按钮调用 DSH 原生目录选择器填入）。
+   *
+   * ⚠️ **必须是绝对路径**（DSH 的 `workspaceRegistry.create()` 会做 `isAbsolute` 硬校验，
+   *    相对路径报 `Workspace path is not fully qualified` —— memj 真机踩过）。
+   * ⚠️ 目录**必须先建**（`create()` 会 realpath，不存在抛 ENOENT）。
+   */
+  const FRONT_WS_DEFAULT = 'front-sessions'
+  const frontWorkspacePath = () => {
+    const custom = String(cfg.frontWorkspace || '').trim()
+    if (custom !== '') return custom
+    return join(stateDir, FRONT_WS_DEFAULT)
+  }
+  /** 使用者有没有自己指定过（面板据此显示"用默认/用自定义"）。 */
+  const frontWorkspaceIsCustom = () => String(cfg.frontWorkspace || '').trim() !== ''
 
   /**
    * ⭐ **日报写到哪里**（2026-10-16 定，当天改过两次，这里记清结论）。
@@ -1467,6 +1493,9 @@ export function apply(ctx, config) {
       seenFile,
       // ⭐ 前台模式：最近一次跑出来的会话 id（面板拿它做「去到会话」跳转）
       runMode: cfg.runMode,
+      // ⭐ 前台工作区（2026-10-16）：面板要显示"现在用哪个目录"与"是默认还是自定义"
+      frontWorkspace: frontWorkspacePath(),
+      frontWorkspaceCustom: frontWorkspaceIsCustom(),
       lastFrontSessionId: String(readJson(dutyStateFile, {}).lastFrontSessionId || ''),
     }
   }
@@ -1485,7 +1514,7 @@ export function apply(ctx, config) {
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
-        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
@@ -1495,6 +1524,22 @@ export function apply(ctx, config) {
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
       if ('personaMaxChars' in patch) patch.personaMaxChars = Math.max(500, Math.min(Number(patch.personaMaxChars) || 8000, 100000))
+      // ⭐ **前台工作区要校验**（2026-10-16）：必须是绝对路径，且**能建出来**
+      //    —— 因为 DSH 的 `create()` 会 realpath，路径不存在会抛 ENOENT（memj 真机踩过）。
+      //    在这里**当场**报错，比让使用者等到跑一轮才发现要好。
+      if ('frontWorkspace' in patch) {
+        const raw = String(patch.frontWorkspace ?? '').trim()
+        if (raw === '') {
+          patch.frontWorkspace = ''            // 空 = 用默认（家目录下的 front-sessions）
+        } else if (!isAbsolute(raw)) {
+          return sendJson(res, 400, { ok: false, error: `工作区必须是**绝对路径**（DSH 会校验）：${raw}` })
+        } else {
+          try { mkdirSync(raw, { recursive: true }) } catch (e) {
+            return sendJson(res, 400, { ok: false, error: `这个目录建不出来：${raw}（${e?.message ?? e}）` })
+          }
+          patch.frontWorkspace = raw
+        }
+      }
       saveCfg(patch)
       log(`设置已更新：${JSON.stringify(patch)}`)
       return sendJson(res, 200, { ok: true, config: cfg })
