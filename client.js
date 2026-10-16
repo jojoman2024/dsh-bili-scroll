@@ -131,15 +131,64 @@ window.__ModuleLoader__.load({
  *   而且 sticky 元素的线要跟着它一起走，shadow 最省事。
  * ⚠️ 背景必须给不透明色：否则下面的内容会从它底下透出来（sticky 经典坑）。
  * ⚠️ 下面还要留 8px：顶栏与第一个分节的标题紧贴会显得挤（实测量过，原来是 0px）。
+ *
+ * 🔴 **2026-10-16 改成 [data-bd-head]（顶栏 + 子导航包一层）**：
+ *    原来这个 [data-bd-top] 是**自己 sticky**；现在多了一条子导航，
+ *    若两个都写 top:0 会**互相盖住**（后一个滑到前一个底下）。
+ *    ⇒ 包成一个 [data-bd-head]，**只有它 sticky**，也不用去猜顶栏到底多高。
+ *    [data-bd-top] 从此只是个普通 flex 行（见下面那条规则）。
+ * ⚠️ 背景必须给不透明色，分隔线用 box-shadow（不吃布局、能顶满宽度）。
  */
-[data-bd-top]{position:sticky;top:0;z-index:6;
-  margin:0 -16px 8px;padding:16px 16px 12px;
+[data-bd-head]{position:sticky;top:0;z-index:6;
+  margin:0 -16px 8px;padding:16px 16px 0;
   background:var(--dsw-alias-bg-base,#fff);
   box-shadow:0 1px 0 0 var(--dsw-alias-border-l2,#0000001a);}
+[data-bd-top]{display:flex;align-items:center;gap:8px;}
 
-/* ── 页面 ── */
-[data-bd-page]{display:flex;flex-direction:column;}
+/* ── 子导航标签条 ──
+   ⭐ 样式**照抄官方那个「对话 / 轨迹」**（2026-10-16 从 dsh-client-ui-conversation
+   的 CSS modules 里读出来的原样值）：
+     .tabs   display:flex; gap:36px; margin-top:10px; padding-left:8px; position:relative
+     .tab    color:--dsw-alias-label-tertiary; cursor:pointer; background:none; border:none;
+             padding:0 0 9px; font-size:13px; font-weight:500; line-height:16px; position:relative
+     .tab:after  content:''; background:none; border-radius:2px; height:2px;
+                 position:absolute; bottom:-1px; left:0; right:0
+     .tabActive:after  background:--dsw-alias-state-business-primary
+   ⚠️ 选中态那根 **2px 线是伪元素**（bottom:-1px 让它压住下面那条分隔线），
+      **不是 border-bottom** —— 照抄，别自己换（换了会改行高、与官方不一致）。
+   ⚠️ font-family:inherit 要显式给：button 默认用系统 UI 字体，与旁边文字不一致。
+   🔴 **'padding-left' 用 0 而不是官方的 8px**（2026-10-16 使用者要求：
+      "让 sub 比如标题能够和子导航标签的功能设置按钮，看起来是左对齐的"）。
+      官方那份 8px 是在它自己的上下文里（与它旁边的标题对齐）；
+      在我们这儿，右边的内容从 tabwrap 的 16px 内距开始
+      ⇒ 标签再缩 8px 就会**比下面的标题多出 8px**，看着不齐。
+      ⚠️ 所以这里是**有意偏离官方那 8px 的**，理由写在上面。 */
+[data-bd-tabs]{display:flex;gap:36px;margin-top:10px;padding-left:0;position:relative;}
+[data-bd-tabs]>button{color:var(--dsw-alias-label-tertiary,#81858c);cursor:pointer;
+  background:none;border:none;padding:0 0 9px;font-size:13px;font-weight:500;
+  line-height:16px;position:relative;font-family:inherit;}
+[data-bd-tabs]>button:after{content:'';background:none;border-radius:2px;height:2px;
+  position:absolute;bottom:-1px;left:0;right:0;}
+[data-bd-tabs]>button[data-on]{color:var(--dsw-alias-state-business-primary,#0f1115);}
+[data-bd-tabs]>button[data-on]:after{background:var(--dsw-alias-state-business-primary,#0f1115);}
+
+/* ── 页面 ──
+   ⭐ 子导航这一版**没有新增内容容器** —— 分节仍直接排在 page 下，
+      切页靠 CSS 按 page 上的 data-bd-tab 隐藏非当前页的分节。
+   🔴 **这是有意避开一个已知坑**（库内 b15ee951）：只要多插一层容器，
+      就会把 flex 上下文断掉（flex:1 不是"我要占满"，而是"在**父容器的**分配里占 1 份"）
+      ⇒ 内层 flex:1 / min-height:0 全失效 ⇒ 高度被内容撑开 ⇒ overflow:auto 永不触发、
+      **滚不动**。而且这错**成对出现**（结构复制到第二处时遗漏跟着复制）。
+      ⇒ 所以：能不加容器就不加；真加的话，那一层必须自己写 display:flex + min-height:0。 */
+[data-bd-page]{display:flex;flex-direction:column;min-height:0;}
 [data-bd-sec]{display:flex;flex-direction:column;}
+
+/* ── 切页：只显示当前那一页的分节 ──
+   ⚠️ 用分节上的 data-bd-tabin 标注归属，隐藏规则集中在这一处、好找；
+      不要给「不要的分节」加类去关 display（那会让分节自己的 display:flex 也要跟着改）。 */
+[data-bd-page][data-bd-tab="settings"] [data-bd-tabin]:not([data-bd-tabin="settings"]),
+[data-bd-page][data-bd-tab="prompt"]   [data-bd-tabin]:not([data-bd-tabin="prompt"]),
+[data-bd-page][data-bd-tab="env"]      [data-bd-tabin]:not([data-bd-tabin="env"]){display:none;}
 
 /* ⭐⭐⭐ **唯一那条间距规则**：分节 / 子块里的每个直接子元素 = 一行。
    ⚠️ 顺序要紧：后面几条覆盖必须写在它**之后**才生效。 */
@@ -181,7 +230,31 @@ window.__ModuleLoader__.load({
 [data-bd-sec]{margin:28px -16px 0;padding:20px 16px 0;
   border-top:1px solid var(--dsw-alias-border-l2,#0000001a);}
 /* 第一个分节上面不画（它上面是固定的顶栏，已经有自己的线了） */
-[data-bd-top]+[data-bd-sec]{border-top:0;margin:0 -16px;padding:0 16px;}
+/* 顶栏（现在包在 [data-bd-head] 里）下面的第一个分节：不画上边线（它上面是那根顶栏的分隔线）。
+   ⚠️ 2026-10-16 加了子导航 ⇒ 选择器要跟着改：head 后面那个分节才是"第一个"。
+   🔴 **只去掉那条线，'padding-top' 要跟别的分节一样**（2026-10-16 使用者指出：
+      "每页第一个 sub 的标题距离上面灰线的初始间隔应该等于其他大标题距离上面灰线的间隔，
+      现在就现在留的间隔太小了"）。
+      原来这里写了 'padding:0 16px' ⇒ 首节标题距上边只有 8px（头里给的 margin-bottom），
+      而其它分节是 padding-top:20px ⇒ **两种间距**。现在统一成下面那条同样的 20px。 */
+[data-bd-head]+[data-bd-sec]{border-top:0;margin:0 -16px;padding:20px 16px 0;}
+
+/* 🔴 **子导航页里"可见的第一个分节"也不该有上边线**（2026-10-16 使用者指出：
+ *    "提示词和环境与账号的子页，sub 上的灰线去掉啊，它们已经是页面里唯一的 sub 了"）。
+ *
+ * 根因：上面那条 [data-bd-head]+[data-bd-sec] 只认得**紧跟顶栏的那一个**，
+ *   而这两个页里唯一的可见分节在 DOM 里排在**很后面**（前面那些都被 display:none 藏了）——
+ *   ⚠️ **display:none 不影响兄弟选择器**：它仍然按 DOM 相邻关系算，
+ *   于是那条"第一个分节不画线"的规则**匹配不上**，线就露出来了。
+ *
+ * ⇒ 按 tab 点名去掉：这两个页**各自只有一个分节**，所以"第一个"就是"它自己"。
+ *    ⚠️ 同样**只去线、不动 padding**（理由见上一条注释）。
+ *    ⚠️ 若以后这两页加了第二个分节，要把它改成"该 tab 的第一个分节"：
+ *       纯 CSS 表达不了"第一个可见的"（没有反向兄弟选择器），
+ *       那时更稳的做法是渲染时给每个 tab 的首个分节打个标记属性。
+ */
+[data-bd-page][data-bd-tab="prompt"] [data-bd-tabin="prompt"],
+[data-bd-page][data-bd-tab="env"] [data-bd-tabin="env"]{border-top:0;margin-top:0;padding-top:20px;}
 
 /* ── 分节大标题 ──
    ⭐ **比正文大一号**（2026-10-16 使用者要求："所有大标题的字号都大一号"）。
@@ -285,6 +358,21 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-module-platform,#f5f6f7);
   color:var(--dsw-alias-label-secondary,#61666b);}
 
+/* ── ⭐「正在后台运行…」绿标（2026-10-16 加）──
+   它复用了上面那个胶囊徽章的形状（同一个 data-bd-badge），只把颜色换成**绿**，
+   所以在顶栏里与「环境已就绪 / B站已登录 / v0.1.3」排在一起是**同一套长相**。
+   ⚠️ 但它是个 **button**（可点击）⇒ 要把浏览器给 button 的默认样式全抹掉，
+      否则会多出一圈边框、字体也变成系统 UI 字体（与旁边不一致）。
+   ⚠️ 绿色用 **state-success 令牌**（不是写死 #0f0）：换主题/暗色时它跟着变。
+   ⭐ 小圆点用伪元素画 —— 一眼看出"活着"，且不用额外 DOM。 */
+[data-bd-badge][data-bd-run]{border:none;font-family:inherit;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;
+  background:color-mix(in srgb, var(--dsw-alias-state-success-primary,#22c55e) 14%, transparent);
+  color:var(--dsw-alias-state-success-primary,#22c55e);}
+[data-bd-badge][data-bd-run]:before{content:'';width:6px;height:6px;border-radius:50%;
+  background:currentColor;flex:none;}
+[data-bd-badge][data-bd-run]:hover{background:color-mix(in srgb, var(--dsw-alias-state-success-primary,#22c55e) 22%, transparent);}
+
 /* ── 子区块（开关打开后展开的那些）──
  *
  * 🔴 **不再缩进、也不再画左侧竖线**（2026-10-16 使用者要求："去掉这种缩进，不要他"）。
@@ -298,18 +386,74 @@ window.__ModuleLoader__.load({
 [data-bd-sub]{display:flex;flex-direction:column;}
 
 /* ── 输入类：统一高度/圆角/描边，聚焦用官方焦点环 ── */
-[data-bd-input],[data-bd-select]{width:100%;box-sizing:border-box;padding:7px 10px;
+[data-bd-input],[data-bd-select]{width:100%;box-sizing:border-box;padding:7px 12px;
   border-radius:var(--dsw-radius-sm,8px);font-family:inherit;
   font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
   border:1px solid var(--dsw-alias-border-l3,#0000001f);
   background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);}
-[data-bd-select]{cursor:pointer;}
+
+/* ── 下拉：**不用原生箭头，自绘一个 chevron**（2026-10-16 使用者指出：
+ *    "所有的下拉…这个下箭头离右边太近了，应该和左边的间隔差不多才对吧，现在就很难看"）。
+ *
+ * 🔴 根因：原生 '<select>' 的下拉箭头**位置由浏览器定**（贴着右边缘），
+ *    CSS 里只能靠 'padding-right' 把它"推"进来一点点，**控不准、也不对称**。
+ *    官方那套（.xxx_selector）是 'appearance:none' + 自己画图标：
+ *      'gap:12px; padding:0 14px; height:36px; border-radius:var(--dsw-radius-md)'
+ *    —— 左右内距**完全对称**，箭头是 flex 里的一个独立元素。
+ *
+ * ⭐ 这里用同一个思路，但**保持我们自己的尺寸**（面板窄，不做 36px 高）：
+ *    'appearance:none' 去掉原生箭头，用 'background-image' 画一个 SVG chevron，
+ *    位置用 'background-position: right 10px center' 与左边内距**对称**。
+ *    ⚠️ 'padding-right' 要留出箭头的位置（10 + 图标宽 16 + 一道间距 ≈ 36），
+ *       否则长文字会压到箭头上。
+ *    ⚠️ 图标用 'stroke=%2381858c'（label-tertiary）—— **SVG 在 data-URI 里拿不到 CSS 变量**，
+ *       只能写死颜色；选了中性灰，亮/暗色下都看得见。
+ *
+ * 🔴🔴 **选择器必须按【元素名】写，不能只写 [data-bd-select]**（2026-10-16 我在这儿栽过）：
+ *    这个面板里 **7 个 <select> 只有 3 个挂 data-bd-select**，另外 4 个挂的是
+ *    'data-bd-input'（那是"输入类"的通用属性，select 也复用了它）。
+ *    ⇒ 只写 [data-bd-select] 的结果是**只改了模型那三个**，别处四个下拉还是原生箭头
+ *      —— 使用者一眼就看出来了（"我是说所有的下拉列表，你都去改一下啊"）。
+ *    ⇒ 正解：select[data-bd-input], [data-bd-select] —— **按元素类型匹配**，
+ *      这样不管它挂哪个属性都被覆盖，以后多加一个下拉也不会漏。
+ *    ⚠️ 同理，下面的 :focus 与后续任何"只对 select 生效"的规则都要用这个组合选择器。
+ */
+select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-appearance:none;
+  padding-right:36px;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6.5L8 10.5L12 6.5' stroke='%2381858c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 10px center;
+  background-size:16px 16px;}
+/* ⚠️ 上面这条要写在通用规则**之后**：它覆盖 padding 与 background-image，
+   顺序反了就被通用那条盖掉（这两条权重相同）。 */
 [data-bd-input]:focus,[data-bd-select]:focus{outline:none;
   border-color:var(--dsw-focus-ring-color,var(--dsw-alias-brand-primary,#0f1115));}
 [data-bd-input]::placeholder{color:var(--dsw-alias-label-tertiary,#81858c);}
 [data-bd-num]{width:92px;text-align:center;}
 [data-bd-persona]{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   line-height:1.55;resize:vertical;min-height:120px;}
+
+/* ── 确认浮层（「恢复默认」那种破坏性操作）──
+   ⚠️ 用 position:fixed（常规模态）而不是 absolute —— absolute 会**跟着内容滚**：
+      这个面板的祖先是个 overflow:auto 滚动容器，inset:0 会铺满整个**可滚区域**
+      （比视口高得多）⇒ 浮层被撑开、还可能滚出视野。
+   ⚠️ 背景用**半透明黑**，不用模糊：省一层合成，也避开"祖先有 backdrop-filter 时
+      fixed 会退化成相对该祖先定位"那个坑（库内记过）。
+   ⚠️ 若在真机上发现它被限制在某个祖先里（就是上面那个坑），改成在 JS 里量面板 rect。 */
+[data-bd-confirm]{position:fixed;inset:0;z-index:60;display:flex;
+  align-items:center;justify-content:center;padding:16px;
+  background:rgba(0,0,0,.38);}
+[data-bd-confirm-box]{width:min(86vw,320px);border-radius:var(--dsw-radius-md,12px);
+  background:var(--dsw-alias-bg-base,#fff);padding:16px;
+  box-shadow:0 8px 28px rgba(0,0,0,.22);display:flex;flex-direction:column;gap:10px;}
+[data-bd-confirm-title]{font-size:var(--dsw-font-s-14-font-size,14px);font-weight:600;
+  line-height:22px;color:var(--dsw-alias-label-primary,#0f1115);}
+[data-bd-confirm-body]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  color:var(--dsw-alias-label-secondary,#61666b);}
+[data-bd-confirm-foot]{display:flex;justify-content:flex-end;gap:8px;}
+/* ⚠️ 危险动作：用官方那个"警示"色（琥珀），别写死红色 —— 主题换色时红色会很突兀 */
+[data-bd-btn][data-danger]{border-color:var(--dsw-alias-state-warn-primary,#f0a020);
+  color:var(--dsw-alias-state-warn-primary,#f0a020);}
 
 /* ── 按钮：主要动作 = 官方主按钮色（近黑），次要 = 描边 ── */
 [data-bd-btn]{padding:7px 12px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;font-family:inherit;
@@ -469,6 +613,15 @@ window.__ModuleLoader__.load({
       const [st, setSt] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
       // （旧的 msg/msgTone 已删：提示统一走 runNote 那个浮现式 toast，见 say()）
+
+      /**
+       * ⭐ **子导航当前页**（2026-10-16 加）。
+       * 三页：settings（功能设置）/ prompt（提示词）/ env（环境与账号）。
+       * ⚠️ 只存在**内存**里，不落盘 —— 面板重开回到第一页。这是有意的：
+       *    它是"分类浏览"而非"用户偏好"，记住反而让人找不到东西。
+       */
+      const [tab, setTab] = React.useState('settings')
+
       const [kws, setKws] = React.useState(null)
       // ⭐ 搜索相关的四个新设置（2026-10-16 加）：草稿存在本地 state，
       //    与 kws 一样**不能直接绑 cfg**（会被 5 秒轮询冲掉）
@@ -506,6 +659,23 @@ window.__ModuleLoader__.load({
       const [personaFile, setPersonaFile] = React.useState('')
       const [personaChars, setPersonaChars] = React.useState(null)
       // （旧的 personaMsg/personaTone 已删：保存结果统一走浮现式 toast）
+      // ── 回复细则（2026-10-16 新增）──
+      // ⭐ 与人设同一套路（挂载时 GET 一次，之后本地草稿管，不参与 /status 轮询）；
+      //    **唯一不同**：它还有**出厂源** ⇒ 多一个「恢复默认」（要确认）。
+      const [reply, setReply] = React.useState(null)
+      const [replySaved, setReplySaved] = React.useState(null)
+      const [replyFile, setReplyFile] = React.useState('')
+      const [replyChars, setReplyChars] = React.useState(null)
+      // ⭐ 出厂源正文（GET /reply 的 defaultText 字段带回来）：用来**就地判断**草稿等不等于默认。
+      //    🔴 这里踩过一次坑（2026-10-16 真机测出来的）：
+      //       原来只存服务端算好的 `isDefault` 布尔值 ⇒ **它是一个快照**。
+      //       使用者改了文本框里的内容后，按钮还写着「已是默认」且是禁用的 ——
+      //       想恢复默认都点不了（而那正是最需要点它的时候）。
+      //    ⇒ 正解：把**出厂正文**也存下来，渲染时拿**草稿**跟它比 ⇒ 改了立刻就能点。
+      //    ⚠️ 所以**不要**再引入一个 isDefault 的 state —— 那个值注定会过期。
+      const [replyDefaultText, setReplyDefaultText] = React.useState('')
+      // ⭐ 确认弹层（不是 window.confirm —— panel 里用原生弹框在不同宿主下表现不一）
+      const [confirmReset, setConfirmReset] = React.useState(false)
       // ── 模型（2026-10-15 新增）──
       // 清单从 /models 拉（**不硬编码**：DSH 的 provider/模型由使用者装的路由决定）
       const [models, setModels] = React.useState(null)          // [{id,name,models:[{id,name}]}]
@@ -544,6 +714,23 @@ window.__ModuleLoader__.load({
             setPersonaSaved(d.text || '')
             setPersonaFile(d.file || '')
             setPersonaChars(d.chars ?? (d.text || '').length)
+          } catch { /* 取不到就等用户点保存 */ }
+        })()
+        return () => { alive = false }
+      }, [])
+
+      // ⭐ 回复细则：同样只在挂载时取一次（不进轮询，理由同人设）
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          try {
+            const d = await jget('/reply')
+            if (!alive || !d?.ok) return
+            setReply((cur) => (cur === null ? (d.text || '') : cur))
+            setReplySaved(d.text || '')
+            setReplyFile(d.file || '')
+            setReplyChars(d.chars ?? (d.text || '').length)
+            setReplyDefaultText(String(d.defaultText ?? ''))
           } catch { /* 取不到就等用户点保存 */ }
         })()
         return () => { alive = false }
@@ -751,7 +938,11 @@ window.__ModuleLoader__.load({
                 setRunNote({ tone: 'warn', t: `会话建好了（${r.sessionId}），但这个环境拿不到跳转能力 —— 去左侧会话列表里找「刷B站 …」` })
               }
             } else {
-              say('已经在后台跑一轮了，报告会写在 out/ 里', 'good')
+              // ⚠️ 文案要说**真正的产物目录**（2026-10-16 修）。
+              //    原来写的是"报告会写在 out/ 里"—— 那是**汇总日报时代**的目录，
+              //    产物早就统一到 `<家>\reports\` 了 ⇒ 使用者按它去 out/ 找会扑空。
+              //    ⚠️ 所以这里不写死路径，而是用状态里那份真值（读不到就退化成不带路径的说法）。
+              say(`已经在后台跑一轮了 —— 挑中的每条会各写一份 md 到 ${st?.reportDir || '产物目录'}`, 'good')
             }
           } else {
             // ⚠️ 如实回显失败原因（前台模式失败的原因往往是"服务拿不到"，不是"跑挂了"）
@@ -813,7 +1004,48 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      // ⭐ 保存模型选择：写进 config，下一轮 overlay 会把它覆盖进那一轮
+      // ⭐ 保存回复细则：POST /reply ⇒ 落盘 reply.md（下一轮 promptFor 现读 ⇒ 即时生效）
+      const onSaveReply = async () => {
+        const text = String(reply || '')
+        setBusy('reply')
+        try {
+          const r = await jpost('/reply', { text })
+          if (r?.ok) {
+            setReplySaved(text)
+            setReplyChars(r.chars ?? text.length)
+            // ⚠️ 这里**不要**动 replyDefaultText —— 出厂源没变。
+            //    「是否等于默认」现在由渲染时拿草稿现比（见按钮那段注释）。
+            say('回复细则已保存 —— 下一轮就用新的（不用重启）', 'good')
+          } else {
+            say(r?.error || '回复细则保存失败', 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      // ⭐ **恢复默认**：POST /reply/reset ⇒ 用**出厂源**覆盖家目录那份。
+      //    ⚠️ 破坏性（会冲掉使用者改的内容）⇒ 面板先弹确认（confirmReset）。
+      const onResetReply = async () => {
+        setConfirmReset(false)
+        setBusy('reply')
+        try {
+          const r = await jpost('/reply/reset', {})
+          if (r?.ok) {
+            // 直接把服务端回写的内容灌回草稿（不用再 GET 一次）
+            const text = String(r.text ?? '')
+            setReply(text)
+            setReplySaved(text)
+            setReplyChars(r.chars ?? text.length)
+            // ⭐ 服务端把出厂正文也回给我们了 ⇒ 顺手刷新它（升级后出厂源会变）
+            if (r.defaultText) setReplyDefaultText(String(r.defaultText))
+            say('已恢复出厂那份回复细则', 'good')
+          } else {
+            say(r?.error || '恢复默认失败', 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
       const onSaveModel = async () => {
         await patch({
           llmProvider: String(mProvider || '').trim(),
@@ -846,8 +1078,22 @@ window.__ModuleLoader__.load({
        *   ⇒ 现在只有 **3 个**保存按钮：关键词 / 模型 / 人设 —— 且**名字各自说清在存什么**。
        *   ⚠️ 数字项走 onBlur（改完离开才写），不是每敲一个字符写一次盘。
        *   ⚠️ 每个自动保存的分节都标了「改完即时生效」，免得使用者到处找保存按钮。
+       * ── ③ 子导航（2026-10-16 加，使用者要求）──
+       *   面板太长，按**你此刻在干什么**分三页：
+       *     · **功能设置** = 怎么跑 → 用哪个模型 → 怎么找 → 怎么写 → 说不说话 → 怎么读 → 它的地盘
+       *     · **提示词**   = 它的人设
+       *     · **环境与账号** = 环境与账号
+       *   样式**照抄官方那个「对话 / 轨迹」的标签条**（原样 CSS 见上面 [data-bd-tabs] 的注释）。
+       *   ⚠️ 归属写在分节的 data-bd-tabin 上，切页由 CSS 负责（见上面那条规则）——
+       *      **没有新增内容容器**，就是为了不把 flex 上下文断掉（那个坑见 CSS 注释里引的 b15ee951）。
        * ══════════════════════════════════════════════════════════════════ */
-      return h('div', { 'data-bd-page': '' },
+      /** 子导航三页；顺序即显示顺序。 */
+      const TABS = [
+        { id: 'settings', label: '功能设置' },
+        { id: 'prompt', label: '提示词' },
+        { id: 'env', label: '环境与账号' },
+      ]
+      return h('div', { 'data-bd-page': '', 'data-bd-tab': tab },
 
         /* ⭐ **浮现式提示**：整块面板共用**一个** toast。
            半透明黑底白字、浮在**面板**正中偏下（屏幕 2/3 处）、不吃排版、2.6 秒自己消失
@@ -855,20 +1101,51 @@ window.__ModuleLoader__.load({
         runNote ? h('div', { 'data-bd-toast': '', ref: toastBox, style: runNote.style || undefined },
           h('div', null, runNote.t)) : null,
 
-        /* ── 顶栏：状态 + 手动跑（⭐ sticky，不跟着滚）── */
-        h('div', { 'data-bd-top': '' },
-          h('div', { 'data-bd-row': '' },
+        /* ── 顶栏 + 子导航：**包在同一个 sticky 容器里**（不跟着滚）──
+           ⚠️ 两个 sticky 元素都写 top:0 会互相盖住 ⇒ 包一层、只有它 sticky。 */
+        h('div', { 'data-bd-head': '' },
+          // ⚠️ [data-bd-top] 现在自己就是 flex 行（不再套一层 row）—— 见上面 CSS 注释
+          h('div', { 'data-bd-top': '' },
             // ⭐ 「今天已挑 N / M 条」那个计数据使用者要求**去掉了**（2026-10-16）——
             //    它每天归零、又和「拉多少次/记多少条」不是一回事，摆在这儿反而费解。
             //    ⚠️ `st.ranToday` 后端仍照常统计（`/status` 里有），只是面板不显示了。
             h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
             h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
+            // ⭐⭐ **「正在后台运行…」绿标**（2026-10-16 加，使用者要求）。
+            //    判定由后端给（`st.headless.running`）—— 它靠**子进程的 exit 事件**
+            //    与 **pid 探活**，不是"日志多久没动"（那种会误判，也会迟）。
+            //    ⚠️ 结束时会**自己消失**（后端把 running 翻 false，5 秒轮询就带过来了）。
+            //    ⭐ 点击**不弹面板** —— 只浮现一句"去哪看日志"（使用者定的：
+            //       "点击就浮现一下，告诉他去哪里看日志就好了"）。
+            st.headless?.running
+              ? h('button', {
+                'data-bd-badge': '', 'data-bd-run': '', type: 'button',
+                title: '点一下看日志在哪',
+                onClick: () => say(
+                  // ⚠️ 用 `st.log` —— `/status` 里**本来就有**这个字段（旧版也有），
+                  //    别再用我自己另造的那个 `dutyLog`（2026-10-16 踩过：
+                  //    新字段要重启 dsh 才存在，而 `client.js` 刷新就生效
+                  //    ⇒ 重启前点它只会显示"（读不到路径）"，看着像 bug）。
+                  '正在后台跑 —— 日志：' + (st.log || '（读不到路径）')
+                  + '（用「打开家目录」按钮能找到它；跑完这个标会自己消失）', 'good'),
+              }, '正在后台运行…')
+              : null,
             h('div', { 'data-bd-grow': '' }),
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮'))),
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
+
+          /* ── 子导航标签条（样式照抄官方「对话 / 轨迹」）──
+             ⚠️ 用 role=tablist/tab + aria-selected，与官方那个结构一致（无障碍/测试都对得上）。 */
+          h('div', { 'data-bd-tabs': '', role: 'tablist' },
+            TABS.map((t) => h('button', {
+              key: t.id, type: 'button', role: 'tab',
+              'data-on': tab === t.id ? '' : undefined,
+              'aria-selected': tab === t.id,
+              onClick: () => setTab(t.id),
+            }, t.label)))),
 
         /* ════════ 一、怎么跑（跑在哪 / 什么时候跑 / 一轮挑几条 —— 都是"运行"）════════ */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '怎么跑'),
           h('div', { 'data-bd-note': '' }, '改完即时生效，不用点保存。'),
 
@@ -972,7 +1249,7 @@ window.__ModuleLoader__.load({
           const cur = provs.find((p) => p.id === mProvider)
           const mlist = cur?.models || []
           const isCustom = Boolean(mProvider) && !cur            // 存着一个下拉里没有的 provider（自定义/已下线）
-          return h('div', { 'data-bd-sec': '' },
+          return h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
             h('div', { 'data-bd-h': '' }, '用哪个模型'),
             h('div', { 'data-bd-note': '' },
               '跑一轮时用这里选的模型（覆盖 profile 的默认）。留空 = 用 profile 原本的默认。'),
@@ -1021,7 +1298,7 @@ window.__ModuleLoader__.load({
                   : '当前：未指定（用 profile 默认）')))
         })(),
         /* ════════ 二、怎么找（关注什么 + 怎么搜 —— 都是"捞什么回来"）════════ */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '怎么找'),
           h('div', { 'data-bd-note': '' }, '决定它从 B站 捞回什么。改完下一轮生效。'),
 
@@ -1062,7 +1339,7 @@ window.__ModuleLoader__.load({
           }),
           h(Field, {
             label: '只看最近几天',
-            note: '0 = 不过滤。要按时间筛**只能**在这里设 —— B站 搜索结果里不带发布时间，捞回来本地没法再筛。',
+            note: '0 = 不过滤。要按时间筛只能在这里设 —— B站 搜索结果里不带发布时间，捞回来本地没法再筛。',
             children: h('input', {
               'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 365,
               value: sDays ?? '', onChange: (e) => setSDays(e.target.value),
@@ -1109,7 +1386,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-bd-note': '' }, '（上面这些是长文本 / 成组的，所以要点保存；其余改完即时生效）'))),
 
         /* ════════ 三、怎么写（产物形态 —— 独立一档，不再塞在「关注什么」里）════════ */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '怎么写'),
           h('div', { 'data-bd-note': '' }, '挑中的每条视频各写一份 md 笔记；改完即时生效。'),
           h(Field, {
@@ -1128,7 +1405,7 @@ window.__ModuleLoader__.load({
           })),
 
         /* ════════ 四、说不说话（评论 —— 纯"说"的事）════════ */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '说不说话'),
           h('div', { 'data-bd-note': '' }, '这两项默认都关 —— 打开就是拿你的号说话。'),
 
@@ -1147,11 +1424,11 @@ window.__ModuleLoader__.load({
                 'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 20,
                 value: perRound ?? '',
                 onChange: (e) => setPerRound(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(perRound) || 1, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
+                onBlur: () => { const n = Math.max(1, Number(perRound) || 1); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
               })),
             h(Field, {
               label: '要 @ 谁（B站 昵称）',
-              note: '留空就不发评论了 —— 评论存在的意义就是 @ 那一下。⚠️ 要跟 B站 昵称**逐字一致**。',
+              note: '留空就不发评论了 —— 评论存在的意义就是 @ 那一下。⚠️ 要跟 B站 昵称逐字一致。',
               stack: true,
               children: h('input', {
                 'data-bd-input': '', value: mention ?? '',
@@ -1172,14 +1449,14 @@ window.__ModuleLoader__.load({
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '每轮最多回几条')),
               h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1,
                 value: replyPer ?? '',
                 onChange: (e) => setReplyPer(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
+                onBlur: () => { const n = Math.max(1, Number(replyPer) || 1); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
               }))) : null),
 
         /* ════════ 五、怎么读（本地转写 —— 从「说不说话」里搬出来：这是"读"的事）════════ */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '怎么读'),
           h(ToggleRow, {
             label: '没字幕的视频在本机转写',
@@ -1203,7 +1480,8 @@ window.__ModuleLoader__.load({
 
 
         /* ════════ 七、它的人设（长文本 ⇒ 留保存按钮）════════ */
-        h('div', { 'data-bd-sec': '' },
+        /* ════════ 七、它的人设（→ 子导航「提示词」页）════════ */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
           h('div', { 'data-bd-h': '' }, '它的人设'),
           h(ToggleRow, {
             label: '启用下面这份人设',
@@ -1231,10 +1509,69 @@ window.__ModuleLoader__.load({
               personaChars != null ? h('br') : null,
               '存本地：', h('code', null, personaFile || ''),
               h('br'),
-              '每一轮开始前现读这个文件 —— 保存后**立刻生效**，不用重启 dsh。')) : null),
+              '每一轮开始前现读这个文件 —— 保存后立刻生效，不用重启 dsh。')) : null),
 
-        /* ════════ 八、环境与账号 ════════ */
-        h('div', { 'data-bd-sec': '' },
+        /* ════════ 七之二、回复评论的细则（→ 子导航「提示词」页）════════
+           ⭐ 与人设同一套路，但**多一个「恢复默认」**（它有出厂源）。
+           ⚠️ 只有「回复评论」开着时**才会注入到提示词里** —— 那个开关在「功能设置」页，
+              所以这里要说明归属，免得使用者找不着。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
+          h('div', { 'data-bd-h': '' }, '回复评论的细则'),
+          h('div', { 'data-bd-note': '' },
+            '这份只在「回复评论」开着时起作用（那个开关在「功能设置」页）—— '
+            + '开着时它会在每一轮开头整份注入给模型，所以这里写的东西一定会被看到。'),
+
+          h('div', { 'data-bd-sub': '' },
+            h('textarea', {
+              'data-bd-input': '', 'data-bd-persona': '', rows: 16,
+              placeholder: '（读不到 reply.md —— 点「恢复默认」拿一份出厂的回来）',
+              value: reply ?? '',
+              onChange: (e) => setReply(e.target.value),
+            }),
+            h('div', { 'data-bd-foot': '' },
+              h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'reply', onClick: onSaveReply }, '保存细则'),
+              h('button', {
+                'data-bd-btn': '', disabled: busy === 'reply' || !(reply || '').trim(),
+                onClick: () => { setReply('') },
+              }, '清空'),
+              // ⭐ **恢复默认**：会覆盖你改过的内容 ⇒ 先弹确认（见下面那个浮层）
+              //    🔴 禁用判据必须用**当前草稿**跟出厂正文比，不能用服务端那个快照
+              //       （快照在"改了没存"时是过期值 ⇒ 按钮会卡在禁用，反而没法恢复）。
+              h('button', {
+                'data-bd-btn': '',
+                disabled: busy === 'reply'
+                  || !replyDefaultText
+                  || String(reply ?? '').trim() === replyDefaultText.trim(),
+                onClick: () => setConfirmReset(true),
+              }, (replyDefaultText && String(reply ?? '').trim() === replyDefaultText.trim())
+                ? '已是默认' : '恢复默认'),
+              (reply !== null && replySaved !== null && reply !== replySaved)
+                ? h('span', { 'data-bd-note': '' }, '有未保存的改动') : null),
+            h('div', { 'data-bd-note': '' },
+              replyChars != null ? `当前 ${replyChars} 字符` : '',
+              replyChars != null ? h('br') : null,
+              '存本地：', h('code', null, replyFile || ''),
+              h('br'),
+              '每一轮开始前现读这个文件 —— 保存后立刻生效，不用重启 dsh。',
+              h('br'),
+              '⚠️ 「恢复默认」会覆盖你现在这份（从插件自带的出厂那份重新读），不可撤销。')),
+
+          /* ── 确认弹层（恢复默认是破坏性操作）──
+             ⚠️ 用自绘浮层而不是 window.confirm：面板在不同宿主里的原生弹框表现不一，
+                而且这个面板本来就是右栏里的一块，原生弹框会脱离上下文。 */
+          confirmReset ? h('div', { 'data-bd-confirm': '' },
+            h('div', { 'data-bd-confirm-box': '' },
+              h('div', { 'data-bd-confirm-title': '' }, '恢复成出厂的细则？'),
+              h('div', { 'data-bd-confirm-body': '' },
+                '你现在这份会被覆盖，改过的内容找不回来。',
+                h('br'),
+                '（要留个底的话，先复制上面的正文再点。）'),
+              h('div', { 'data-bd-confirm-foot': '' },
+                h('button', { 'data-bd-btn': '', onClick: () => setConfirmReset(false) }, '取消'),
+                h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetReply }, '覆盖并恢复')))) : null),
+
+        /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
           h('div', { 'data-bd-h': '' }, '环境与账号'),
           h('div', { 'data-bd-note': '' },
             !st.venvReady ? (st.installFailed ? '上次没装成 → 看下面日志' : '还没装 → 先点「装主依赖」')
@@ -1259,8 +1596,8 @@ window.__ModuleLoader__.load({
             h('div', { 'data-bd-note': '' }, st.installing ? '正在装主依赖（进度）：' : '主依赖的日志（末尾）：'),
             h('pre', { 'data-bd-pre': '' }, st.installTail)) : null),
 
-        /* ════════ 九、它的地盘（产物与路径）════════ */
-        h('div', { 'data-bd-sec': '' },
+        /* ════════ 九、它的地盘（产物与路径 → 子导航「功能设置」页）════════ */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '它的地盘'),
           h('div', { 'data-bd-kv': '' },
             `家目录：${st.home}`,
@@ -1410,7 +1747,7 @@ window.__ModuleLoader__.load({
                 id: 'panel',
                 order: 40,                     // 排在 wb-switch(30) 之后
                 title: () => '刷B站',
-                description: () => '每天替你看一轮 B站、挑出值得的，写份日报',
+                description: () => '每天替你看一轮 B站、挑出值得的，每条各写一份笔记',
               },
             ],
           })

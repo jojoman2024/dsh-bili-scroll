@@ -55,3 +55,40 @@ if (problems.length) {
   process.exit(1)
 }
 console.log('  ✓ CSS 模板串干净（L' + (start + 1) + '..L' + (end + 1) + '，括号平衡 ' + open + ' 对）')
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 第二项检查：面板文案里的**裸星号**
+ *
+ * 🔴 为什么需要它（2026-10-16 真机截图发现的）：
+ *   这个面板是**纯文本**渲染 —— 没有 markdown 渲染器（没有 dangerouslySetInnerHTML，
+ *   也没有任何 Md 组件）。所以 JSX 里写 `'保存后**立刻生效**'` 会**原样显示星号**，
+ *   使用者看到的是「保存后**立刻生效**」这种带星星的句子。
+ *   ⚠️ 我写注释习惯用 ** 强调，写着写着就带进**面向使用者的字符串**里了
+ *      —— 那次一共 3 处（其中 2 处还是**之前就存在**的旧 bug，一直没人发现）。
+ *
+ * 判据：**CSS 模板串之外**、**非注释行**里，出现了含 `**` 的**字符串字面量**。
+ *   （注释里的 ** 无所谓 —— 那不给使用者看。）
+ * ⚠️ 排除 CSS 段是关键：那段注释里全是 **，会淹没真问题。
+ * ──────────────────────────────────────────────────────────────────────────── */
+const ascii = String.fromCharCode(42) + String.fromCharCode(42)   // '**'（避开本文档自身的排版）
+const stars = []
+for (let i = 0; i < lines.length; i++) {
+  const lineNo = i + 1
+  if (lineNo >= start + 1 && lineNo <= end + 1) continue        // CSS 段：跳过
+  const raw = lines[i]
+  const t = raw.trim()
+  if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue  // 纯注释行
+  const noComment = raw.replace(/\/\/.*$/, '')                   // 去掉行尾注释
+  if (!noComment.includes(ascii)) continue
+  // 只在**字符串字面量**里才算（避免误报某些表达式）
+  const inStr = /'[^']*\*\*[^']*'/.test(noComment) || /"[^"]*\*\*[^"]*"/.test(noComment)
+  if (!inStr) continue
+  stars.push(`L${lineNo} 面向使用者的文案里有裸星号（面板不渲染 markdown，会原样显示）：${t.slice(0, 90)}`)
+}
+if (stars.length) {
+  console.log('  ✗ 面板文案里有 ' + stars.length + ' 处裸星号：')
+  for (const s of stars) console.log('      ' + s)
+  console.log('  ⇒ 修法：把 ** 去掉（面板是纯文本，要强调就用「」或 ! 这类符号）。')
+  process.exit(1)
+}
+console.log('  ✓ 面板文案没有裸星号（' + ascii + ' 不会原样显示给使用者）')
