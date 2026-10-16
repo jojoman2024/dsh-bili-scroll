@@ -33,15 +33,18 @@
 - 定时器也走这条路 ⇒ **自动跑的每一次都是可追溯的**；
 - 会话 id 带 `bili-` 前缀；固定工作区（**可自选**，见下）。
 
-### ② ⭐ 产物：每条一份「视频笔记」，写在你的工作区
+### ② ⭐ 产物：每条一份「视频笔记」（前台 / 后台写同一个地方）
 
 上游写 **一份汇总日报** 到插件家目录的 `out/<日期>.md`。
 
 这版改成：
 
 - **挑中的每一条，各写一份独立 md**（不再有汇总日报）；
-- **路径**：`<你选的工作区>\reports\<标题>-<YYMMDD>.md`
+- **路径**：`<插件家目录>\reports\<标题>-<YYMMDD>.md`
   （标题在前、日期在后、日期用 `YYMMDD` 无横杠；非法字符自动换成 `-`，保留中文）；
+- ⭐ **前台与后台写的是同一个目录** —— 这样在面板的「看产物」里**永远看得到全部**，
+  不会出现"换了个跑法，以前的笔记就看不见了"
+  （前台用插件自己的 `bili_write` 写过去：那一轮的 cwd 是工作区，沙箱不让它写家目录）；
 - **内容是一篇笔记，不是推荐语**：
   ```
   # <视频标题>
@@ -111,7 +114,19 @@
 
 ## 装
 
-### 从 GitHub（推荐）
+### 从 npm（推荐 —— 连不上 GitHub 也能装）
+
+```bash
+dsh plugin --profile web add @jojoman2024/dsh-bili-scroll
+```
+
+⭐ **为什么推荐这条**：npm 走注册表，**国内有 `registry.npmmirror.com` 兜底**；
+而 `github:` 那条路要 `git` 直连 `github.com:443` —— 实测**很多网络下是连不上的**。
+
+也可以在 **DSH 图形界面**里装：设置 → 插件 → 安装，输入框填 **`@jojoman2024/dsh-bili-scroll`**
+（那个框叫「包名或地址」，也认 GitHub 地址与本地路径）。
+
+### 从 GitHub
 
 ```bash
 dsh plugin --profile web add github:jojoman2024/dsh-bili-scroll
@@ -127,8 +142,8 @@ dsh plugin --profile web add link:<clone 出来的绝对路径>
 ⚠️ 装完**必须重启一次** dsh（bundle 层要重启才组装）。
 然后到 **右侧栏 → 「开始」页 → 点「刷B站」那张卡**。
 
-> ⚠️ **别装错**：npm 上的 `dsh-bili-scroll` 是**上游**那份，没有上面这些改动。
-> 要这一版就用上面的 GitHub / link 装法。
+> ⚠️ **别装错**：npm 上的 **`dsh-bili-scroll`**（**不带 scope**）是**上游**那份，没有下面这些改动。
+> 我们这一版的包名是带 scope 的 **`@jojoman2024/dsh-bili-scroll`**。
 
 ---
 
@@ -201,10 +216,11 @@ dsh plugin --profile web add link:<clone 出来的绝对路径>
 
 按顺序来，别跳步：
 
-1. ⚠️ **先分清版本**：用户要的是**这一版**（`github:jojoman2024/dsh-bili-scroll`）还是上游那份？
+1. ⚠️ **先分清版本**：用户要的是**这一版**（`@jojoman2024/dsh-bili-scroll`）还是上游那份？
    面板里**有「跑在哪」这一节** = 这一版；**没有** = 上游版；
-2. **装**：`dsh plugin --profile web add github:jojoman2024/dsh-bili-scroll`
-   （前提不用管 —— 插件会自己下一份 `uv`）；
+2. **装**：`dsh plugin --profile web add @jojoman2024/dsh-bili-scroll`
+   （**优先走 npm** —— 它不要求能连 GitHub；`github:` 那条路要 git 直连 `github.com:443`，
+   实测很多网络下不通。前提不用管 —— 插件会自己下一份 `uv`）；
 3. ⚠️ **必须提醒用户重启一次 dsh** —— bundle 层要重启才组装，不重启插件不会生效；
 4. 重启后请用户到 **右侧栏 →「开始」页 → 点「刷B站」那张卡**：先点「**装主依赖**」（几十秒，进度就在面板下面）、再点「**扫码登录**」
    （手机 B 站扫码，**确认时选"记住我 / 长期"**）；

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-bili-scroll",
+  "name": "@jojoman2024/dsh-bili-scroll",
   "version": "0.1.3",
   "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
   "keywords": [
@@ -10,9 +10,14 @@
     "mcp",
     "duty"
   ],
-  "repository": { "type": "git", "url": "git+https://github.com/jojoman2024/dsh-bili-scroll.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jojoman2024/dsh-bili-scroll.git"
+  },
   "homepage": "https://github.com/jojoman2024/dsh-bili-scroll#readme",
-  "bugs": { "url": "https://github.com/jojoman2024/dsh-bili-scroll/issues" },
+  "bugs": {
+    "url": "https://github.com/jojoman2024/dsh-bili-scroll/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "index.js",
@@ -29,7 +34,6 @@
     "prompts",
     "vendor",
     "README.md",
-    "AGENTS.md",
     "LICENSE"
   ],
   "engines": {

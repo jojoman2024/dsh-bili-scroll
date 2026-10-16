@@ -43,6 +43,28 @@ export const name = 'bili-scroll'
 export const inject = ['webServer', 'tools', 'settings']
 
 /**
+ * 本插件的 npm 包名（2026-10-16 发 npm 时带上 scope —— 不带 scope 的
+ * `dsh-bili-scroll` 被上游占了）。
+ * ⚠️ 它与 `cordis.patch.yml` 的 `name`、`client.js` 的 bundle `id` **必须一致**。
+ */
+const PKG_NAME = '@jojoman2024/dsh-bili-scroll'
+
+/**
+ * ⭐ **注入消息的 `source.kind`** —— 必须是**产出者自己的标识**。
+ *
+ * 🔴 0.2.0 的 v4 校验**明确拒绝** `kind === 'plugin'`（那句
+ *    `format v4 message requires a producer-owned source kind`），
+ *    而失败长得完全不像 source 的问题（`turn/start` 正常、`tokenUsage` 全 0，
+ *    像"模型没被调起来"）⇒ 容易一路查到网络上去。
+ *    官方写法就是 `kind: name`（如 agent-instructions 用 `kind: name`）。
+ *
+ * ⚠️ 取 `name` 而不是 `PKG_NAME`：这里要的是**插件自己的标识**（短名够用、
+ *    且与设置命名空间/工具前缀那一套保持一致），**不是发布用的包名**。
+ *    两者别混 —— 改包名不该顺手把这条也改了。
+ */
+const SOURCE_KIND = 'plugin:' + name
+
+/**
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段
  *    （`volatileForm(schema)`，见 dsh-settings），没有这个标记写设置时会抛
  *    "Plugin entry … has no volatile fields"。另外两个条件是：
@@ -943,16 +965,19 @@ export function apply(ctx, config) {
     return st
   }
 
-  // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add dsh-bili-scroll`
+  // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add <我们的包>`
   //    ⚠️ 装完必须重启 dsh 才生效；⚠️ Windows 上"替换正在运行的插件"可能被文件占用挡住（我们踩过）
   let upgrading = false
   const runUpgrade = () => {
     if (upgrading) return { ok: true, busy: true, log: installLogFile, hint: '正在升级，别重复点' }
     upgrading = true
-    // 🔴 **必须装我们自己的仓库**，不能是 npm 上的 `dsh-bili-scroll`
-    //    （那是上游的包，装下去会把本分支的改动整个覆盖掉 —— 2026-10-16 改）。
-    //    与 `/update`（那个查的是 jojoman2024/dsh-bili-scroll）配套。
-    const SPEC = 'github:jojoman2024/dsh-bili-scroll'
+    // 🔴 **必须装我们自己的包**，不能是上游那个同名的 `dsh-bili-scroll`
+    //    （那是上游的包，装下去会把本分支的改动整个覆盖掉）。
+    // ⭐ 2026-10-16 发了 npm ⇒ 升级改走 **npm 包名**：
+    //    · npm 走 registry（国内有 npmmirror 兜底），**不需要能连 GitHub** ——
+    //      而 `github:` 那条路要 git 到 github.com:443，本机实测是**直连失败的**；
+    //    · 与 `/update`（查 GitHub 上 jojoman2024/dsh-bili-scroll 的 commit）配套。
+    const SPEC = PKG_NAME
     appendInstall('\n=== ' + new Date().toISOString() + ' 开始升级（add ' + SPEC + '）===\n')
     ;(async () => {
       try {
@@ -1393,7 +1418,7 @@ export function apply(ctx, config) {
           //       ⇒ 表面看像"模型不可用/驱动没起来"。
           //    （memj 在真机上为这个绕了三轮才定位 —— 见其 `reading-ask.ts` 的注释。
           //      我们这里直接照抄正解，别再踩一次。）
-          source: { kind: 'plugin:dsh-bili-scroll' },
+          source: { kind: SOURCE_KIND },
         }))
       } catch (err) {
         try { await handle.dispose() } catch { /* 回收失败不影响原始错误 */ }

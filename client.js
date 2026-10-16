@@ -41,7 +41,13 @@
  * ============================================================================
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-bili-scroll',
+  // 🔴 **这里必须是【完整包名】**（含 scope 与斜杠），不能写短名 ——
+  //    2026-10-16 发 npm 时改名成 `@jojoman2024/dsh-bili-scroll`，
+  //    同时把这一行跟着改。依据：官方那几个 scoped 插件（`dsh-client-modules` /
+  //    `dsh-client-ui-sidebar-right` / `dsh-api-job-controller` …）的 `lib/client.js`
+  //    里写的都是**完整包名**（探针逐个核对过）。
+  //    服务端拼 client 资源 URL 用的也是包名（`??<包名>/client.js`，见 dsh-client-modules）。
+  id: '@jojoman2024/dsh-bili-scroll',
   factory: (require) => {
     const React = require('react')
     const h = React.createElement

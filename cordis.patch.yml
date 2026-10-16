@@ -5,8 +5,14 @@
 # 装上之后，profile 只要在 `dsh.profile.bundles` 里列出本包名即生效，
 # 不用再手改 profile 自己的 cordis.patch.yml：
 #
-#   dsh plugin --profile web add dsh-bili-scroll
+#   dsh plugin --profile web add @jojoman2024/dsh-bili-scroll
 #   （本地开发时用：dsh plugin --profile web add link:<你自己的插件目录>）
+#
+# 🔴 `name` **必须等于 package.json 里的包名**（DSH 靠它去树里找这个包）——
+#    2026-10-16 改名成 `@jojoman2024/dsh-bili-scroll`（发 npm 用 scope，
+#    因为上游把不带 scope 的 `dsh-bili-scroll` 占了）。
+# ⚠️ 另一处必须同步的是 `client.js` 里 `__ModuleLoader__.load({ id })` ——
+#    它是**完整包名**（官方那几个 scoped 插件全是这么写的，探针确认过）。
 #
 # 组成顺序：每个 bundle 的 patch 按 `dsh.profile.bundles` 顺序叠
 #          → 再叠 profile 自己那一层的 cordis.patch.yml（只有那层是热重载）
@@ -14,7 +20,7 @@
 
 - insert:
     - id: bili-scroll
-      name: dsh-bili-scroll
+      name: '@jojoman2024/dsh-bili-scroll'
       config:
         # 真正的用户配置在插件自己的 config 里（设置页可改），这里只放默认值
         enabled: true
