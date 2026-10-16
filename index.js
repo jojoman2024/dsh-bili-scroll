@@ -19,7 +19,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { McpClient } from './lib/mcp.mjs'
@@ -351,7 +351,26 @@ export function apply(ctx, config) {
         payload.time_start = dayKey(new Date(today.getTime() - days * 86400_000))
         payload.time_end = dayKey(today)
       }
-      return call('bili_search', payload)
+      const r = await call('bili_search', payload)
+      // ⭐ **自动并入候选池**（2026-10-16 加）—— 模型不需要记得"我要记进池子"。
+      //    并把"池子现在多少 / 够不够"**附在返回里**，它不用再问一次。
+      try {
+        let obj = r
+        if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON 就算了 */ } }
+        const videos = Array.isArray(obj?.videos) ? obj.videos : []
+        const size = poolAdd(videos)
+        const target = poolTarget()
+        return {
+          ...(obj && typeof obj === 'object' ? obj : { raw: r }),
+          // ⚠️ 这几个字段是**插件加的**（MCP 不返回它们）—— 给模型判断"够不够"
+          poolCount: size,
+          poolTarget: target,
+          poolEnough: size >= target,
+          poolHint: size >= target
+            ? `候选池已够（${size} ≥ ${target}）⇒ 可以开始读字幕筛选了。`
+            : `候选池还不够（${size} < ${target}）⇒ 换个关键词继续搜（放宽词 / 换角度）。`,
+        }
+      } catch { return r }
     },
   })
 
@@ -428,6 +447,139 @@ export function apply(ctx, config) {
   }
 
   const seenCount = () => readSeen().size
+
+  /* ─────────────── 跨工作区读写（2026-10-16 加） ───────────────
+   *
+   * 🔴 **为什么需要它**（实测 2026-10-16，前台会话那轮）：
+   *    前台会话的 cwd = 工作区（`<家>\front-sessions`），而沙箱在 `workspace-write` 下
+   *    **可写根 = 会话 cwd** ⇒ 它**写不了** `<家>\out\`（日报）、也**读不到** `<家>\duty.md`（章程）。
+   *    实测那轮：它先试 `read_mcp_resource`、再试 `playwright` 开 `file://`、最后
+   *    **开了个记事本靠 UIA 读窗口** —— 绕成这样才读到章程；
+   *    写日报则试了 `cmd type` / `powershell` 全失败，**最终没写出报告**（`out/` 是空的）。
+   *
+   * ⇒ 插件自己提供读写工具（插件在 apply() 里直接用 node:fs，**不经沙箱**）。
+   *
+   * 🔴 **必须限定在插件自己的家目录内** —— 否则等于给模型开了一个绕过沙箱的任意读写口。
+   */
+  /** 把一个（可能相对的）路径解析成家目录内的绝对路径；越界一律拒绝。 */
+  const resolveInHome = (p) => {
+    const raw = String(p ?? '').trim()
+    if (raw === '') return { ok: false, error: '路径是空的' }
+    const abs = resolve(isAbsolute(raw) ? raw : join(stateDir, raw))
+    const root = resolve(stateDir)
+    // ⚠️ 用 `root + sep` 比对：防止 `/x/home-evil` 冒充 `/x/home` 的兄弟
+    if (abs !== root && !abs.startsWith(root + sep)) {
+      return { ok: false, error: `只允许读写插件家目录里的东西（${stateDir}），不接受：${abs}` }
+    }
+    return { ok: true, abs }
+  }
+
+  tool({
+    name: 'bili_read',
+    description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 判重表 seen.md / 日报 out/*.md …）。\n'
+      + '⭐ **刷一轮读章程就用它** —— 前台会话的工作区是另一个目录，普通文件工具**读不到**家目录里的章程。',
+    parameters: {
+      path: { type: 'string', description: '文件路径：相对家目录（如 `duty.md`）或绝对路径，都行' },
+      maxChars: { type: 'number', description: '最多回多少字符（默认 60000，防止一次读爆上下文）' },
+    },
+    async execute(args) {
+      const r = resolveInHome(args.path)
+      if (!r.ok) return { ok: false, error: r.error }
+      if (!existsSync(r.abs)) {
+        // ⚠️ 列一下家里有什么，省得它瞎猜（如实报错，而不是让它猜一个路径）
+        let listing = []
+        try { listing = readdirSync(stateDir).slice(0, 40) } catch { /* 读不到就算了 */ }
+        return { ok: false, error: `文件不存在：${r.abs}`, home: stateDir, homeContains: listing }
+      }
+      try {
+        const cap = Math.max(1000, Math.min(Number(args.maxChars) || 60000, 400000))
+        const text = readFileSync(r.abs, 'utf8')
+        return { ok: true, path: r.abs, totalChars: text.length, truncated: text.length > cap, text: text.slice(0, cap) }
+      } catch (e) { return { ok: false, error: `读失败：${e?.message ?? e}` } }
+    },
+  })
+
+  tool({
+    name: 'bili_write',
+    description: '往插件家目录里写文件（**写日报就用它**，路径见提示词里给的那个）。\n'
+      + '⚠️ 沙箱只让前台会话写它**自己的工作区**，写不到家目录 ⇒ 所以要走这个工具。\n'
+      + '默认**覆盖**整个文件；要追加传 append: true。',
+    parameters: {
+      path: { type: 'string', description: '文件路径（相对家目录或绝对，必须在插件家目录内）' },
+      text: { type: 'string', description: '要写入的内容' },
+      append: { type: 'boolean', description: 'true = 追加（默认 false = 覆盖）' },
+    },
+    async execute(args) {
+      const r = resolveInHome(args.path)
+      if (!r.ok) return { ok: false, error: r.error }
+      try {
+        mkdirSync(dirname(r.abs), { recursive: true })
+        const body = String(args.text ?? '')
+        if (args.append) appendFileSync(r.abs, body, 'utf8')
+        else writeFileSync(r.abs, body, 'utf8')
+        // ⭐ 回执带**写后的字节数** —— 让它能自证"真写进去了"，而不是以为自己写了
+        const size = existsSync(r.abs) ? statSync(r.abs).size : 0
+        return { ok: true, path: r.abs, mode: args.append ? 'append' : 'overwrite', bytes: size, chars: body.length }
+      } catch (e) { return { ok: false, error: `写失败：${e?.message ?? e}` } }
+    },
+  })
+
+  /* ─────────────── 候选池（2026-10-16 加） ───────────────
+   *
+   * 🔴 **为什么需要它**（实测那轮）：开场提示词里写了"一轮里换 2~4 组词去搜"，
+   *    但**没有任何机制知道"够不够"** —— 那轮它搜完 4 组就直接开始挑，
+   *    既没有"候选池"这个对象，也没法回答"我搜够了吗"。
+   *
+   * ⇒ 插件**自己记账**（不靠模型自觉）：每搜一次就把结果并进池子，
+   *    并回报**当前池子大小 / 还差几条**。模型据此决定"继续换词"还是"开始筛"。
+   *
+   * ⚠️ **不跨轮次累计**：池子是**这一轮**的（写在内存里，进程重启即清），
+   *    与 `seen.md`（跨轮的判重表）是两件事 —— 别混。
+   */
+  let candidatePool = null   // null = 这一轮还没开始；Map<bvid, {...}>
+  const poolStart = () => { candidatePool = new Map(); return candidatePool }
+  const poolAdd = (videos) => {
+    if (candidatePool === null) poolStart()
+    for (const v of videos) {
+      if (!v || !v.bvid) continue
+      if (!candidatePool.has(v.bvid)) candidatePool.set(v.bvid, v)
+    }
+    return candidatePool.size
+  }
+  /** 目标：一轮至少攒够这么多候选（章程要求的，见 promptFor 里的目标值） */
+  const poolTarget = () => Math.max(5, Number(cfg.searchNum) || 20)
+
+  tool({
+    name: 'bili_candidates',
+    description: '**候选池**：一轮里搜到的候选视频都汇总在这儿（插件自动记账，你只管搜）。\n'
+      + '⭐ 用法：每调一次 `bili_search`，这里就自动多几条。**开始筛选之前先看这里够不够** ——\n'
+      + '不够就换关键词继续搜（放宽词 / 换角度），够了再开始读字幕筛选。\n'
+      + '⚠️ 池子是**这一轮**的（每跑一轮会清空），不跨轮次；跨轮的判重看 `bili_seen`。\n'
+      + '⚠️ 这个工具是**本插件**提供的 —— 只有在前台模式下那一轮才有。',
+    parameters: {
+      reset: { type: 'boolean', description: 'true = 清空重来（一般不用）' },
+      num: { type: 'number', description: '最多列几条（默认 50）' },
+    },
+    async execute(args) {
+      if (args.reset) { poolStart(); return { ok: true, reset: true, count: 0, target: poolTarget(), enough: false } }
+      if (candidatePool === null) return { ok: true, count: 0, target: poolTarget(), enough: false, list: [], hint: '还没搜过 —— 先调 bili_search' }
+      const seen = readSeen()
+      const all = [...candidatePool.values()]
+      const num = Math.max(1, Math.min(Number(args.num) || 50, 200))
+      return {
+        ok: true,
+        count: candidatePool.size,
+        target: poolTarget(),
+        // ⭐ 这就是"够不够"的判据 —— 让模型**不用自己估**
+        enough: candidatePool.size >= poolTarget(),
+        alreadySeen: all.filter((v) => seen.has(v.bvid)).length,
+        list: all.slice(0, num).map((v) => ({
+          bvid: v.bvid, title: v.title, author: v.author, play: v.play,
+          seen: seen.has(v.bvid),
+        })),
+      }
+    },
+  })
 
   tool({
     name: 'bili_reply',
@@ -718,12 +870,22 @@ export function apply(ctx, config) {
         ? `下面是使用者的设定 —— **按它来**，别用你默认那套人格。`
         : `使用者还没写人设 —— 那就中性一点，别擅自扮演任何人格。`)
       + ownerDoc
-      + `然后读章程 ${duty}，按里面的要求刷一轮 B站，`
+      + (cfg.runMode === 'front'
+        ? `**先读章程**：用 \`bili_read\` 读 \`${duty}\`，按里面的要求刷一轮 B站。\n`
+          + `  ⚠️ **必须用 \`bili_read\`** —— 前台会话的工作区是另一个目录，用普通文件工具 / playwright / `
+          + `记事本**都读不到**家目录里的章程（实测：有人试了 4 种办法、最后开记事本靠 UIA 读窗口，白烧几轮）。\n`
+        : `**先读章程** \`${duty}\`（你在插件家里跑，普通文件工具就能读）。按里面的要求刷一轮 B站。\n`)
       + (cfg.reportLevel === 'brief'
         ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。`
         : cfg.reportLevel === 'off'
           ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
-          : `把报告写到 ${reportPathFor(cfg)}。`)
+          : cfg.runMode === 'front'
+            ? `**写日报用 \`bili_write\`**，path 原样传 \`${reportPathFor()}\`。\n`
+              + `  ⚠️ 同样**别用别的办法写**：沙箱只让你写工作区，家目录得走 \`bili_write\``
+              + `（实测：那轮试了 cmd / powershell 全失败，**一份日报都没写出来**）。\n`
+              + `  ✅ 写完看回执里的 \`bytes\` —— 那是**写后的真实字节数**，不是"我以为写了"。`
+            : `**写日报**到 \`${reportPathFor()}\`（用你手上的文件写入工具即可）。`
+              + `\n  ✅ 写完看回执里的字节数 —— 那是写后的**真实**大小，不是"我以为写了"。`)
       + `今天最多挑 ${cfg.perDay} 条；` + kwLine + `。`
       + `搜索：看 ${Math.max(1, Math.min(Number(cfg.searchNum) || 20, 50))} 条；`
       + `排序用${({ totalrank: '综合', pubdate: '最新', click: '播放量', dm: '弹幕' })[cfg.searchOrder] || '综合'}；`
@@ -738,6 +900,32 @@ export function apply(ctx, config) {
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
+      // 🔴 **候选池要求**（2026-10-16 加）—— 使用者实测发现「它搜 4 组就直接开始挑，
+      //    没有『先攒够候选再筛』这一步」。
+      // ⚠️ **只有前台模式能自动记账**（`bili_search` 是插件工具；后台那轮用的是 MCP 的
+      //    同名工具，插件没加载 ⇒ 没有池子）⇒ 后台那条路只能靠**提示词里的纪律**。
+      + (cfg.runMode === 'front'
+        ? `\n\n===== 搜索流程（**必须按这个顺序**）=====\n`
+          + `1. **先攒候选**：反复搜（换不同的词、放宽或收窄），每搜一次结果会**自动进候选池**。\n`
+          + `2. **攒够再筛**：每搜完一次看返回里的 \`poolEnough\`；\n`
+          + `   - \`false\` ⇒ **换个关键词继续搜**（不许在这一步就开始挑）；\n`
+          + `   - \`true\`  ⇒ 才进下一步。也可随时用 \`bili_candidates\` 看池子里现在有什么。\n`
+          + `   ⚠️ **搜不到就如实说**：换了几组词池子仍凑不够（主题本来就冷门），\n`
+          + `     就在报告里写明"搜了哪几组、各几条、总共多少，没达到目标"，然后就着现有的挑。\n`
+          + `     不要为凑数硬塞不相关的，也不要反复重试同一种搜法。\n`
+          + `3. **再读字幕筛**：从池子里挑，逐条 \`bili_subtitle\` 读原文判断。\n`
+          + `===== 流程结束 =====\n`
+        : `\n\n===== 搜索流程（**必须按这个顺序**）=====\n`
+          + `1. **先攒候选**：**换 3~5 组不同的词**反复搜（放宽 / 换个角度都行），`
+          + `把你认为可能入选的都记在脑子里当候选池 —— 这一轮的目标是先攒够 `
+          + `${Math.max(5, Number(cfg.searchNum) || 20)} 条左右**再开始挑**。\n`
+          + `2. **攒够再筛**：没攒够就**继续换词搜**，不要只搜一两组就开始读字幕。\n`
+          + `   ⚠️ **搜不到就如实说**：换了几组仍不够（主题冷门），就在报告里写明`
+          + `"搜了哪几组、各几条、总共多少，没达到目标"，然后就着现有的挑。\n`
+          + `   不要为凑数硬塞不相关的，也不要反复重试同一种搜法。\n`
+          + `3. **再读字幕筛**：从候选里挑，逐条读字幕原文判断。\n`
+          + `===== 流程结束 =====\n`)
+      + `4. 报告里要能看出：**搜了几组词（分别是什么）、候选总共几条、最后挑了几条**。\n`
       // 🔴🔴 **前台模式的额外边界**（2026-10-16 加）—— 使用者明确要求"还是只干刷B站的工作，严格按设定"。
       //     为什么必须写：后台那轮跑在 `--profile headless` 里、沙箱把 cwd 锁在插件家，
       //     它能干的事本来就少；而**前台是主应用里的完整会话**，
@@ -748,8 +936,9 @@ export function apply(ctx, config) {
           + `你是一个**普通会话**，能力集是标准模式 —— 手上有整个 DSH 的工具`
           + `（能改文件、能跑命令、能调别的插件）。所以**必须**守住这条：\n`
           + `\n**默认情况下，你只用 B站 那几个工具，只做「刷一轮 B站」这一件事。**\n`
-          + `- ✅ 默认可用：bili_search / bili_subtitle / bili_comments / bili_reply / bili_seen，`
-          + `以及写日报需要的文件写入（只写日报那一个文件）。\n`
+          + `- ✅ 默认可用：bili_read / bili_write / bili_search / bili_candidates / bili_subtitle / `
+          + `bili_comments / bili_reply / bili_seen。\n`
+          + `  ⚠️ 这几个是**本插件注册的工具**（不是别的插件）—— 它们只做 B站 这件事。\n`
           + `- ❌ 默认**不要**：改任何代码 / 动任何仓库 / 跑与 B站 无关的命令 /`
           + `碰别的插件或别的库（记忆库、通知、桌面控制这些一律不碰）/`
           + `因为"顺手"去做章程没要求的事（哪怕看起来有益）。\n`
@@ -838,24 +1027,20 @@ export function apply(ctx, config) {
   const frontWorkspacePath = () => join(stateDir, FRONT_WS_DIR)
 
   /**
-   * ⭐ **日报该写到哪里**（2026-10-16 加，前台模式引入的新约束）。
+   * ⭐ **日报写到哪里**（2026-10-16 定，当天改过两次，这里记清结论）。
    *
-   * 🔴 **为什么前台不能再用 `<家>\out\`**：
-   *    沙箱在 `workspace-write` 下的可写根 = **会话自己的 cwd**
-   *    （官方原文：*"its immutable cwd becomes the workspace boundary"*，
-   *      `@deepseek-ai/dsh-sandbox-policy` 的 `SandboxPolicyRequest` 注释）。
-   *    而后台那轮的 cwd 是**插件家**、前台这轮的 cwd 是**工作区**
-   *    ⇒ 同一个 `<家>\out\` 在前台模式下是**工作区之外** ⇒ 默认沙箱**直接拒写**。
-   *    ⚠️ 本机是 `danger-full-access`（不限制写）所以看不出来 ——
-   *       但**别人装这插件时默认是 `workspace-write`**，那时前台模式会"跑完但没日报"。
+   * 🔴 **一份日报，永远在 `<家>\out\<日期>.md`** —— 不分前台后台。
    *
-   * ⇒ 前台的日报写进**工作区里的 `out/`**；面板读日报的地方两个都看（见 `/report` 路由）。
+   * 中间走过一段弯路，值得记下：
+   *   前台会话的 cwd 是工作区，而沙箱 `workspace-write` 的**可写根 = 会话 cwd**
+   *   ⇒ 它写不了 `<家>\out\`，于是第一版把前台日报改到工作区里。
+   *   ⚠️ 但那样有两个坏处：① 面板的「看日报」得两处找；② 使用者一脸问号
+   *   （"我看到了 out 目录，但没看到实际的输出"——实测就这么反馈的）。
    *
-   * @returns 给模型看的**绝对路径**（前台：工作区内；后台：插件家）
+   * ⇒ 正解是**给工具**（`bili_write`，插件自己写、不经沙箱），而不是**搬家**。
+   *   现在路径统一了，面板与使用者看到的都是一个地方。
    */
-  const reportPathFor = (c = cfg) => (c.runMode === 'front'
-    ? join(frontWorkspacePath(), 'out', `${dayKey()}.md`)
-    : join(outDir, `${dayKey()}.md`))
+  const reportPathFor = () => join(outDir, `${dayKey()}.md`)
 
   /**
    * ⭐ **【前台模式】建一个真实会话并把提示词提交进去**。
@@ -880,9 +1065,6 @@ export function apply(ctx, config) {
       // ① 工作区：目录要先建（`create()` 会 realpath，不存在就抛 ENOENT —— memj 实测踩过）
       const wsPath = frontWorkspacePath()
       mkdirSync(wsPath, { recursive: true })
-      // ⭐ 顺带把工作区里的 `out/` 也建出来 —— 前台模式的日报写在这儿
-      //    （沙箱可写根 = 会话 cwd；`<家>\out\` 在它之外会被拒，见 `reportPathFor`）。
-      mkdirSync(join(wsPath, 'out'), { recursive: true })
       const workspace = await registry.create(wsPath)
 
       // ② 会话：每次新建（使用者定的语义：正常不会留空白会话）。
@@ -968,6 +1150,8 @@ export function apply(ctx, config) {
    *    `tick()` 里那个 fire-and-forget 的调用已相应处理（它本来就不等）。
    */
   const runDuty = (why = 'window') => {
+    // ⭐ 每开一轮就**清空候选池** —— 池子是"这一轮"的，不跨轮次（跨轮的判重看 seen.md）。
+    poolStart()
     if (cfg.runMode === 'front') return runDutyFront(why)
     return runDutyHeadless(why)
   }
@@ -1390,18 +1574,13 @@ export function apply(ctx, config) {
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
     if (req.method === 'GET' && path === '/api/bili-duty/report') {
       const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
-      // ⚠️ **两个地方都要看**（2026-10-16）：前台模式的日报写在工作区里的 `out/`
-      //    （原因见 `reportPathFor` 的注释：沙箱可写根 = 会话 cwd），
-      //    后台模式仍写 `<家>\out\`。⇒ 挨个试，谁在就用谁。
-      const candidates = [join(frontWorkspacePath(), 'out', day + '.md'), join(outDir, day + '.md')]
-      let file = candidates[1]
+      // 日报**只有一处**（`<家>\out\`）—— 前台那条路也走 `bili_write` 写到这里。
+      // （中途曾把前台日报改到工作区里，那是弯路：使用者反馈"看到 out 目录但没有输出"。
+      //   正解是**给工具**而不是**搬家** —— 见 `reportPathFor` 的注释。）
+      const file = join(outDir, day + '.md')
       let text = ''
       let exists = false
-      for (const c of candidates) {
-        try {
-          if (existsSync(c)) { file = c; text = readFileSync(c, 'utf8').slice(0, 200000); exists = true; break }
-        } catch { /* 读不到就试下一个 */ }
-      }
+      try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 200000) } catch { /* 读不到就给空 */ }
       return sendJson(res, 200, { ok: true, day, exists, file, text })
     }
 
