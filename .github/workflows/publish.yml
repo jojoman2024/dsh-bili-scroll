@@ -1,0 +1,133 @@
+# 发布到 npm：在 GitHub 上「发布 Release」= 同时发 npm。
+#
+# 🔴 为什么需要它：npm **不会**因为推 GitHub 而同步 —— 推仓库与发 npm 是两条
+#    独立通道。这个仓库原来**没有**任何 workflow ⇒ 推 GitHub 只惠及「从 GitHub 直装」
+#    的人，npm 用户拿不到。
+#
+# 🔴 身份靠 **OIDC trusted publishing**，不是 token：
+#    bypass-2FA 的 granular token 正在被弃用（2026-08 起账号类操作已禁，
+#    约 2027-01 起连 publish 也不行）⇒ CI 里**不要**放 NPM_TOKEN，
+#    也不要配 NODE_AUTH_TOKEN。
+#
+# ⚠️ 使用前必须在 npm 包设置页配一次 Trusted Publisher（只能由账号持有者做）：
+#      https://www.npmjs.com/package/@jojoman2024/dsh-bili-scroll
+#      → Settings → Trusted Publisher → GitHub Actions，填：
+#        Organization or user = jojoman2024
+#        Repository           = dsh-bili-scroll
+#        Workflow filename    = publish.yml   ← 只要 basename，与【本文件名】逐字一致
+#        Environment          = 留空（本文件没有 environment:）
+#        Allowed actions      = ✅ Allow `npm publish`
+#    ⚠️ 这四项是**逐字比对** OIDC claim 的；对不上时的报错是那句极具误导的
+#       「404 Not Found - PUT」⇒ 所以下面第 4 步会把 claim 打进日志便于比对。
+#
+# 发布流程（三步）：
+#   ① bump package.json 的 version 并提交推 main；
+#   ② 打 tag（v<同一版本号>）推上去；
+#   ③ 在 GitHub 上为那个 tag 建 Release 并点 **Publish release**
+#      （⚠️ 存成 draft **不触发**）⇒ 本 workflow 自动发 npm。
+#   ⚠️ `release` 事件**只在默认分支上存在本文件**时才会触发（否则静默不跑）。
+#   失败重试：Actions → 那次 run → 「Re-run failed jobs」（tag 上下文会保留）。
+name: publish
+
+on:
+  release:
+    types: [published]
+
+# 同一个包不允许两个发布会话并行。
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # ← OIDC 换短期凭据必需；少了它就是"没有凭据"的报错
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠️⚠️ **必须是 Node 24**（自带 npm ≥ 11.5.1）。
+      #    Node 22 自带的 npm 是 10.9.x，**不会在 publish 请求里附带 OIDC 头**，
+      #    而它的报错极具误导性：
+      #      「npm notice Access token expired or revoked … 404 Not Found - PUT」
+      #    —— 看起来像 token 失效/包不存在，其实是 npm 版本太老。
+      # ⭐ 刻意**不写 `registry-url`**：那会在 .npmrc 里塞一个引用空
+      #    NODE_AUTH_TOKEN 的条目；而注册表已由 package.json 的
+      #    `publishConfig.registry` 定死为 https://registry.npmjs.org/。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # ── 守卫一：Release 的 tag 必须与 package.json 的 version 一致 ──
+      #    否则会出现「tag 叫 v0.2.0、发出去的却是 0.1.3」这种最难查的错。
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "release tag = $GITHUB_REF_NAME ／ package.json version = $pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Release tag（$GITHUB_REF_NAME）与 package.json 版本（$pkg）不一致"
+            exit 1
+          fi
+
+      # ── 守卫二：本地预检（两个半端都在本地真跑一遍）──
+      #    这个仓库**不需要装任何依赖、也不需要构建**：index.js 通过
+      #    lib/hostdeps.mjs 自己去宿主树/自身依赖里取 `@deepseek-ai/*`，
+      #    取不到也不影响加载 ⇒ `node selfcheck.mjs` 裸跑即可（实测 exit 0）。
+      - name: 本地预检（两个半端）
+        run: node selfcheck.mjs
+
+      # ── 守卫三：该版本尚未发布（npm 拒绝重复版本号）──
+      #    让它在 publish 之前以一句人话失败，而不是 npm 的 E403。
+      - name: 确认该版本尚未发布
+        run: |
+          set -eu
+          pkg="$(node -p "require('./package.json').version")"
+          if npm view "@jojoman2024/dsh-bili-scroll@$pkg" version >/dev/null 2>&1; then
+            echo "::error::npm 上已存在 @jojoman2024/dsh-bili-scroll@$pkg —— 先 bump version 再发"
+            exit 1
+          fi
+
+      # ── 守卫四：实测打包内容（不看 files 字段，看真打出来的东西）──
+      #    防「files 列了但文件不存在」这类静默失败：npm pack 会**跳过不存在的路径**
+      #    且**不报错**，于是包里少东西而你以为发出去了。
+      #    ⚠️ 判据用 `grep -q " <路径>"`（前面那个空格是关键：pack 输出是
+      #       `<大小>  <路径>`，带空格才不会把 `lib/pyenv.mjs` 误配到别的行）。
+      - name: 实测打包内容
+        run: |
+          set -eu
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          missing=0
+          for need in index.js client.js cordis.patch.yml lib/hostdeps.mjs lib/pyenv.mjs prompts/duty.md vendor/bilibili-mcp/mcp_server.py; do
+            if grep -q " $need\$" /tmp/pack.txt; then
+              echo "  ✓ $need"
+            else
+              echo "::error::打包内容里缺 $need —— 检查 package.json 的 files"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "✅ 关键文件都在包里"
+
+      # ── 守卫五：OIDC 上下文打到日志里 ──
+      #    npm 的失败信息只说「404 PUT」，真正的原因是
+      #    「trusted publisher 的四项 OIDC claim 有一项对不上」
+      #    ⇒ 把这四项先打出来，排障时一眼比对。
+      - name: 打印 OIDC 上下文（失败时对着 npm 配置比对）
+        run: |
+          echo "repository:       ${GITHUB_REPOSITORY}"
+          echo "repository_owner: ${GITHUB_REPOSITORY_OWNER}"
+          echo "workflow:         ${GITHUB_WORKFLOW}"
+          echo "workflow_ref:     ${GITHUB_WORKFLOW_REF}"
+          echo "ref:              ${GITHUB_REF}"
+          echo "node:             $(node --version) ／ npm: $(npm --version)"
+          echo "（npm 侧必须配成 Workflow filename = publish.yml，Environment 留空）"
+
+      # 发布。⭐ 这里没有 NODE_AUTH_TOKEN：身份由 OIDC 现换。
+      # 本仓库**没有构建步骤**（纯 JS，无 TS/打包）⇒ 直接 publish。
+      - name: 发布到 npm
+        run: npm publish
