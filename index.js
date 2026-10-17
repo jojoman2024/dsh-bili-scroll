@@ -1398,14 +1398,59 @@ export function apply(ctx, config) {
           return
         }
         const cmd = dsh.command
-        const args = [...dsh.args, 'plugin', '--profile', 'web', 'add', SPEC]
+        // 🔴 桌面版同样要 `--expose-internals` + `ELECTRON_RUN_AS_NODE=1`（见 electronAsNode 注释）
+        const args = [
+          ...(dsh.electron ? ['--expose-internals'] : []),
+          ...dsh.args, 'plugin', '--profile', 'web', 'add', SPEC,
+        ]
         appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
-        const code = await spawnTo(cmd, args, { sink: appendInstall })
+        const code = await spawnTo(cmd, args, {
+          sink: appendInstall,
+          env: dsh.electron ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : null,
+        })
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
         else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add ' + SPEC + ' ===\n')
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
     })()
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
+  }
+
+  /**
+   * ⭐⭐ **我们是跑在 Electron（桌面版 DSH）里吗？** —— 2026-10-17 加。
+   *
+   * 🔴 **为什么必须判这个**：
+   *   `spawn(process.execPath, [binJs, ...])` 在 **CLI 版**下没问题（execPath 就是 node）；
+   *   但在**桌面版**下 `process.execPath` 是 **`DeepSeek Harness.exe`**（Electron 44，内嵌 node 24）
+   *   —— 它**不是 node**。直接拿它跑 `bin.js` 等于"用浏览器去执行一段服务端脚本"。
+   *
+   * ⭐ **官方做法**（读桌面版自己的 `resources/runtime/bin/node.cmd` 得到的，不是我猜的）：
+   *   ```bat
+   *   set ELECTRON_RUN_AS_NODE=1
+   *   "%DSH_DESKTOP_NODE_EXECUTABLE%" --expose-internals %*
+   *   ```
+   *   ⇒ 加了 `ELECTRON_RUN_AS_NODE=1`，Electron 的 exe **就变成 node**（这是 Electron 的官方开关）。
+   *
+   * ⚠️ **一个我差点写错的判断**（实测纠正，留档）：
+   *   我一开始看到"桌面版 exe + bin.js --profile headless"跑 8 秒没退，就断言
+   *   "不加 ELECTRON_RUN_AS_NODE 会挂住、它跑去开窗口"。
+   *   **那是错的** —— 逐变量隔离后发现：`--version` 在**不加**那个变量时也能跑（254ms）；
+   *   那 8 秒其实是**正常启动后卡在"缺 provider 凭证"**（stderr 里是 `MISSING_CREDENTIAL`），
+   *   加不加变量都一样卡。
+   *   ⇒ 所以：**判据仍然必要**（execPath 确实不是 node、语义上必须明确），
+   *     但"不加就一定坏"是我当时**没隔离变量**得出的错误结论。
+   *
+   * 判据（任一条成立就算 Electron，偏保守）：
+   *   ① `process.versions.electron` 有值 —— 最硬
+   *   ② 环境里已有 `DSH_DESKTOP_NODE_EXECUTABLE`（桌面版自己设的）
+   *   ③ 可执行文件名是 `DeepSeek Harness.exe` 之类（兜底）
+   * ⚠️ 普通 node 三条都不成立 ⇒ CLI 路径**完全不变**。
+   */
+  const electronAsNode = () => {
+    try {
+      if (process.versions && process.versions.electron) return true
+      if (String(process.env.DSH_DESKTOP_NODE_EXECUTABLE || '').trim()) return true
+      return /(?:^|[\\/])(DeepSeek Harness|dsh-desktop|electron)(?:\.exe)?$/i.test(String(process.execPath || ''))
+    } catch { return false }
   }
 
   /**
@@ -1463,7 +1508,15 @@ export function apply(ctx, config) {
     for (const c of candidates) {
       if (!okBin(c)) continue
       // ⭐ `shell: false` 是**写死的**：这条路永远不经过 cmd。
-      return { command: process.execPath, args: [c], shell: false, via: c === process.argv[1] ? 'argv' : 'cfg/guess' }
+      return {
+        command: process.execPath,
+        // ⚠️ `--expose-internals` 见下面 `electronAsNode` 的注释（桌面版要用）
+        args: [c],
+        shell: false,
+        // ⭐ **是不是跑在 Electron 里**（桌面版）。判据见下面那个函数。
+        electron: electronAsNode(),
+        via: c === process.argv[1] ? 'argv' : 'cfg/guess',
+      }
     }
 
     // ⚠️ **明确失败**，不要降级（降级 = 提示词被切碎 + 不报错）
@@ -2048,7 +2101,19 @@ export function apply(ctx, config) {
       return { started: false, why, error: dsh.error }
     }
     const overlay = ensureOverlay()
-    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
+    /**
+     * 🔴 **桌面版（Electron）要额外两件事**（2026-10-17，实测出来的）：
+     *   ① 环境变量 `ELECTRON_RUN_AS_NODE=1` —— 让 Electron 的 exe **变成 node**。
+     *      不加的话：实测 spawn 它 + bin.js ⇒ **挂住 8 秒不退**（它去开窗口了）。
+     *      ⭐ 这是桌面版**自己的** `resources/runtime/bin/node.cmd` 里的做法，不是我猜的。
+     *   ② `--expose-internals` —— 桌面版官方也带这个（保守起见跟着带，对 CLI 无害）。
+     * ⚠️ CLI 版两条都不做（`electron` 为 false）⇒ 行为与之前**完全一致**。
+     */
+    const args = [
+      ...(dsh.electron ? ['--expose-internals'] : []),
+      ...dsh.args,
+      '--profile', cfg.headlessProfile || 'headless',
+    ]
     if (overlay) args.push('--patch', overlay)
     /**
      * ⭐⭐ **提示词走 stdin，不进命令行**（2026-10-17，采纳用户反馈）。
@@ -2077,7 +2142,13 @@ export function apply(ctx, config) {
       windowsHide: true,
       // 🔴 **stdin 必须是 'pipe'**：原来是 `'ignore'`，那样提示词根本送不进去。
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, BILI_DUTY_HOME: stateDir },
+      env: {
+        ...process.env,
+        BILI_DUTY_HOME: stateDir,
+        // 🔴 **桌面版必须加这个**：不加的话 Electron 的 exe 不会变成 node，
+        //    实测会**挂住不退**（它去开窗口）。CLI 版传了也无害（node 会忽略它）。
+        ...(dsh.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+      },
     })
     // ⭐ 把提示词从管子灌进去，然后**立刻关掉 stdin** ——
     //    否则 `readStdin()` 会一直等 EOF，那一轮永远不开始。
