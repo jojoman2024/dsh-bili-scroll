@@ -92,3 +92,32 @@ if (stars.length) {
   process.exit(1)
 }
 console.log('  ✓ 面板文案没有裸星号（' + ascii + ' 不会原样显示给使用者）')
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 第三项检查：**每个子导航 tab 都要在切页规则里出现**
+ *
+ * 🔴 为什么需要它（2026-10-17 差点栽）：
+ *   切页是纯 CSS 驱动的 —— 形如
+ *     [data-bd-page][data-bd-tab="settings"] [data-bd-tabin]:not([data-bd-tabin="settings"]),
+ *     ...  { display:none }
+ *   **每个 tab 名都要在里面列一条**。漏一个的表现是：
+ *     点那个标签页 → **什么都没变**（因为没有任何规则把别的分节藏起来，
+ *     于是**所有分节一起显示**），而**控制台一句错都没有**。
+ *
+ * 判据：从 `const TABS = [...]` 里抽出全部 `id`，逐个断言 CSS 段里出现过
+ *       `data-bd-tab="<id>"`。新增一个 tab 却忘了加规则 ⇒ 这条当场拦下。
+ * ──────────────────────────────────────────────────────────────────────────── */
+const cssBlock = lines.slice(start + 1, end + 1).join('\n')
+const tabsMatch = /const TABS\s*=\s*\[([\s\S]*?)\]/.exec(lines.join('\n'))
+if (tabsMatch) {
+  const ids = [...tabsMatch[1].matchAll(/id:\s*'([^']+)'/g)].map((m) => m[1])
+  const missing = ids.filter((id) => !cssBlock.includes('data-bd-tab="' + id + '"'))
+  if (missing.length) {
+    console.log('  ✗ 有 tab 没在切页规则里出现（点它会"什么都不变"）：' + missing.join(', '))
+    console.log('  ⇒ 修法：在「切页：只显示当前那一页的分节」那条规则里，给它补一条 `data-bd-tab="<id>"`。')
+    process.exit(1)
+  }
+  console.log('  ✓ 切页规则覆盖了全部 ' + ids.length + ' 个 tab（' + ids.join(' / ') + '）')
+} else {
+  console.log('  ⚠️ 没找到 `const TABS = [...]` —— 若面板结构变了，这项检查要跟着改')
+}

@@ -185,10 +185,14 @@ window.__ModuleLoader__.load({
 
 /* ── 切页：只显示当前那一页的分节 ──
    ⚠️ 用分节上的 data-bd-tabin 标注归属，隐藏规则集中在这一处、好找；
-      不要给「不要的分节」加类去关 display（那会让分节自己的 display:flex 也要跟着改）。 */
+      不要给「不要的分节」加类去关 display（那会让分节自己的 display:flex 也要跟着改）。
+   🔴 **每个 tab 名都要在这里列一条** —— 漏一个的表现是"点那个标签页什么都没变"
+      （因为没有任何规则把它隐藏掉，于是**所有分节都还在**）。
+      ⚠️ 2026-10-17 加「实验功能」时就差点漏掉这条（当时只有 settings/prompt/env）。 */
 [data-bd-page][data-bd-tab="settings"] [data-bd-tabin]:not([data-bd-tabin="settings"]),
 [data-bd-page][data-bd-tab="prompt"]   [data-bd-tabin]:not([data-bd-tabin="prompt"]),
-[data-bd-page][data-bd-tab="env"]      [data-bd-tabin]:not([data-bd-tabin="env"]){display:none;}
+[data-bd-page][data-bd-tab="env"]      [data-bd-tabin]:not([data-bd-tabin="env"]),
+[data-bd-page][data-bd-tab="lab"]      [data-bd-tabin]:not([data-bd-tabin="lab"]){display:none;}
 
 /* ⭐⭐⭐ **唯一那条间距规则**：分节 / 子块里的每个直接子元素 = 一行。
    ⚠️ 顺序要紧：后面几条覆盖必须写在它**之后**才生效。 */
@@ -1092,6 +1096,9 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         { id: 'settings', label: '功能设置' },
         { id: 'prompt', label: '提示词' },
         { id: 'env', label: '环境与账号' },
+        // ⭐ 「实验功能」放最后（2026-10-17 加）—— 里面是那种"打开就会改变安全边界"的开关，
+        //    不该排在最显眼的位置，但也不能藏。放这最后一页正合适。
+        { id: 'lab', label: '实验功能' },
       ]
       return h('div', { 'data-bd-page': '', 'data-bd-tab': tab },
 
@@ -1595,6 +1602,33 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
           st.installTail ? h('div', null,
             h('div', { 'data-bd-note': '' }, st.installing ? '正在装主依赖（进度）：' : '主依赖的日志（末尾）：'),
             h('pre', { 'data-bd-pre': '' }, st.installTail)) : null),
+
+        /* ════════ 实验功能（→ 子导航「实验功能」页，2026-10-17 加）════════
+           ⭐ 这一页放"打开就会改变安全边界"的开关。现在只有「管理员权限」一个。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab' },
+          h('div', { 'data-bd-h': '' }, '实验功能'),
+          h('div', { 'data-bd-note': '' },
+            '这里的开关会改变它的行为边界 —— 打开前先读完说明。'),
+
+          h(ToggleRow, {
+            label: '管理员权限',
+            // ⚠️ 面板是**纯文本**（不渲染 markdown）⇒ 这里**不能写星号**（会被原样显示）。
+            //    守卫 tools/check-client-css.mjs 会查这个。
+            note: '默认关闭。关着时：刷B站那套限制（评论开关 / 判重 / 每轮额度）无论如何都绕不过去，'
+              + '工具里的 force、repeat 参数也完全失效。'
+              + '打开后：在这个会话里，使用者本人亲口说的话就是最高指令 —— 包括"多发一条""重发""换个做法"，'
+              + '工具被打回时也可以让它带着参数再试。',
+            on: sw('adminMode'),
+            onChange: (v) => patch({ adminMode: v }, '管理员权限'),
+          }),
+
+          // ⚠️ 打开时给一条**显眼但不吵**的风险提示（它确实放宽了安全边界）
+          sw('adminMode')
+            ? h('div', { 'data-bd-note': '' },
+              '⚠️ 已打开。这个会话是标准模式（手上有整个 DSH 的工具），'
+              + '而"使用者本人开口"现在可以豁免刷B站这套限制。'
+              + '如果你不打算亲自在这个会话里让它做越界的事，建议关掉。')
+            : null),
 
         /* ════════ 九、它的地盘（产物与路径 → 子导航「功能设置」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
