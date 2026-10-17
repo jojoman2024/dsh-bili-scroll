@@ -649,6 +649,9 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
+      // ⭐ dsh 启动器路径的草稿（2026-10-17 加）。
+      //    ⚠️ 与其它输入框同理：**不能让 5 秒轮询直接绑 cfg**，否则你打字打到一半会被冲掉。
+      const [dshBinDraft, setDshBinDraft] = React.useState(null)
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -1629,6 +1632,34 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               + '而"使用者本人开口"现在可以豁免刷B站这套限制。'
               + '如果你不打算亲自在这个会话里让它做越界的事，建议关掉。')
             : null),
+
+        /* ════════ dsh 启动器路径（→「环境与账号」页）════════
+           ⭐ 2026-10-17 加：这一项**以前面板里根本没有**，只能手工改 config.json。
+           它只影响**后台**模式（前台是在主应用里建会话，不 spawn 子进程）。
+           ⚠️ 留空通常也没事 —— 插件会先用 `process.argv[1]`（它自己就住在 dsh 里），
+              实在找不到才会报错让你来填。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
+          h('div', { 'data-bd-h': '' }, '后台跑要用哪个 dsh'),
+          h('div', { 'data-bd-note': '' },
+            '只有「跑在哪 = 后台」才用得到它。留空也行 —— 插件会先用它自己所在的那个 dsh；'
+            + '实在找不到时，那一轮会明确报错让你来这儿填（不会偷偷走命令行，'
+            + '那条路在 Windows 上会把提示词按空格切断）。'),
+          h(Field, {
+            label: 'dsh 启动器路径',
+            note: '填 <dsh 安装目录>\\lib\\bin.js 的完整路径。改完即时生效（不用重启）。',
+            stack: true,
+            children: h('input', {
+              'data-bd-input': '', type: 'text',
+              placeholder: '例如 C:\\...\\npm-global\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+              value: dshBinDraft ?? (cfg.dshBin || ''),
+              onChange: (e) => setDshBinDraft(e.target.value),
+              onBlur: () => {
+                const v = String(dshBinDraft ?? (cfg.dshBin || '')).trim()
+                setDshBinDraft(v)
+                patch({ dshBin: v }, 'dsh 启动器路径')
+              },
+            }),
+          })),
 
         /* ════════ 九、它的地盘（产物与路径 → 子导航「功能设置」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },

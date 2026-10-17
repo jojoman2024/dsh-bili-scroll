@@ -1391,11 +1391,14 @@ export function apply(ctx, config) {
     ;(async () => {
       try {
         const dsh = resolveDsh()
-        // ⭐ 照抄那一轮的形状：resolveDsh 返回 { command, args, shell }
-        //    （写错就退化成裸 'dsh'，而宿主 PATH 里常常没有它 ⇒ 静默失败）
-        let cmd = dsh.command || 'dsh'
-        let args = [...(dsh.args || []), 'plugin', '--profile', 'web', 'add', SPEC]
-        if (dsh.shell) { args = ['/c', cmd, ...args]; cmd = 'cmd.exe' }
+        // ⭐ 2026-10-17 之后 `resolveDsh()` **只会**返回 `{ command, args, shell:false }`
+        //    或者 `{ error }`（不再有 `shell:true` 那条路）。这里两种都要处理。
+        if (dsh.error) {
+          appendInstall('✗ ' + dsh.error + '\n')
+          return
+        }
+        const cmd = dsh.command
+        const args = [...dsh.args, 'plugin', '--profile', 'web', 'add', SPEC]
         appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
         const code = await spawnTo(cmd, args, { sink: appendInstall })
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
@@ -1405,17 +1408,70 @@ export function apply(ctx, config) {
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
   }
 
+  /**
+   * ⭐⭐ **找到 dsh 的启动器（bin.js）** —— 2026-10-17 重写：**永远不用 shell**。
+   *
+   * ── 为什么重写（一位用户的实测反馈）────────────────────────────
+   *   原来最后一条路是 `return { command: 'dsh', shell: true }`。
+   *   Windows 上 `shell:true` 意味着 Node 把参数**拼成一行字符串**丢给 `cmd.exe`，
+   *   而 cmd 是靠**空格**分参数的 —— 于是：
+   *
+   *     shell:false ⇒ 子进程收到 3 个参数，提示词 **168 字符完整送达** ✅
+   *     shell:true  ⇒ 子进程收到 7 个参数，提示词 **在第一个空格就被切断** 🔴
+   *   （实测对照，见提交说明）
+   *
+   *   🔴 而且它**不报错**：命令照跑、exit 0，只是模型拿到一个**残缺任务** ——
+   *      表现成"模型今天不听话/跑偏了"，极难查。
+   *
+   * ── 现在怎么做 ──────────────────────────────────────────────
+   *   `dsh` 本身就是个 **JS 程序**（`lib/bin.js`）⇒ 用 **node 直接执行它**，
+   *   **根本不需要经过 cmd**。而"用哪个 node"是白给的：**就是正在跑我们的这个**
+   *   （`process.execPath`）。
+   *
+   *   ⇒ 所以这条函数**再也不会返回 `shell:true`** —— 它成了不可能状态，不是"判断出来的"。
+   *
+   * ── 找 bin.js 的顺序（按可靠度）──────────────────────────────
+   *   ① **`process.argv[1]`** —— 插件**就运行在 dsh 进程里面**，
+   *      这个参数天然就是那个 `bin.js` 的路径。⭐ 最准，而且不用用户配。
+   *   ② 用户在面板/配置里填的 `dshBin`。
+   *   ③ 几个常见的全局安装位置（兜底）。
+   *
+   * ⚠️ 都找不到 ⇒ 返回 `{ error }`，**由调用方明确报错** ——
+   *    绝不静默降级到 shell（那正是这个 bug 的来源）。
+   * @returns {{ command: string, args: string[], shell: false } | { error: string }}
+   */
   const resolveDsh = () => {
-    const explicit = String(cfg.dshBin || '').trim()
-    if (explicit && existsSync(explicit)) return { command: process.execPath, args: [explicit], shell: false }
-    // 常见的全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib）
-    const guesses = [
+    /** 只认「真的是 dsh 的 bin.js」：存在 + 是个文件 + 名字对得上 */
+    const okBin = (p) => {
+      const s = String(p || '').trim()
+      if (!s || !isAbsolute(s)) return false
+      try { if (!statSync(s).isFile()) return false } catch { return false }
+      return /(^|[\\/])bin\.js$/.test(s) && /dsh/i.test(s)
+    }
+
+    const candidates = [
+      // ① 我们自己就住在 dsh 里 ⇒ 这个最准
+      process.argv[1],
+      // ② 用户填的
+      String(cfg.dshBin || '').trim(),
+      // ③ 常见全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib）
       join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
       '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
-    ].filter(Boolean)
-    for (const g of guesses) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
-    return { command: 'dsh', args: [], shell: true }
+    ]
+
+    for (const c of candidates) {
+      if (!okBin(c)) continue
+      // ⭐ `shell: false` 是**写死的**：这条路永远不经过 cmd。
+      return { command: process.execPath, args: [c], shell: false, via: c === process.argv[1] ? 'argv' : 'cfg/guess' }
+    }
+
+    // ⚠️ **明确失败**，不要降级（降级 = 提示词被切碎 + 不报错）
+    return {
+      error: '找不到 dsh 的启动器（lib/bin.js）⇒ 后台模式跑不了。'
+        + '去面板「环境与账号」把「dsh 启动器路径」填成 <dsh 安装目录>/lib/bin.js 再试。'
+        + '（**不会**退回命令行模式 —— 那条路在 Windows 上会把提示词按空格切断）',
+    }
   }
 
   const promptFor = () => {
@@ -1979,24 +2035,58 @@ export function apply(ctx, config) {
   const runDutyHeadless = (why = 'window') => {
    try {
     const dsh = resolveDsh()
+    /**
+     * 🔴 **找不到 dsh 就明确失败，绝不降级到 shell**（2026-10-17）。
+     *
+     * 原来的写法是 `spawn('dsh', [...args, prompt], { shell: true })` ——
+     * Windows 上那会把参数拼成一行交给 cmd，**提示词在第一个空格就被切断**
+     * （实测：168 字符的提示词只送到 6 个字符），而且**不报错**。
+     * ⇒ `resolveDsh()` 现在不可能再返回 `shell:true`；这里只要处理"没找到"。
+     */
+    if (dsh.error) {
+      log(`刷B站开跑失败（${why}）：${dsh.error}`)
+      return { started: false, why, error: dsh.error }
+    }
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
+    /**
+     * ⭐⭐ **提示词走 stdin，不进命令行**（2026-10-17，采纳用户反馈）。
+     *
+     * `dsh --profile <p> ... -` 这个末尾的 `-` 是**官方契约**（读源码确认过）：
+     *   · `dsh-headless/lib/startup.js`：`.argument('[task...]', '... and `-` reads stdin')`
+     *   · `dsh-headless/lib/index.js`：`config.task === '-' ⇒ await readStdin()`
+     *   · 而且它**强制** `-` 必须是唯一的 task 参数（多词会被 join，所以不能混）
+     *
+     * 好处（比"只把 prompt 当普通参数传"更稳）：
+     *   · 命令行里**一个字都没有提示词** ⇒ 空格/换行/引号/`&`/`%` 全都不经过解析；
+     *   · 顺带躲开 **Windows 命令行长度上限**（约 32K，提示词长了就会撞）。
+     */
+    const prompt = promptFor()
+    args.push('-')
     // ⭐ 工作目录 = **插件家**（不是使用者的工作区）。
     //    原因（2026-10-14 教训）：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ——
     //    曾经为了让它读工作区里的 AGENTS.md 而把 cwd 改成工作区 ⇒
     //    它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗。
     //    ⇒ 现在的做法：cwd 留在家目录，**人设由插件读出来内联进提示词**（见 promptFor）✓
     const cwd = stateDir
-    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
+    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 4).join(' ')} …（提示词走 stdin）  cwd=${cwd}`)
     const child = spawn(dsh.command, args, {
       cwd,
-      shell: dsh.shell,
+      shell: dsh.shell,          // ⚠️ resolveDsh 只会给 false —— 这条不是"判断"，是常量
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // 🔴 **stdin 必须是 'pipe'**：原来是 `'ignore'`，那样提示词根本送不进去。
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, BILI_DUTY_HOME: stateDir },
     })
+    // ⭐ 把提示词从管子灌进去，然后**立刻关掉 stdin** ——
+    //    否则 `readStdin()` 会一直等 EOF，那一轮永远不开始。
+    try {
+      child.stdin.on('error', () => { /* 子进程早退时写会抛 EPIPE，忽略 */ })
+      child.stdin.end(prompt, 'utf8')
+    } catch (e) {
+      log(`刷B站写入提示词失败（${why}）：${e?.message ?? e}`)
+    }
     const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
