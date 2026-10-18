@@ -1085,15 +1085,40 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         setBusy('update')
         try {
           const r = await jget('/update')
+          /**
+           * 🔴 **别再一律说"可能网络不通"**（2026-10-18 修）。
+           * 后端现在会区分三类错误（`errorKind`）：
+           *   network / rate-limit / http —— 各自给一句能指导下一步的话。
+           * 旧代码那句「可能网络不通」把一个 HTTP 404（本地没推上去）说成了网络故障。
+           */
           if (!r || !r.ok) {
-            say('查不到最新版（可能网络不通）：' + ((r && r.error) || '未知原因'), 'warn')
+            const kind = r && r.errorKind
+            const prefix = kind === 'rate-limit' ? '查不了（限流）：'
+              : kind === 'http' ? '查不了（GitHub 拒绝了请求）：'
+                : '查不了（网络问题）：'
+            say(prefix + ((r && r.error) || '未知原因'), 'warn')
             return
           }
           const mine = r.currentSha ? '（你这版 ' + r.currentSha + '）' : ''
+          /**
+           * ⚠️ **每次检查结果都要重置 `newVer`**（2026-10-18 补）。
+           * 原来只有 `setNewVer(...)` 没有清空 ⇒ 一旦发现过新版，
+           * 即使后来远端收敛了（或本地变得超前），**「升级到 xxx」按钮会一直挂着**。
+           * ⇒ 先清空，只有真的 `hasNew` 时才重新设置。
+           */
+          setNewVer('')
           if (r.hasNew) {
             setNewVer(r.latest || '有新版')
             say('仓库有新版' + (r.latest ? ' ' + r.latest : '') + (r.aheadBy ? '，领先你 ' + r.aheadBy + ' 个提交' : '')
               + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
+          } else if (r.localUnpublished) {
+            /**
+             * ⭐ **本地提交还没推上去**（2026-10-18 新增）：
+             *   这时 `compare` 会 404（GitHub 不认识那个 sha），旧代码会误报成网络问题。
+             *   现在后端回退成"只查 main 最新"，并带 `localUnpublished: true`。
+             *   ⚠️ 不能说"有新版本"（比不了），也不能说"已是最新"（不知道）。
+             */
+            say(r.note || '你本地有还没推到 GitHub 的提交，没法比新旧', 'warn')
           } else if (!r.currentSha) {
             // 没有本地 git（比如从 npm 装的）⇒ 只能说"仓库最新到哪儿"
             say('你这版没带 git 信息，没法比新旧；仓库 main 最新是 ' + (r.latest || '?'), 'warn')

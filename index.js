@@ -3450,7 +3450,24 @@ export function apply(ctx, config) {
                 signal: ctrl.signal,
                 headers: { 'User-Agent': 'dsh-bili-scroll', Accept: 'application/vnd.github+json' },
               })
-              if (!r.ok) throw new Error('HTTP ' + r.status)
+              if (!r.ok) {
+                /**
+                 * 🔴 **别把所有非 2xx 都当成"网络问题"**（2026-10-18 修，真机反馈）。
+                 *
+                 * 使用者点了「检查更新」，看到的是「查不到最新版（可能网络不通）」，
+                 * 而实际是 **HTTP 404** —— 本地 HEAD 那个 commit **还没推到远端**
+                 * （实测：`commits/c1cb192` 直接返回 422 "No commit found for SHA"）。
+                 * 网络好好的（同一台机器 `api.github.com` 735ms 返回 200）。
+                 *
+                 * ⇒ 抛一个**带状态码**的错误，让上层能分开处理：
+                 *    · 404 / 422 ⇒ 本地这个 sha 远端不认识（多半是还没推）
+                 *    · 403 / 429 ⇒ 触发限流（未登录的 API 每小时 60 次）
+                 *    · 其它      ⇒ 才是真的网络/服务问题
+                 */
+                const err = new Error('HTTP ' + r.status)
+                err.httpStatus = r.status
+                throw err
+              }
               return await r.json()
             } finally { clearTimeout(timer) }
           }
@@ -3460,18 +3477,71 @@ export function apply(ctx, config) {
             out.latest = String(j.sha || '').slice(0, 7)
             out.direction = 'unknown'
           } else {
-            const j = await get(`https://api.github.com/repos/${GH_REPO}/compare/${localSha}...main`)
-            out.latest = String(j.commits?.length ? j.commits[j.commits.length - 1].sha : localSha).slice(0, 7)
-            out.direction = String(j.status || '')
-            out.behindBy = Number(j.behind_by || 0)
-            out.aheadBy = Number(j.ahead_by || 0)
+            /**
+             * ⭐ **本地 HEAD 可能远端不认识**（2026-10-18 修）。
+             *
+             * `compare/<本地sha>...main` 的前提是**那个 sha 在远端存在**。
+             * 而使用者本地改了一堆**还没推**（本机实测：领先 fork/main 16 个提交）
+             * ⇒ GitHub 直接 **404**，而旧代码把它报成"可能网络不通" —— **完全误导**。
+             *
+             * ⇒ 现在两步走：
+             *   ① 先试 compare（正常情况：本地是远端历史里的某个点）；
+             *   ② 404/422 ⇒ **退回只查 main 最新**，并明确告诉使用者
+             *      「你本地有还没推的提交，所以没法比新旧」—— 这是**事实**，不是错误。
+             *      ⚠️ 这种情况不能说"有新版本"（比不了），也不能说"已是最新"（不知道）。
+             */
+            let j = null
+            let compareFailed = null
+            try {
+              j = await get(`https://api.github.com/repos/${GH_REPO}/compare/${localSha}...main`)
+            } catch (e) {
+              const st = e?.httpStatus
+              if (st !== 404 && st !== 422) throw e      // 其它错误照旧往上抛（会落到外层 catch）
+              compareFailed = st
+            }
+            if (j) {
+              out.latest = String(j.commits?.length ? j.commits[j.commits.length - 1].sha : localSha).slice(0, 7)
+              out.direction = String(j.status || '')
+              out.behindBy = Number(j.behind_by || 0)
+              out.aheadBy = Number(j.ahead_by || 0)
+            } else {
+              // ② 回退：只取 main 最新，方向未知
+              const m = await get(`https://api.github.com/repos/${GH_REPO}/commits/main`)
+              out.latest = String(m.sha || '').slice(0, 7)
+              out.direction = 'unknown'
+              out.localUnpublished = true
+              out.note = `你本地的提交（${localSha.slice(0, 7)}）还没推到 GitHub ⇒ `
+                + '没法比较新旧。这不代表出错 —— 推上去之后再点一次就能比了。'
+              log(`检查更新：compare 返回 ${compareFailed}（本地 ${localSha.slice(0, 7)} 远端不认识）⇒ 退回只查 main 最新`)
+            }
           }
           updateCache = {
             at: Date.now(), sha: localSha, latest: out.latest,
             direction: out.direction, behindBy: out.behindBy,
           }
         }
-      } catch (e) { out.ok = false; out.error = String(e?.message ?? e); return sendJson(res, 200, out) }
+      } catch (e) {
+        /**
+         * 🔴 **错误要分清楚是哪一类**（2026-10-18 修）。
+         * 旧代码一律给 `error: 'HTTP 404'`，而面板把它渲染成
+         * 「查不到最新版（**可能网络不通**）」—— 把"本地没推上去"说成了网络故障。
+         *
+         * ⇒ 现在分成三类，各给一句**能指导下一步**的话：
+         *    · 403/429 ⇒ **限流**（GitHub 未登录 API 每小时 60 次），等一会儿或换个时间
+         *    · 其它状态码 ⇒ 服务端问题，把状态码原样给出
+         *    · 没有状态码（超时/断网/DNS）⇒ 这才是真·网络问题
+         */
+        const st = e?.httpStatus
+        out.ok = false
+        out.error = st === 403 || st === 429
+          ? `GitHub 限流了（HTTP ${st}）—— 未登录的 API 每小时只给 60 次，过一会儿再点`
+          : st
+            ? `GitHub 返回 HTTP ${st}（不是网络问题，是服务端拒绝了这个请求）`
+            : `连不上 GitHub（${String(e?.name === 'AbortError' ? '超时 8 秒' : (e?.message ?? e))}）—— 这才是网络问题`
+        out.errorKind = st === 403 || st === 429 ? 'rate-limit' : st ? 'http' : 'network'
+        log(`检查更新失败（${out.errorKind}）：${out.error}`)
+        return sendJson(res, 200, out)
+      }
       /**
        * 🔴 **方向判据（2026-10-16 实测确认，别凭直觉改）**：
        *
