@@ -3404,21 +3404,33 @@ export function apply(ctx, config) {
 
     /**
      * 从整份 CHANGELOG 里切出某一段。
-     * ⚠️ 切法是**按 `## [` 分段**（格式在 CHANGELOG 开头写死了）；
-     *    切不到就返回整份 —— 宁可多给，也别给空。
+     * 切法是**按 `## [` 分段**（格式在 CHANGELOG 开头写死了）。
+     *
+     * 🔴 **`(?=^## \[|$)` 那个 `$` 是个坑**（2026-10-18 实测，切出来只有 5 个字）。
+     *   在 `/m` 模式下 `$` 匹配**每一行的行尾**，而 `[\s\S]*?` 是**非贪婪**的
+     *   ⇒ 它只要看到"行尾"就停，于是只抓到第一行（`**新**`）就收工。
+     *   ✅ 正解：**不要用 `$` 当文末兜底** —— 直接用 `indexOf` 找下一个 `\n## [`
+     *      手工切（不用正则，边界一目了然，也不会被 `/m` 的语义坑到）。
+     *
+     * ⚠️ 切不到时要区分"文件是旧的"（`missing: true`），不能把整份丢出去 ——
+     *   CDN 有缓存，刚发版时镜像上那份可能还没有这一版的 `## [x]`。
      */
     const slice = (all, version) => {
-      if (!all) return ''
-      if (!version) return all
-      const esc = version.replace(/\./g, '\\.')
-      // 从 `## [1.2.3]` 开始，到下一个 `## [` 或文末
-      const re = new RegExp(`^## \\[${esc}\\][^\\n]*\\n([\\s\\S]*?)(?=^## \\[|$)`, 'm')
-      const m = re.exec(all)
-      if (m) return m[1].trim()
-      return all.trim()   // 切不到就整份给它（总比空白强）
+      if (!all) return { text: '', missing: true }
+      if (!version) return { text: all.trim(), missing: false }
+      const head = `## [${version}]`
+      const i = all.indexOf(head)
+      // ⚠️ 用 `indexOf` 而不是正则：`head` 里含 `[` `]`，拼进正则要转义，容易出错
+      if (i < 0) return { text: '', missing: true }
+      const after = all.indexOf('\n', i)
+      if (after < 0) return { text: '', missing: true }   // 标题行后面没了
+      const next = all.indexOf('\n## [', after)
+      const seg = all.slice(after + 1, next < 0 ? undefined : next).trim()
+      return { text: seg, missing: seg.length === 0 }
     }
 
     const errors = []
+    let sawOld = false   // 有没有拉到过文件、只是缺这一版
     for (const u of urls) {
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), 8000)
@@ -3427,12 +3439,26 @@ export function apply(ctx, config) {
         if (!r.ok) { errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ HTTP ${r.status}`); continue }
         const all = await r.text()
         if (!all.trim()) { errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ 空文件`); continue }
-        return { ok: true, text: slice(all, v), version: v || 'latest', source: u }
+        const got = slice(all, v)
+        if (got.missing) {
+          // ⚠️ 文件拿到了、但**没有这一版的条目** ⇒ 多半是镜像还没同步，换下一个源再试
+          sawOld = true
+          errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ 还是旧的（没有 ${v} 这一版）`)
+          continue
+        }
+        return { ok: true, text: got.text, version: v || 'latest', source: u }
       } catch (e) {
         errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ ` + (e?.name === 'AbortError' ? '超时 8 秒' : String(e?.message ?? e)))
       } finally { clearTimeout(timer) }
     }
-    return { ok: false, error: '取不到更新内容（三个源都试过了）：' + errors.join('；') }
+    return {
+      ok: false,
+      // ⭐ 区分两种失败：**拿不到文件** vs **文件里没有这一版**（后者是同步延迟，不是故障）
+      stale: sawOld,
+      error: sawOld
+        ? `镜像上还没有 ${v} 这一版的条目（多半是刚发布、CDN 还没同步，过几分钟再试）`
+        : '取不到更新内容（都试过了）：' + errors.join('；'),
+    }
   }
 
 
