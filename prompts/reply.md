@@ -12,7 +12,7 @@
 
 ## 谁会出现在你面前
 
-插件已经把**该给的**筛好递给你了（`bili_replies` 的返回值）：
+插件已经把**该给的**筛好递给你了（`bilij_replies` 的返回值）：
 
 - ✅ **只给你「回复插件自己那条评论」的**；
 - ❌ 回复**使用者本人**（他自己人工发的评论）的那些，**根本不会给你** ——
@@ -50,14 +50,14 @@
 
 ## 怎么发
 
-调 `bili_reply`，**四个参数照抄 `bili_replies` 给的那条**：
+调 `bilij_reply`，**四个参数照抄 `bilij_replies` 给的那条**：
 
 ```
-bili_reply({
-  bvid:    <bili_replies 给的 bvid>,
-  rpid:    <bili_replies 给的 myRpid>,     // 他回的是我哪条
-  root:    <bili_replies 给的 hisRpid>,    // 他新写的那条 = 楼层根
-  replyTo: <bili_replies 给的 hisRpid>,    // 🔴 必传！插件靠它记账
+bilij_reply({
+  bvid:    <bilij_replies 给的 bvid>,
+  rpid:    <bilij_replies 给的 myRpid>,     // 他回的是我哪条
+  root:    <bilij_replies 给的 hisRpid>,    // 他新写的那条 = 楼层根
+  replyTo: <bilij_replies 给的 hisRpid>,    // 🔴 必传！插件靠它记账
   text:    '...'                            // 你要说的话
 })
 ```
@@ -65,12 +65,12 @@ bili_reply({
 - **条数**：每轮最多回**开头提示词里说的那个数**。
   🔴 **这是硬闸，不是建议** —— 插件真的会拦：超了那一发**直接被打回**
   （回执 `quotaExceeded: true`，并且会告诉你"已用几条 / 上限几条"）。
-  ⭐ `bili_replies` 的返回值里带「本轮回复额度」，回之前瞄一眼就知道还剩几条。
+  ⭐ `bilij_replies` 的返回值里带「本轮回复额度」，回之前瞄一眼就知道还剩几条。
 - **每条正文 ≤100 字**；
 - **最多用 2 次工具调用**；
 - ⭐ **同一个人在同一话题下只回一次**（别拉锯 ✓）；
 - ⚠️ **不 @ 对方** —— 开头让你 @ 的是**使用者**，不是被回复的人；
-- ⚠️ **`replyTo` 落了就等着被重复提醒**：不传它，下一轮 `bili_replies` 还会把同一条列出来
+- ⚠️ **`replyTo` 落了就等着被重复提醒**：不传它，下一轮 `bilij_replies` 还会把同一条列出来
   ⇒ **可能重复回同一个人**；
 - **回完把内容记进报告** ✓。
 

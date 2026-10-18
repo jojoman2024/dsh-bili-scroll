@@ -67,8 +67,14 @@ const SOURCE_KIND = 'plugin:' + name
 /**
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段
  *    （`volatileForm(schema)`，见 dsh-settings），没有这个标记写设置时会抛
- *    "Plugin entry … has no volatile fields"。另外两个条件是：
- *    **loader entry 的 id 必须等于命名空间名**（我们 patch 里就是 `bili-duty`）+ **本模块导出 Config**。
+ *    "Plugin entry … has no volatile fields"。
+ *    另外还需要 **本模块导出 `Config`**。
+ *
+ * 🔴 **2026-10-18 更正**：这里原来还写着「**loader entry 的 id 必须等于命名空间名**」——
+ *    **那是错的**。实测（`dsh --profile web --dump-config`）：
+ *      loader entry 是 `id: bili-scroll`，而 `settings.register` 用的是 `'bili-duty'`，
+ *      **两者不相等，设置页一直正常**（config.json 里那些值就是它写的）。
+ *    ⇒ `settings.register` 的 key 是**插件自己起的名字**，跟 loader id 无关。
  */
 // ⚠️ z 彻底拿不到时这里会是 undefined —— **插件照常加载**，只是没有 Config、设置页降级
 //    （宁可少一个设置页，也不能因为一个 import 让整条插件不激活 ✗）
@@ -115,7 +121,7 @@ export const Config = !z ? undefined : z.object({
    *
    * ── 它与 `keywords` 的关系（**不是替代搜索，是换一种输入**）──────
    *   ⚠️ 这里最容易理解错：自由文本**不改变"怎么搜"** —— 仍然要靠模型自己组合出关键词
-   *      去调 `bili_search`（那就是 `keywordMode=llm` 一直在做的事）。
+   *      去调 `bilij_search`（那就是 `keywordMode=llm` 一直在做的事）。
    *   变的只是**输入的表达力**：
    *     · `keywords`（一行一个）= 好几个**独立意图**，模型逐行拆；
    *     · `watchNote`（一段话） = **一个整体意图**，模型通读后自己切成几件事。
@@ -211,7 +217,7 @@ export const Config = !z ? undefined : z.object({
    *
    * **默认关**。关着的时候：
    *   · 提示词里**不会**给"使用者开口就豁免一切"的授权；
-   *   · `bili_reply` 的 `force` 参数**完全失效** —— 门禁 / 判重 / 额度三道闸
+   *   · `bilij_reply` 的 `force` 参数**完全失效** —— 门禁 / 判重 / 额度三道闸
    *     **无论如何都绕不过去**。
    *
    * 打开之后：
@@ -295,8 +301,8 @@ export function apply(ctx, config) {
   const outDir = join(stateDir, 'out')
   mkdirSync(outDir, { recursive: true })
   // ⭐ 产物目录（`<家>\reports\`）启动就建好 —— 两条路都写这里。
-  //    ⚠️ 后台那条用的是**普通文件工具**（不是 bili_write），它不一定会建父目录
-  //       ⇒ 在这里先建好最稳（bili_write 自己也建，但它只在有工具时会跑）。
+  //    ⚠️ 后台那条用的是**普通文件工具**（不是 bilij_write），它不一定会建父目录
+  //       ⇒ 在这里先建好最稳（bilij_write 自己也建，但它只在有工具时会跑）。
   try { mkdirSync(join(stateDir, 'reports'), { recursive: true }) } catch { /* 建不了后面写的时候会报 */ }
 
   const log = (msg) => {
@@ -401,14 +407,27 @@ export function apply(ctx, config) {
   ensureHomeFiles(pluginDir, stateDir, log)
 
   /* ── 设置命名空间：让 DSH 自带的「插件设置」能编辑这份 Config ──
-   * 三个条件缺一不可（抄 qq-mode-console 的血泪注释）：
-   *   ① loader entry 的 id 必须**等于命名空间名** —— 我们 cordis.patch.yml 里就是 `bili-duty` ✓
-   *   ② 插件模块导出 `Config` ✓  ③ Config 里至少一个字段标 volatile ✓（我们都标了）
+   *
+   * 🔴 **2026-10-18 更正一条错注释**（原话是「loader entry 的 id 必须等于命名空间名」）：
+   *    **不必须相等**。实测证据（`dsh --profile web --dump-config`）：
+   *      ·loader entry 是 `id: bili-scroll`
+   *      · 而这里注册的是 `'bili-duty'`
+   *      ⇒ **两者不相等，但设置页一直正常**（config.json 里那些值就是它写进去的）。
+   *    所以 `settings.register` 的 key 是**插件自己起的名字**，不是 loader id。
+   *
+   * ⚠️ 但**两个条件是真的**：模块要导出 `Config`、且 Config 里至少一个 volatile 字段
+   *    （否则会报 "Plugin entry … has no volatile fields"）。
+   *
+   * ⭐ 2026-10-18 随家目录一起改名成 `bili-scroll-jojo`：
+   *    不是为了"修 bug"，而是**为了可读性一致**（家目录 / loader id / 命名空间三者同名好排查）。
+   *    ⚠️ 改它会让**已有的设置值丢失**（DSH 按命名空间存），
+   *       所以**老用户升级后会回到默认值** —— 这是已知代价，写在这里免得以后再查一遍。
    */
+  const SETTINGS_NS = 'bili-scroll-jojo'
   try {
     if (typeof ctx.settings?.register === 'function') {
-      ctx.settings.register('bili-duty', Config, { base: {}, applies: 'live' })
-      log('已注册设置命名空间 bili-duty')
+      ctx.settings.register(SETTINGS_NS, Config, { base: {}, applies: 'live' })
+      log(`已注册设置命名空间 ${SETTINGS_NS}`)
     }
   } catch (e) {
     if (!/already registered/i.test(String(e?.message ?? e))) log(`注册设置命名空间失败：${e?.message ?? e}`)
@@ -449,10 +468,10 @@ export function apply(ctx, config) {
    *    但实测**跑完一轮之后 `seen.md` 根本不存在**（2026-10-16 首次跑通那轮，4 条评论全发出去、
    *    文件一个都没写）。原因是它只是**一句话约定**：模型要自己记得读写、自己拼格式，
    *    而它在那一轮里正忙着重试被 ACL 挡住的 shell ⇒ 这件事就被丢了。
-   *    ⇒ 教训与 `bili_reply` 那次同源：**能由代码保证的事，不要交给模型的自觉**。
+   *    ⇒ 教训与 `bilij_reply` 那次同源：**能由代码保证的事，不要交给模型的自觉**。
    *
-   * 现在：**发评论前查、发成功后立刻写**，都在 `bili_reply` 里做掉，模型不需要记得做任何事。
-   * 另外仍然注册 `bili_seen` 工具，给模型**主动查/记**的余地（例如报告里想说明为什么跳过）。
+   * 现在：**发评论前查、发成功后立刻写**，都在 `bilij_reply` 里做掉，模型不需要记得做任何事。
+   * 另外仍然注册 `bilij_seen` 工具，给模型**主动查/记**的余地（例如报告里想说明为什么跳过）。
    *
    * ⚠️ 格式刻意做成 markdown 表格（人可直接看、也可手改），但**解析只认 `|` 分隔的字段**，
    *    所以手工增删行不会破坏它。
@@ -598,7 +617,7 @@ export function apply(ctx, config) {
       if (m) {
         // 🔴 **旧格式要"猜"出 kind**（2026-10-16 补）：旧行没有「怎么来的」列。
         //    原来一律给 `kind: ''`，但 `weight('') = 0` ⇒ **"不许降级"那条对旧行失效**，
-        //    于是一条旧格式的「评论」记录可能被后来的 `bili_pick` 覆盖成「挑中」
+        //    于是一条旧格式的「评论」记录可能被后来的 `bilij_pick` 覆盖成「挑中」
         //    并把 rpid 清掉 ⇒ 之后 `alreadyCommented` 变 false ⇒ **会给已评论过的再发一条**。
         //    猜法（有依据，不是瞎猜）：**有 rpid ⇒ 一定是评论过的**（rpid 只在真发成功后写）；
         //    否则看备注里有没有「挑中」→ 挑中，其余留空。
@@ -678,7 +697,7 @@ export function apply(ctx, config) {
   /* ─────────────── 账号表 accounts.md（2026-10-18 加） ───────────────
    *
    * ⭐ **它解决什么问题**：使用者说「关注 AIGC深一度 这个 UP 主」时，
-   *    模型得先把**昵称**换成 **uid** 才能取他的视频（`bili_user_videos` 要 uid）。
+   *    模型得先把**昵称**换成 **uid** 才能取他的视频（`bilij_user_videos` 要 uid）。
    *
    * ── 为什么要缓存（⚠️ 不是为省时间）──────────────────────────
    *   实测量过（本机，3 次取中位数）：
@@ -794,7 +813,7 @@ export function apply(ctx, config) {
   }))
 
   tool({
-    name: 'bili_whoami',
+    name: 'bilij_whoami',
     description: '看 B站 那边登录的是谁（凭证是否有效、昵称、mid）。第一次用要先在「刷B站」设置页里扫码登录。',
     parameters: {},
     async execute() {
@@ -807,7 +826,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_search',
+    name: 'bilij_search',
     description: '搜 B站 视频（可排序、可按日期过滤）。返回标题 / BV号 / 播放量 / UP / 时长 等。\n'
       + '⚠️ 刷一轮的用法：先按设置里的「搜索方式」与「只看最近几天」搜，然后**读字幕原文**再判断（别看摘要下结论）。\n'
       + '⚠️ 返回里**没有发布时间** ⇒ 要按时间筛只能靠 days 参数让 B站 自己筛（本地没法再筛）。',
@@ -872,12 +891,12 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_search_user',
+    name: 'bilij_search_user',
     description: '按**昵称**搜 B站 用户（UP 主），返回 uid / 粉丝数 / 投稿数 / 签名。\n'
       + '⭐ 使用者说「关注某某 UP 主」时**先调这个** —— '
-      + '🔴 **不要**拿账号名去 `bili_search` 搜视频：实测搜回来的多半是"别人提到他"，'
+      + '🔴 **不要**拿账号名去 `bilij_search` 搜视频：实测搜回来的多半是"别人提到他"，'
       + '一条他的都没有（真踩过）。\n'
-      + '⭐ 查到之后用 `bili_user_videos` 取他的投稿；uid 会被自动记进家目录的 `accounts.md`，下次直接用。',
+      + '⭐ 查到之后用 `bilij_user_videos` 取他的投稿；uid 会被自动记进家目录的 `accounts.md`，下次直接用。',
     parameters: {
       keyword: { type: 'string', description: '用户昵称（全名或一部分都行）' },
       num: { type: 'number', description: '返回几个候选（默认 10）' },
@@ -900,7 +919,7 @@ export function apply(ctx, config) {
        *   而选错的表现是"刷回来的视频全不是他要的那个人"，很难发现。
        * ⇒ 判据：**只有恰好 1 个结果时**才自动记；
        *   多个 ⇒ **不写**，让模型按提示词的要求**报出它选了谁**，由模型调
-       *   `bili_user_videos`（传名字）时再落账 —— 那时它已经明确选定了 uid。
+       *   `bilij_user_videos`（传名字）时再落账 —— 那时它已经明确选定了 uid。
        */
       if (users.length === 1 && users[0]?.uid) {
         try { await markAccount(users[0].name || keyword, users[0].uid, { fans: users[0].fans }) } catch { /* 记不上不影响搜索 */ }
@@ -921,12 +940,12 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_user_videos',
+    name: 'bilij_user_videos',
     description: '取**某个 UP 主自己的投稿**。\n'
       + '⭐ 给 `name`（昵称）就会**自动解析 uid**：先查家目录的 `accounts.md` 缓存，'
       + '查不到才去搜用户，搜到后自动记进缓存 —— 所以同一个账号只需解析一次。\n'
       + '⭐ 已经知道 uid 就直接给 `uid`（更省一步）。\n'
-      + '🔴 **不要**拿账号名去 `bili_search` 搜视频找 uid —— 那是搜"别人提到他"，不是他的作品。',
+      + '🔴 **不要**拿账号名去 `bilij_search` 搜视频找 uid —— 那是搜"别人提到他"，不是他的作品。',
     parameters: {
       uid: { type: 'number', description: 'UP 主的 UID（数字）。与 name 二选一' },
       name: { type: 'string', description: 'UP 主的昵称。与 uid 二选一；会走缓存/自动解析' },
@@ -937,7 +956,7 @@ export function apply(ctx, config) {
     async execute(args) {
       /**
        * ⭐ **两种入参**（2026-10-18 加 `name` 这条路）：
-       *   · 给 `uid`  ⇒ 直接用（模型已经从 bili_search_user 拿到了）
+       *   · 给 `uid`  ⇒ 直接用（模型已经从 bilij_search_user 拿到了）
        *   · 给 `name` ⇒ ① 先查 `accounts.md` 缓存；② 没有再搜用户；③ 搜到就记账
        *
        * 🔴 为什么要支持 `name`：使用者的原话是「关注某某 UP 主」——**报的是昵称**。
@@ -1002,7 +1021,7 @@ export function apply(ctx, config) {
         return {
           ok: false,
           error: '没给 uid 也没给 name，或 name 解析不出来。'
-            + '先用 bili_search_user 按昵称搜（会返回 uid），再带着 uid 调这个；'
+            + '先用 bilij_search_user 按昵称搜（会返回 uid），再带着 uid 调这个；'
             + '也可以直接给 name 让这里自动解析。拿不到就如实说"没解析出这个账号"，**别猜**。',
         }
       }
@@ -1010,10 +1029,10 @@ export function apply(ctx, config) {
       const order = String(args.order || 'pubdate')
       /**
        * ⚠️ **参数名必须对齐 MCP 那个函数的签名**（实测核对过，别按感觉写）：
-       *   `def bili_user_videos(uid: int, pn: int = 1, ps: int = 30, order: str = "pubdate", keyword: str = "")`
+       *   `def bilij_user_videos(uid: int, pn: int = 1, ps: int = 30, order: str = "pubdate", keyword: str = "")`
        *   ⇒ 每页条数叫 **`ps`**，不是 `num`。
        *
-       * 🔴 我第一版传的是 `num` —— 那是 `bili_search` 的参数名，两个工具**不一样**。
+       * 🔴 我第一版传的是 `num` —— 那是 `bilij_search` 的参数名，两个工具**不一样**。
        *    传错的后果是 `ps` 用默认值 30、`num` 被当成未知参数
        *    （FastMCP 会忽略或报错，取决于版本）⇒ 表现为"条数设置不生效"，
        *    **不报错**、很难看出来。
@@ -1024,7 +1043,7 @@ export function apply(ctx, config) {
       if (String(args.keyword || '').trim()) payload.keyword = String(args.keyword).trim()
       const r = await call('bili_user_videos', payload)
       /**
-       * ⭐ **和 `bili_search` 一样接进候选池 + 判重**（2026-10-18）。
+       * ⭐ **和 `bilij_search` 一样接进候选池 + 判重**（2026-10-18）。
        *
        * 为什么必须一致：这是"另一条捞视频的路" —— 如果它不并入候选池，
        * 那一轮的「池子够不够」判断会**低估**（按 UP 主捞回来的那些不算数）；
@@ -1069,7 +1088,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_subtitle',
+    name: 'bilij_subtitle',
     description: '取一个视频的字幕（AI 字幕）全文。**判断内容就靠它** —— 没有字幕时，'
       + '若设置里开了「本地转写」再想别的办法，否则直接跳过这条。\n'
       + '⭐ 调它就等于「你看过这条了」—— 插件会**自动记进判重表**（浏览判重），下次不再占候选预算。',
@@ -1079,7 +1098,7 @@ export function apply(ctx, config) {
       const r = await call('bili_subtitle', { bvid })
       // ⭐ **浏览判重**（2026-10-16 加）：读字幕 = 真看过 ⇒ 立刻记账。
       //    为什么在这里做：这是**最可靠的"看过"信号**（模型一定会调它才会判断内容），
-      //    比"靠模型自觉调 bili_seen"稳得多 —— 实测那轮它只主动记了 3 条，
+      //    比"靠模型自觉调 bilij_seen"稳得多 —— 实测那轮它只主动记了 3 条，
       //    而实际读过字幕的有十几条 ⇒ 没记的下轮还会被搜出来、白占候选预算。
       //    ⚠️ 已有记录不覆盖（后记的「评论/挑中」比「看过」更重，别被降级）。
       try {
@@ -1090,7 +1109,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_comments',
+    name: 'bilij_comments',
     description: '取一个视频的热门评论（含点赞/回复数）。刷一轮时顺手翻一眼，看值不值得占用使用者一次注意力。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
@@ -1137,7 +1156,7 @@ export function apply(ctx, config) {
   }
 
   tool({
-    name: 'bili_read',
+    name: 'bilij_read',
     description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 回复细则 reply.md / 判重表 seen.md / 产物 reports/*.md …）。\n'
       + '⭐ **刷一轮读章程就用它** —— 前台会话的工作区是另一个目录，普通文件工具**读不到**家目录里的章程。',
     parameters: {
@@ -1162,7 +1181,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_write',
+    name: 'bilij_write',
     description: '往插件家目录里写文件（**写日报就用它**，路径见提示词里给的那个）。\n'
       + '⚠️ 沙箱只让前台会话写它**自己的工作区**，写不到家目录 ⇒ 所以要走这个工具。\n'
       + '默认**覆盖**整个文件；要追加传 append: true。',
@@ -1212,11 +1231,11 @@ export function apply(ctx, config) {
   const poolTarget = () => Math.max(5, Number(cfg.searchNum) || 20)
 
   tool({
-    name: 'bili_candidates',
+    name: 'bilij_candidates',
     description: '**候选池**：一轮里搜到的候选视频都汇总在这儿（插件自动记账，你只管搜）。\n'
-      + '⭐ 用法：每调一次 `bili_search`，这里就自动多几条。**开始筛选之前先看这里够不够** ——\n'
+      + '⭐ 用法：每调一次 `bilij_search`，这里就自动多几条。**开始筛选之前先看这里够不够** ——\n'
       + '不够就换关键词继续搜（放宽词 / 换角度），够了再开始读字幕筛选。\n'
-      + '⚠️ 池子是**这一轮**的（每跑一轮会清空），不跨轮次；跨轮的判重看 `bili_seen`。\n'
+      + '⚠️ 池子是**这一轮**的（每跑一轮会清空），不跨轮次；跨轮的判重看 `bilij_seen`。\n'
       + '⚠️ 这个工具是**本插件**提供的 —— 只有在前台模式下那一轮才有。',
     parameters: {
       reset: { type: 'boolean', description: 'true = 清空重来（一般不用）' },
@@ -1224,9 +1243,9 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       if (args.reset) { poolStart(); return { ok: true, reset: true, count: 0, target: poolTarget(), enough: false } }
-      if (candidatePool === null) return { ok: true, count: 0, target: poolTarget(), enough: false, list: [], hint: '还没搜过 —— 先调 bili_search' }
+      if (candidatePool === null) return { ok: true, count: 0, target: poolTarget(), enough: false, list: [], hint: '还没搜过 —— 先调 bilij_search' }
       const seen = readSeen()
-      // ⭐ 池子里本身就**不含**看过的（`bili_search` 入池前已滤），这里再滤一次纯属兜底
+      // ⭐ 池子里本身就**不含**看过的（`bilij_search` 入池前已滤），这里再滤一次纯属兜底
       const all = [...candidatePool.values()].filter((v) => !seen.has(v.bvid))
       const num = Math.max(1, Math.min(Number(args.num) || 50, 200))
       return {
@@ -1247,15 +1266,15 @@ export function apply(ctx, config) {
    *
    * 使用者要求：候选里**所有值得看的**都该记下来（不只是发过评论的）。
    *
-   * 做法：模型决定"这条值得看"时调 `bili_pick`（或 `bili_seen{kind:'挑中'}`），
+   * 做法：模型决定"这条值得看"时调 `bilij_pick`（或 `bilij_seen{kind:'挑中'}`），
    * 插件把这条记进 `seen.md` —— **下轮就不再占它的候选预算**。
    *
    * ⚠️ 为什么不能"完全自动"：**"值得看"是模型的判断**，插件不知道它挑中了哪条
-   *    ⇒ 只能由它显式调一下。但**降级措施**在：只要它读了字幕（`bili_subtitle`），
+   *    ⇒ 只能由它显式调一下。但**降级措施**在：只要它读了字幕（`bilij_subtitle`），
    *    就已经被记成「看过」（浏览判重）⇒ 漏调也不会被重复搜出来读。
    */
   tool({
-    name: 'bili_pick',
+    name: 'bilij_pick',
     description: '**标记「这条值得看」** —— 挑中之后调它一下（不管后面发不发评论）。\n'
       + '⭐ 为什么必须调：凡是**值得看的**都该进判重表，下一轮才不会再占候选预算。\n'
       + '（发评论会自动记，但**没发评论的那些**只有你调了这个才记得下。）\n'
@@ -1278,7 +1297,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_reply',
+    name: 'bilij_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
       + '除非本人当场让你发（那时传 force: true）。\n'
@@ -1300,9 +1319,9 @@ export function apply(ctx, config) {
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
-      rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）；回楼中楼时传 bili_replies 给的 myRpid' },
-      root: { type: 'number', description: '楼层根评论 id（回楼中楼时传 bili_replies 给的 hisRpid；不填就退回用 rpid，实测也能落对）' },
-      replyTo: { type: 'string', description: '⭐ 回楼中楼时**必传**：bili_replies 给的 hisRpid（他新写那条的 id）—— 插件靠它记账、免得重复回复同一个人' },
+      rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）；回楼中楼时传 bilij_replies 给的 myRpid' },
+      root: { type: 'number', description: '楼层根评论 id（回楼中楼时传 bilij_replies 给的 hisRpid；不填就退回用 rpid，实测也能落对）' },
+      replyTo: { type: 'string', description: '⭐ 回楼中楼时**必传**：bilij_replies 给的 hisRpid（他新写那条的 id）—— 插件靠它记账、免得重复回复同一个人' },
       force: { type: 'boolean', description: '本人当场让你发的 ⇒ 传 true：同时越过「自动评论关着」与「本轮额度已满」两道闸（账照记）' },
       repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
     },
@@ -1348,9 +1367,9 @@ export function apply(ctx, config) {
       // 🔁 **发评论的判重闸 —— 只看「评论」这一层**（2026-10-16 修，重要）。
       //
       // 🔴 修之前是 `if (seen && !args.repeat)` —— 即「表里有**任何**记录就拦」。
-      //    那在"只有 bili_reply 会写表"的年代等价于"评论过没有"，是对的；
+      //    那在"只有 bilij_reply 会写表"的年代等价于"评论过没有"，是对的；
       //    但我加了「挑中 / 看过」两层之后，这句话就**坏了**：
-      //    提示词要求「先 bili_pick、再发评论」⇒ 发评论时表里必然已有「挑中」
+      //    提示词要求「先 bilij_pick、再发评论」⇒ 发评论时表里必然已有「挑中」
       //    ⇒ **评论 100% 被自己拦下**（2026-10-16 实测那轮：5 条全拦，
       //       报错还照着旧逻辑说"（…发过）"，其实根本没发过 —— 提示词一起骗人）。
       //
@@ -1440,13 +1459,13 @@ export function apply(ctx, config) {
           // ⭐ `root`（2026-10-16）：回**楼中楼**时要带上"楼层根"。
           //    实测（同年同日，真发+读回+删）：传 `root=parent=rpid` 能正确落在楼中楼；
           //    传 `root=rpid, parent` 省略**也能**落对 ⇒ 两种都行。
-          //    但从 `bili_replies` 拿到的是**通知里的 source_id**（他新写的那条），
+          //    但从 `bilij_replies` 拿到的是**通知里的 source_id**（他新写的那条），
           //    它才是"要回的那条"；而 `root` 应当是**楼层根**。
           //    ⇒ 让调用方显式传，拿不到就退回 rpid（与 MCP 的默认行为一致）。
           root: Number(args.root) || 0,
         })
       } catch (e) {
-        // ⚠️ 与 bili_replies 同理：MCP 不可用时 `call` 会抛，包起来给人话。
+        // ⚠️ 与 bilij_replies 同理：MCP 不可用时 `call` 会抛，包起来给人话。
         //    ⚠️ 这里**不能** markSeen —— 评论没发出去，记了会让这条被永久跳过。
         return { ok: false, error: `发评论失败：${e?.message ?? e}`, hint: '可能是 MCP 没起来、B站 登录过期、或被风控。这条**没发出去**，没记账，可以稍后重试。' }
       }
@@ -1469,7 +1488,7 @@ export function apply(ctx, config) {
         await markRoundUse(isReply ? 'replies' : 'comments',
           isReply ? (String(args.replyTo ?? '').trim() || String(Number(args.rpid) || '')) : bvid)
 
-        // ⭐ 回复账本：只在**真回成功**时写 `repliedAt` ⇒ `bili_replies` 才会把这条摘掉。
+        // ⭐ 回复账本：只在**真回成功**时写 `repliedAt` ⇒ `bilij_replies` 才会把这条摘掉。
         //    用 `args.replyTo`（= 通知里的 source_id / hisRpid）当键。
         //    ⚠️ 不写的话，同一条会被反复列出来 ⇒ 可能重复回复同一个人。
         const rt = String(args.replyTo ?? '').trim()
@@ -1491,12 +1510,12 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_replies',
+    name: 'bilij_replies',
     description: '⭐ **看谁回复了「插件自己发的那条评论」** —— 想回评论时先调这个。\n'
       + '🔴 **只返回"回插件那条评论"的**：回复**使用者本人**（人工发的评论）的**不会给你** ——\n'
       + '   那种一律不要回（这是硬过滤，不是让你自己判断）。\n'
       + '🔁 **已经回过的不会再返回**（去重账本 `replies.json`）。\n'
-      + '⭐ 回的时候：把返回里的 `myRpid` 当 `rpid`、`hisRpid` 当 `root`，传给 `bili_reply`。\n'
+      + '⭐ 回的时候：把返回里的 `myRpid` 当 `rpid`、`hisRpid` 当 `root`，传给 `bilij_reply`。\n'
       + '⚠️ 这里**不含 @ 和点赞通知**（只看回复），那是两回事。',
     parameters: {
       all: { type: 'boolean', description: 'true = 连"已回过的"也列出来（默认只给还没回的）' },
@@ -1594,18 +1613,18 @@ export function apply(ctx, config) {
         hint: out.length
           ? `有 ${out.length} 条待回`
             + (q.known ? `（本轮回复额度 ${q.used}/${q.limit}${q.over ? '，**已用完 ⇒ 再回会被打回**' : ''}）` : '')
-            + '。回的时候把 hisRpid 同时传给 bili_reply 的 root 和 replyTo。'
+            + '。回的时候把 hisRpid 同时传给 bilij_reply 的 root 和 replyTo。'
           : `没有待回的（另有 ${others} 条是回复使用者人工评论的，已按规矩忽略）。`,
       }
     },
   })
 
   tool({
-    name: 'bili_seen',
+    name: 'bilij_seen',
     description: '看/记「判重表」（家目录的 seen.md）：哪些视频已经占用过使用者的注意力。\n'
       + '⭐ **大部分记账是插件自动做的**（读过字幕 ⇒「看过」；发评论 ⇒「评论」）——\n'
       + '   这条工具主要给你**主动查**（例如在报告里说明"这条以前看过所以跳过"）。\n'
-      + '⚠️ 想标「挑中」用 `bili_pick` 更清楚；这里 mark 默认也记成「挑中」。',
+      + '⚠️ 想标「挑中」用 `bilij_pick` 更清楚；这里 mark 默认也记成「挑中」。',
     parameters: {
       list: { type: 'boolean', description: 'true = 列出全部（默认只回条数 + 最近几条）' },
       mark: { type: 'string', description: '要记进表的 BV 号（不填 = 只查不记）' },
@@ -1641,7 +1660,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_status',
+    name: 'bilij_status',
     description: '看它今天的状态：跑了没跑、挑了几条、额度剩多少、报告在哪、登录过没有、下次窗口什么时候开。',
     parameters: {},
     async execute() {
@@ -1668,7 +1687,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_run',
+    name: 'bilij_run',
     description: '**立刻跑一轮**（不等窗口）：把 duty.md 交给它去刷、挑出值得看的各写一份产物。'
       + '适合"我现在就想看一份"的场合。'
       + '⚠️ 它**不等那一轮跑完**就返回（起完就回），产物落在设置页那个「产物目录」里。',
@@ -1677,9 +1696,9 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_login_start',
+    name: 'bilij_login_start',
     description: '开始 B站 扫码登录：出二维码（画成 PNG 存在插件家目录里，返回路径）和一个 key。\n'
-      + '用法：拿到 PNG 后用 `present` 把它推给本人（手机 B站 → 我的 → 扫一扫），再用 `bili_login_poll` 轮询。\n'
+      + '用法：拿到 PNG 后用 `present` 把它推给本人（手机 B站 → 我的 → 扫一扫），再用 `bilij_login_poll` 轮询。\n'
       + '⚠️ 二维码大约 180 秒有效，出码要马上递过去；手机上确认时选「记住我」那种长期登录。',
     parameters: {},
     async execute() {
@@ -1687,16 +1706,16 @@ export function apply(ctx, config) {
       const png = await renderQrPng(cfg.pythonPath, stateDir, url)
       return {
         ok: true, key, url, png,
-        hint: png ? '用 present 把这张 PNG 推给本人扫；扫完调 bili_login_poll' : '没画出 PNG：先去设置里点「建 venv 装依赖」（venv 里要有 qrcode）',
+        hint: png ? '用 present 把这张 PNG 推给本人扫；扫完调 bilij_login_poll' : '没画出 PNG：先去设置里点「建 venv 装依赖」（venv 里要有 qrcode）',
       }
     },
   })
 
   tool({
-    name: 'bili_login_poll',
+    name: 'bilij_login_poll',
     description: '查扫码结果：waiting 还没扫 / scanned 扫了待确认 / ok 成功 / expired 过期。'
       + '成功时会自动把凭证写进插件家目录的 `bili_credential.json`（MCP 认的那四个字段）。',
-    parameters: { key: { type: 'string', description: 'bili_login_start 给的那个 key' } },
+    parameters: { key: { type: 'string', description: 'bilij_login_start 给的那个 key' } },
     async execute(args) {
       const r = await loginPoll(String(args.key ?? ''))
       if (r.state === 'ok') {
@@ -1709,7 +1728,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_setup',
+    name: 'bilij_setup',
     description: '给刷B站装运行环境：在插件家目录建一个**独立 venv**、装上那个 Python MCP 的依赖，装完自动把 `pythonPath` 指过去。\n'
       + '**第一次用之前跑一次**。⭐ 它**起完就返回、不等装完**（几分钟的活），进度看家目录里的 `install.log`。',
     parameters: {},
@@ -1717,7 +1736,7 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_config',
+    name: 'bilij_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
@@ -1994,9 +2013,9 @@ export function apply(ctx, config) {
      *
      * 🔴 修掉的两个毛病（都是实测撞出来的）：
      *   ① 原来按「谁的 mtime 新」挑 ⇒ 挑到**插件包目录**那份，
-     *      而 `bili_read` 的白名单只有「家目录 + 工作区」⇒ **读章程被当场拒**：
+     *      而 `bilij_read` 的白名单只有「家目录 + 工作区」⇒ **读章程被当场拒**：
      *        `{ ok:false, error:"只允许读写这两个目录里的东西（…）" }`
-     *   ② 它只好**自己猜**才读得到 —— 实测那轮一共调了 3 次 `bili_read`：
+     *   ② 它只好**自己猜**才读得到 —— 实测那轮一共调了 3 次 `bilij_read`：
      *        包目录路径 ❌被拒 → `duty.md` ✅读到 → `prompts/duty.md` ❌不存在
      *      ⇒ 使用者原话："不要每次执行任务的时候都白跑一遍"。
      */
@@ -2022,7 +2041,7 @@ export function apply(ctx, config) {
        * 使用者要的是：**一段话，不用考虑分行，模型自己理解他要关注什么**
        * ——包括"关注一件事还是多件事"、以及**账号 vs 主题**的区别。
        *
-       * 🔴 **但它不替代搜索**：真正去搜时仍然要 `bili_search(keyword=...)`，
+       * 🔴 **但它不替代搜索**：真正去搜时仍然要 `bilij_search(keyword=...)`，
        *    也就是**仍然要模型自己组合关键词**（这正是 `keywordMode=llm` 那条路）。
        *    自由文本改的只是**输入的表达力**：一段话能写进
        *    "顺便关注 XX 这个 UP 主""不要入门教程那种""最近在搞 RAG"，
@@ -2053,13 +2072,13 @@ export function apply(ctx, config) {
           + `把每一件都算进来，别只抓第一件。\n`
           + `  · 🔴 **分清"主题"和"账号"** —— 这两类**走不同的路**，别混：\n`
           + `      - **主题**（例如"大模型论文""RAG 实践"）⇒ 自己组合出更具体的搜索词，\n`
-          + `        分批调 \`bili_search\`（一轮里换 2~4 组不同组合，别只用一组就下结论）；\n`
+          + `        分批调 \`bilij_search\`（一轮里换 2~4 组不同组合，别只用一组就下结论）；\n`
           + `        字要落在「领域 + 具体内容」上，避开「入门 / 教程 / 毕设 / 水论文」这类流量词。\n`
           + `      - **账号 / UP 主**（例如"关注一下某某 UP 主"）⇒ 🔴 **找人和找内容是两回事**：\n`
-          + `          ① 先 \`bili_search_user\`（按**昵称**搜**用户**）拿 uid ——\n`
-          + `             ⚠️ **不要**拿账号名去 \`bili_search\` 搜视频！实测那搜回来的是"别人聊到这个号"，\n`
+          + `          ① 先 \`bilij_search_user\`（按**昵称**搜**用户**）拿 uid ——\n`
+          + `             ⚠️ **不要**拿账号名去 \`bilij_search\` 搜视频！实测那搜回来的是"别人聊到这个号"，\n`
           + `             一条他本人的视频都没有（真踩过）。搜不到就换个写法再试，**不要**退回去搜视频。\n`
-          + `          ② 再 \`bili_user_videos\` 取他的投稿。⭐ 也可以**直接给它 name**，\n`
+          + `          ② 再 \`bilij_user_videos\` 取他的投稿。⭐ 也可以**直接给它 name**，\n`
           + `             它会先查家目录 \`accounts.md\` 的缓存、没有才去搜 —— 同一个号只解析一次。\n`
           + `          ③ 🔴 **必须报出你选了谁**：搜出多个同名号时自己挑（看粉丝数 / 投稿数 / 签名 / 认证），\n`
           + `             但要在报告里写明「选了 XXX（N 粉丝），因为……」。拿不准就照实说\n`
@@ -2117,8 +2136,8 @@ export function apply(ctx, config) {
      *
      * 为什么硬注入、而不是"让它自己去读"：
      *   · 细则**只在「回复评论」开着时才用得上** ⇒ 有条件；
-     *   · 但它**必须被看到** —— 靠提示词说"回之前先 `bili_read` 读一份"是**软要求**，
-     *     模型可能忘读、或读了不照做（这个教训刚在 `bili_replies` 上吃过一次）。
+     *   · 但它**必须被看到** —— 靠提示词说"回之前先 `bilij_read` 读一份"是**软要求**，
+     *     模型可能忘读、或读了不照做（这个教训刚在 `bilij_replies` 上吃过一次）。
      *   ⇒ 那就**跟着开关一起进提示词**：开着整份拼进来，关着一个字都不占。
      *
      * ⚠️ 与章程的分工（**两边别重复**）：
@@ -2143,7 +2162,7 @@ export function apply(ctx, config) {
         : `使用者还没写人设 —— 那就中性一点，别擅自扮演任何人格。`)
       + ownerDoc
       + (cfg.runMode === 'front'
-        ? `**先读章程**：直接调 \`bili_read\`，\`path\` 就传这一个：\n`
+        ? `**先读章程**：直接调 \`bilij_read\`，\`path\` 就传这一个：\n`
           + `    ${duty}\n`
           + `  🔴 **就用上面这个路径，不要试别的**（不要拼相对路径、不要试 \`prompts/duty.md\`、`
           + `不要用 playwright / 记事本去翻）—— 那几种**都读不到**，只会白费几轮。\n`
@@ -2183,19 +2202,19 @@ export function apply(ctx, config) {
             ? `  · ⚠️ 现在是**薄版**：上面的结构保留，但「讲了什么」「关键点」各压到两三行为止。\n`
             : '')
           + (cfg.runMode === 'front'
-            // ⚠️ 前台**必须**用 bili_write：它的 cwd 是工作区，沙箱不让它写家目录。
+            // ⚠️ 前台**必须**用 bilij_write：它的 cwd 是工作区，沙箱不让它写家目录。
             //    （产物现在固定在家目录的 reports/ ⇒ 普通文件工具写不进去。）
-            ? `  ⚠️ **用 \`bili_write\` 写**（你的工作区是另一个目录，沙箱不让你写家目录，`
+            ? `  ⚠️ **用 \`bilij_write\` 写**（你的工作区是另一个目录，沙箱不让你写家目录，`
               + `而这个产物目录在家目录里 ⇒ 只能走它）；`
               + `path 传**绝对路径**。写完看回执里的 \`bytes\` —— 那是真实字节数。\n`
             : `  用你手上的文件写入工具写即可（这个目录在你自己的家目录里）。\n`)
-          + `  ⭐ 另外：**挑中一条就调一次 \`bili_pick\`**（不管后面发不发评论）—— `
+          + `  ⭐ 另外：**挑中一条就调一次 \`bilij_pick\`**（不管后面发不发评论）—— `
           + `它会把这条记进判重表，下一轮就不再占候选预算。\n`)
       + `今天最多挑 ${cfg.perDay} 条；` + kwLine + `。`
       + `搜索：看 ${Math.max(1, Math.min(Number(cfg.searchNum) || 20, 50))} 条；`
       + `排序用${({ totalrank: '综合', pubdate: '最新', click: '播放量', dm: '弹幕' })[cfg.searchOrder] || '综合'}；`
       + (Number(cfg.searchDays) > 0
-        ? `只搜最近 ${Number(cfg.searchDays)} 天（**必须**给 bili_search 传 days=${Number(cfg.searchDays)}，返回里没有时间字段、不传就筛不了）。`
+        ? `只搜最近 ${Number(cfg.searchDays)} 天（**必须**给 bilij_search 传 days=${Number(cfg.searchDays)}，返回里没有时间字段、不传就筛不了）。`
         : `不限时间。`)
       + `本地转写是${cfg.transcribe ? '开着的（没字幕就用家目录里的 asr.py 转，命令见章程）' : '关着的（没字幕就跳过）'}；`
       /**
@@ -2228,25 +2247,25 @@ export function apply(ctx, config) {
       //    ⚠️ 别把细则再抄回这里 —— 抄了就是两处维护，改一处忘一处。
       + (cfg.replyToComments
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— `
-          + `⭐ **先调 \`bili_replies\` 看有没有待回的**（它已经筛好了该给谁回）；`
+          + `⭐ **先调 \`bilij_replies\` 看有没有待回的**（它已经筛好了该给谁回）；`
           + `具体怎么挑、怎么回、不能回哪些，见下面「回复评论的细则」。`
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + replyDoc
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
       // 🔴 **候选池要求**（2026-10-16 加）—— 使用者实测发现「它搜 4 组就直接开始挑，
       //    没有『先攒够候选再筛』这一步」。
-      // ⚠️ **只有前台模式能自动记账**（`bili_search` 是插件工具；后台那轮用的是 MCP 的
+      // ⚠️ **只有前台模式能自动记账**（`bilij_search` 是插件工具；后台那轮用的是 MCP 的
       //    同名工具，插件没加载 ⇒ 没有池子）⇒ 后台那条路只能靠**提示词里的纪律**。
       + (cfg.runMode === 'front'
         ? `\n\n===== 搜索流程（**必须按这个顺序**）=====\n`
           + `1. **先攒候选**：反复搜（换不同的词、放宽或收窄），每搜一次结果会**自动进候选池**。\n`
           + `2. **攒够再筛**：每搜完一次看返回里的 \`poolEnough\`；\n`
           + `   - \`false\` ⇒ **换个关键词继续搜**（不许在这一步就开始挑）；\n`
-          + `   - \`true\`  ⇒ 才进下一步。也可随时用 \`bili_candidates\` 看池子里现在有什么。\n`
+          + `   - \`true\`  ⇒ 才进下一步。也可随时用 \`bilij_candidates\` 看池子里现在有什么。\n`
           + `   ⚠️ **搜不到就如实说**：换了几组词池子仍凑不够（主题本来就冷门），\n`
           + `     就在报告里写明"搜了哪几组、各几条、总共多少，没达到目标"，然后就着现有的挑。\n`
           + `     不要为凑数硬塞不相关的，也不要反复重试同一种搜法。\n`
-          + `3. **再读字幕筛**：从池子里挑，逐条 \`bili_subtitle\` 读原文判断。\n`
+          + `3. **再读字幕筛**：从池子里挑，逐条 \`bilij_subtitle\` 读原文判断。\n`
           + `===== 流程结束 =====\n`
         : `\n\n===== 搜索流程（**必须按这个顺序**）=====\n`
           + `1. **先攒候选**：**换 3~5 组不同的词**反复搜（放宽 / 换个角度都行），`
@@ -2269,8 +2288,8 @@ export function apply(ctx, config) {
           + `你是一个**普通会话**，能力集是标准模式 —— 手上有整个 DSH 的工具`
           + `（能改文件、能跑命令、能调别的插件）。所以**必须**守住这条：\n`
           + `\n**默认情况下，你只用 B站 那几个工具，只做「刷一轮 B站」这一件事。**\n`
-          + `- ✅ 默认可用：bili_read / bili_write / bili_search / bili_candidates / bili_subtitle / `
-          + `bili_comments / bili_reply / bili_replies / bili_seen。\n`
+          + `- ✅ 默认可用：bilij_read / bilij_write / bilij_search / bilij_candidates / bilij_subtitle / `
+          + `bilij_comments / bilij_reply / bilij_replies / bilij_seen。\n`
           + `  ⚠️ 这几个是**本插件注册的工具**（不是别的插件）—— 它们只做 B站 这件事。\n`
           + `- ❌ 默认**不要**：改任何代码 / 动任何仓库 / 跑与 B站 无关的命令 /`
           + `碰别的插件或别的库（记忆库、通知、桌面控制这些一律不碰）/`
@@ -2471,12 +2490,12 @@ export function apply(ctx, config) {
    *
    * 🔴 **为什么能统一**（这是第三代才成立的原因）：
    *    前台会话的 cwd 是工作区、沙箱不让它写家目录 ——
-   *    但**我们有 `bili_write`**（插件自己用 node:fs，**不经沙箱**，白名单里有家目录）
-   *    ⇒ 前台也用 `bili_write` 写到这个家目录路径即可，不再需要"搬进工作区"那种绕法。
+   *    但**我们有 `bilij_write`**（插件自己用 node:fs，**不经沙箱**，白名单里有家目录）
+   *    ⇒ 前台也用 `bilij_write` 写到这个家目录路径即可，不再需要"搬进工作区"那种绕法。
    *
    * 📌 这份产物当天改过三代，记下演化原因，别再来回改：
    *   ① `<家>\out\<日期>.md`（一份汇总日报）—— 起点；
-   *   ② 搬进工作区（绕开沙箱）—— 是因为当时**还没有** `bili_write`；
+   *   ② 搬进工作区（绕开沙箱）—— 是因为当时**还没有** `bilij_write`；
    *   ③ **统一回 `<家>\reports\`**（本版）—— 有了跨工作区写工具，
    *      "搬进工作区"这个绕法就不必要了，而且它造成了**两处产物、面板看不全**。
    */
@@ -3650,7 +3669,7 @@ export function apply(ctx, config) {
       //    使用者要求去掉上限（"大于 1 即可"）—— 想回多少条是他自己的事。
       //    ⚠️ 但仍要**防 NaN/负数/小数**：`Number(x) || 1` 把 NaN/0/空串兜成 1，
       //       `Math.max(1, …)` 兜住负数；`Math.floor` 兜住小数（"2.5 条"没有意义）。
-      //    ⚠️ 现在它们**有硬闸了**（见 bili_reply / bili_replies 里的配额判断）——
+      //    ⚠️ 现在它们**有硬闸了**（见 bilij_reply / bilij_replies 里的配额判断）——
       //       设成多大就真能回多少条，所以这里不再是"纯装饰"。
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.floor(Number(patch.replyPerRound) || 1))
       if ('commentPerRound' in patch) patch.commentPerRound = Math.max(1, Math.floor(Number(patch.commentPerRound) || 1))
@@ -3831,7 +3850,7 @@ export function apply(ctx, config) {
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
     if (req.method === 'GET' && path === '/api/bili-duty/report') {
       const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
-      // 日报**只有一处**（`<家>\out\`）—— 前台那条路也走 `bili_write` 写到这里。
+      // 日报**只有一处**（`<家>\out\`）—— 前台那条路也走 `bilij_write` 写到这里。
       // （中途曾把前台日报改到工作区里，那是弯路：使用者反馈"看到 out 目录但没有输出"。
       //   正解是**给工具**而不是**搬家** —— 见 `reportPathFor` 的注释。）
       const file = join(outDir, day + '.md')

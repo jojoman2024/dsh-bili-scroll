@@ -19,7 +19,13 @@
 # ============================================================================
 
 - insert:
-    - id: bili-scroll
+    # ⚠️ `id` 是 **loader entry id**，同一个 profile 里**必须唯一**。
+    #    🔴 2026-10-18 从 `bili-scroll` 改成 `bili-scroll-jojo` ——
+    #    因为上游 `c1overzz/dsh-bili-scroll` 用的也是 `bili-scroll` ⇒
+    #    两个装进同一个 profile 会撞 id。
+    #    ⚠️ 改 id 之后，profile 里**旧的 `bili-scroll` 条目要清掉**
+    #       （否则会残留一条指向旧 id 的条目）。
+    - id: bili-scroll-jojo
       name: '@jojoman2024/dsh-bili-scroll'
       config:
         # 真正的用户配置在插件自己的 config 里（设置页可改），这里只放默认值
