@@ -1068,7 +1068,14 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         try {
           const r = await jpost('/upgrade', {})
           say((r && r.hint) || '正在升级', 'good')
-          say('升级过程写在下面的「主依赖的日志」里 —— 完了记得重启一次 dsh（不重启还是旧版）', 'warn')
+          /**
+           * ⭐ 说明**走的是国内镜像**（2026-10-18）。
+           * 为什么要说：升级要下载包，使用者看着日志长时间没动静时，
+           *   知道"它在从 npmmirror 拉"总比不知道强（而且镜像是国内直连，通常很快）。
+           * ⚠️ 这句必须与后端 `runUpgrade` 里那个 `MIRROR` 一致，否则是假信息。
+           */
+          say('正在从国内镜像（npmmirror）装 —— 日志在下面「主依赖的日志」里；'
+            + '镜像失败会自动改用官方源再试一次。装完记得重启 dsh（不重启还是旧版）', 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 

@@ -1735,18 +1735,77 @@ export function apply(ctx, config) {
           return
         }
         const cmd = dsh.command
+        /**
+         * ⭐⭐ **升级也走国内镜像**（2026-10-18，使用者要求）。
+         *
+         * ── 为什么必须和「检查更新」一致 ────────────────────────
+         *   上面 `/update` 已经改成**查 npm 版本号（走 npmmirror）**。
+         *   若这里（升级）还走官方源，就会出现：
+         *     「检查」说最新是 0.1.5（镜像上）→「升级」去官方源装 → 官方还没同步 ⇒ 装了个旧的，
+         *       或者干脆卡在 1800ms+ 的超时上。
+         *   ⇒ **查和装必须指向同一个源**，否则这个按钮组合本身就是坏的。
+         *
+         * ── 怎么传 ──────────────────────────────────────────
+         *   `dsh plugin` 是 **pnpm 的透传包装**（源码注释原话："forwarding to pnpm"，
+         *   且 `allowUnknownOption`）⇒ pnpm 的 `--registry <url>` 能直接用。
+         *   ✅ 实测（`dsh plugin --profile web add --registry <url> --help`）：
+         *      没人把它当成包名，pnpm 自己印出了 `--registry <url>` 这条帮助。
+         *
+         *   ⚠️ **必须放在包名【之前】** —— pnpm 的选项解析是按位置的，
+         *      放到 `@jojoman2024/...` 后面会被当成"又一个包名"。
+         *
+         *   ⚠️ 这里**不设 `--frozen-lockfile` / 不改 `.npmrc`**：
+         *      只给这一次操作指定源，不动使用者的全局 npm 配置
+         *      （那是他自己的环境，我们没资格改）。
+         */
+        const MIRROR = 'https://registry.npmmirror.com'
         // 🔴 桌面版同样要 `--expose-internals` + `ELECTRON_RUN_AS_NODE=1`（见 electronAsNode 注释）
         const args = [
           ...(dsh.electron ? ['--expose-internals'] : []),
-          ...dsh.args, 'plugin', '--profile', 'web', 'add', SPEC,
+          ...dsh.args, 'plugin', '--profile', 'web', 'add',
+          // ⚠️ 顺序要紧：`--registry` 必须在包名之前（见上面那段注释）
+          '--registry', MIRROR,
+          SPEC,
         ]
         appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
-        const code = await spawnTo(cmd, args, {
+        let code = await spawnTo(cmd, args, {
           sink: appendInstall,
           env: dsh.electron ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : null,
         })
+        /**
+         * ⭐ **镜像失败就退回官方源重试一次**（2026-10-18 加）。
+         *
+         * 为什么要有这一步：镜像虽然快（实测 55ms 量级），但**它不是官方的**，
+         * 可能有同步延迟 / 临时故障。若不给回退，镜像一挂「升级」就彻底不能用了
+         * —— 而那本来是唯一能自救的按钮。
+         *
+         * ⚠️ 判据是 **非 0 退出码**（pnpm 装不到包就非 0），不需要去解析它的输出文本
+         *    （那种解析又脆又容易误判）。
+         * ⚠️ 只在**第一次（用镜像）失败**时回退，不要无限重试。
+         */
+        if (code !== 0) {
+          /**
+           * 去掉 `--registry <url>` 这一对参数。
+           *
+           * 🔴 **第一版写错成** `args.filter((a, i) => !(a === '--registry' || args[i-1] === '--registry'))` ——
+           *    `args[i-1]` 在 filter 里指的是**原数组的前一个元素**，而 filter 会给每个元素都跑 false，
+           *    结果是"`--registry` 前后两个元素都被删"（连 `add` 都会被吃掉）。
+           *    ⇒ 改成**按下标收集**，明确只删这两个位置。
+           */
+          const drop = new Set()
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--registry') { drop.add(i); drop.add(i + 1) }
+          }
+          const fallbackArgs = args.filter((_, i) => !drop.has(i))
+          appendInstall(`\n=== 镜像源没装上（exit ${code}），改用官方源再试一次 ===\n`)
+          appendInstall('$ ' + cmd + ' ' + fallbackArgs.join(' ') + '\n')
+          code = await spawnTo(cmd, fallbackArgs, {
+            sink: appendInstall,
+            env: dsh.electron ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : null,
+          })
+        }
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
-        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add ' + SPEC + ' ===\n')
+        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add --registry ' + MIRROR + ' ' + SPEC + ' ===\n')
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
     })()
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
