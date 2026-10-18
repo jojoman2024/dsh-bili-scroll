@@ -506,6 +506,21 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-sw][data-on] i{left:18px;}
 [data-bd-sw][disabled]{opacity:.45;cursor:default;}
 
+/* ── 时间点行里的 input[type=time] 与「删除」图标按钮（2026-10-19 加）
+   ⚠️ 那个 input 同时挂了 data-bd-input（复用基础样式）和 data-bd-grow（撑满剩余宽度）
+      ⇒ 右侧的开关与删除按钮**始终贴右边缘**，横向对齐不靠逐个调 margin。
+   ⚠️ 只调**内部**（字体/内边距），**不写 margin** —— 行间距由结构规则统一给。 */
+input[type="time"][data-bd-input]{min-width:0;font-family:inherit;}
+input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55;cursor:pointer;}
+
+/* 删除这类"只有符号"的按钮：方形、不占宽度、hover 才显警示色。
+   ⚠️ 尺寸写死 28px 是为了与开关（22px 高）在一行里**垂直居中对齐**，
+      而不是让它跟着文字行高走（那会顶高整行）。 */
+[data-bd-btn][data-bd-icon]{flex:none;width:28px;height:28px;padding:0;line-height:1;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:16px;color:var(--dsw-alias-label-tertiary,#81858c);}
+[data-bd-btn][data-bd-icon]:hover{color:var(--dsw-alias-state-warn-primary,#c27c0e);}
+
 /* ── 提示条：**浮现式 toast**（2026-10-16）
  *
  * 🔴 改之前：提示是**塞在面板里的整块绿条**（runNote / msg / personaMsg 各占一行）
@@ -1578,18 +1593,133 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 
           h(ToggleRow, {
             label: '峰谷时段自动刷',
-            note: '只在谷时跑 —— 工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）；关了就只能手动跑',
+            /**
+             * ⚠️ 文案已随「自定义时间点」一起改（2026-10-19）：
+             *    原来只说"只在谷时跑"，现在下面还能加精确时间点 ⇒ 说明要把两种模式都讲清。
+             */
+            note: '打开后可以自己加时间点（精确到分钟）；一个都不加才按谷时跑 —— '
+              + '工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）。关了就只能手动跑',
             on: sw('peakValley'),
             onChange: (v) => patch({ peakValley: v }, '峰谷时段自动刷'),
           }),
-          sw('peakValley') ? h('div', { 'data-bd-sub': '' },
-            ...['noon', 'night'].map((k) => h(ToggleRow, {
-              key: k,
-              label: win[k].label,
-              note: `${win[k].start} – ${win[k].end}`,
-              on: sw(k),
-              onChange: (v) => patch({ [k]: v }, win[k].label),
-            }))) : null,
+
+          /**
+           * ⭐⭐ **自定义时间点**（2026-10-19 加，使用者要求）。
+           *
+           * 原话：「改成开启后，展开设置项，可直接设置具体时间，精确到分钟。
+           *   且可以自主添加多个时间。」「就已设置的时间行，应该有开关和删除按钮。」
+           *
+           * ── 设计（对齐库里的官方规范）──────────────────────
+           *   · 每行 = **一个 `[data-bd-row]`**（官方设置行形状：
+           *     `display:flex; align-items:center; gap:8px`），**不自己写 padding/margin**
+           *     —— 间距统一由 `[data-bd-sub] > *` 那条结构规则给（库里那条 trap 讲的就是这个）。
+           *   · 行内：`<input type="time">` + 开关 + 删除按钮，三者 `gap:8px`；
+           *     时间控件用 `data-bd-grow` 撑满 ⇒ 右侧两个图标始终贴右边缘（横向对齐不靠猜）。
+           *   · 「添加」按钮单独一行（`data-bd-row`）。
+           *
+           * ── 存储编码 ──────────────────────────────────────
+           *   `["09:30", "21:00!off"]` —— 见 `index.js` 里 schema 那段注释
+           *   （为什么不用对象数组：`normalize()` 会把非字符串元素过滤掉）。
+           */
+          sw('peakValley') ? (() => {
+            /**
+             * 把 `cfg.scheduleTimes` 解成 `[{ at, on }]`。
+             * ⚠️ 这里**必须自己再解一遍**（不能直接用 `cfg` 原样）：
+             *    面板拿到的是盘上那份编码串，解析规则要与后端 `readSchedule()` 一致。
+             *    容错同上：读不懂的跳过，绝不抛。
+             */
+            const parseTimes = (arr) => {
+              const out = []
+              const seen = new Set()
+              for (const s of (Array.isArray(arr) ? arr : [])) {
+                if (typeof s !== 'string') continue
+                const m = /^(\d{1,2}):(\d{2})(!off)?$/.exec(s.trim())
+                if (!m) continue
+                const hh = Number(m[1]); const mm = Number(m[2])
+                if (!(hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59)) continue
+                const at = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+                if (seen.has(at)) continue
+                seen.add(at)
+                out.push({ at, on: !m[3] })
+              }
+              return out.sort((a, b) => a.at.localeCompare(b.at))
+            }
+            /** 编码回存储形态 */
+            const encodeTimes = (list) => list.map((x) => (x.on ? x.at : x.at + '!off'))
+
+            const list = parseTimes(cfg.scheduleTimes)
+            /** 写回：**整份替换**（后端 normalize 只做类型过滤，不会合并数组） */
+            const save = (next) => patch({ scheduleTimes: encodeTimes(next) }, '自定义时间点')
+
+            return h('div', { 'data-bd-sub': '' },
+              /* ① 已设置的时间行（每行：时间 + 开关 + 删除） */
+              ...list.map((row, i) => h('div', { 'data-bd-row': '', key: 't' + i },
+                h('input', {
+                  'data-bd-input': '', 'data-bd-grow': '', type: 'time',
+                  value: row.at,
+                  /**
+                   * ⚠️ **用 onChange 直接写回**（不是 onBlur）：
+                   *    `<input type="time">` 的取值是"整块"给的（选完就是合法 HH:MM），
+                   *    不像文本框有"打到一半"的中间态 ⇒ 立即生效更符合预期。
+                   * ⚠️ 空值（用户清空）⇒ 忽略，不要把空串写进配置。
+                   */
+                  onChange: (e) => {
+                    const v = String(e.target.value || '')
+                    if (!/^\d{2}:\d{2}$/.test(v)) return
+                    const next = list.slice()
+                    next[i] = { ...next[i], at: v }
+                    save(next)
+                  },
+                }),
+                /* 这一行自己的开关 */
+                h(Switch, {
+                  on: row.on,
+                  onChange: (v) => {
+                    const next = list.slice()
+                    next[i] = { ...next[i], on: v }
+                    save(next)
+                  },
+                }),
+                /* 删除这一行 */
+                h('button', {
+                  'data-bd-btn': '', 'data-bd-icon': '', type: 'button',
+                  title: '删掉这个时间',
+                  'aria-label': '删掉这个时间',
+                  onClick: () => save(list.filter((_, k) => k !== i)),
+                }, '×'))),
+
+              /* ② 添加一行 */
+              h('div', { 'data-bd-row': '' },
+                h('button', {
+                  'data-bd-btn': '', type: 'button',
+                  /**
+                   * ⚠️ 新加的行**默认给一个不与现有冲突的时间**，而不是固定 09:00 ——
+                   *    固定值会让用户连点两次"添加"得到两行一样的时间，
+                   *    而后端 `readSchedule()` 会**按时间去重** ⇒ 第二行存了也不生效，
+                   *    看起来像"添加没反应"。
+                   *    策略：从 09:00 起每次 +1 小时，找第一个没被占用的。
+                   */
+                  onClick: () => {
+                    const used = new Set(list.map((x) => x.at))
+                    let hh = 9
+                    let pick = '09:00'
+                    for (let n = 0; n < 24; n++) {
+                      const cand = `${String((hh + n) % 24).padStart(2, '0')}:00`
+                      if (!used.has(cand)) { pick = cand; break }
+                    }
+                    save([...list, { at: pick, on: true }])
+                  },
+                }, '＋ 添加时间点'),
+                h('div', { 'data-bd-grow': '' })),
+
+              /* ③ 说明（讲清"加了时间点就不按谷时跑了"这条关键语义） */
+              h('div', { 'data-bd-note': '' },
+                list.length
+                  ? '加了时间点就「只按这些时间跑」，不再看上面那两条谷时窗口。'
+                    + '关掉某一行 = 暂时不跑它（不用删）。'
+                  : '还没有时间点 ⇒ 现在按谷时窗口跑。加一个时间点就改成按它跑。'),
+            )
+          })() : null,
           // ⭐「每天最多挑几条」已挪到「怎么找」那一节的「每次搜取回几条」下面
           //   （2026-10-16 使用者要求：它与"捞回来怎么挑"是一件事，和"什么时候跑"不是）
           ),

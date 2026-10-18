@@ -86,6 +86,38 @@ export const Config = !z ? undefined : z.object({
   /** 峰谷子开关：中午 / 晚上 */
   noon: z.boolean().default(true).extra('volatile', true),
   night: z.boolean().default(true).extra('volatile', true),
+  /**
+   * ⭐⭐ **自定义跑的时间点**（2026-10-19 加，使用者要求）。
+   *
+   * 使用者：「改成开启后，展开设置项，可直接设置具体时间，精确到分钟。
+   *   且可以自主添加多个时间。」「就已设置的时间行，应该有开关和删除按钮。」
+   *
+   * ── 形态 ──────────────────────────────────────────
+   *   `[{ at: 'HH:MM', on: boolean }, …]`
+   *   · `at` —— **精确到分钟**的本地时间（`09:30`）
+   *   · `on` —— 这一行自己的开关（不想删、只想临时停掉）
+   *
+   * ── 与「峰谷窗口」是什么关系 ──────────────────────────
+   *   **并列的两种模式，不是叠加**：
+   *     · `scheduleTimes` **非空** ⇒ 按这些时间点跑（使用者的明确意志优先）；
+   *     · 空 ⇒ 回落到原来的「峰谷窗口」（`noon`/`night`），保持老用法不变。
+   *   ⚠️ 这样老用户什么都不改，行为一模一样；想精确控制的人加时间点即可。
+   *   ⚠️ **不要**做成"窗口 + 时间点取并集" —— 那会让"我只想每天 9:30 跑一次"变成
+   *      "9:30 + 中午 + 晚上"，完全不是他要的。
+   *
+   * ── 为什么是「字符串数组」而不是对象数组 ──────────────────
+   *   🔴 **`normalize()` 会把对象吃掉**（`index.js` L434）：
+   *      ```js
+   *      if (Array.isArray(base[k])) { if (Array.isArray(v)) out[k] = v.filter((x) => typeof x === 'string') }
+   *      ```
+   *      ⇒ 传 `[{at:'09:30',on:true}]` 进去会变成 `[]`（静默丢光）。
+   *   ⇒ 所以**编码成字符串**：
+   *      · `"09:30"`        —— 开着的
+   *      · `"09:30!off"`    —— 关掉的（`!off` 是内部标记，界面上不出现）
+   *   ⭐ 好处：既满足 `normalize` 的"只留字符串"，又能无损表达 `on`。
+   *   ⚠️ 解析统一走 `readSchedule()`（见下面调度那段），别在别处自己 split。
+   */
+  scheduleTimes: z.array(z.string()).default([]).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
@@ -396,6 +428,8 @@ export function apply(ctx, config) {
     dmNotify: false,
     /** 🥚 彩蛋解锁标记：输入 5299 后置 true，之后私信那一行就一直在面板上 */
     dmUnlocked: false,
+    /** ⭐ 自定义跑的时间点（`"HH:MM"` / `"HH:MM!off"`）；空 = 回落到峰谷窗口 */
+    scheduleTimes: [],
     personaEnabled: true, personaMaxChars: 8000,
     llmProvider: '', llmModel: '', llmReasoningEffort: '',
   }
@@ -3257,12 +3291,54 @@ export function apply(ctx, config) {
    }
   }
 
-  /* ─────────────── 谷时定时器 ───────────────
+  /* ─────────────── 定时器 ───────────────
    * 🔴 2026-10-14 事故（使用者那边表现为"DSH 突然崩了、网页 Failed to fetch (gateway/internal)"）：
    *    第一版是 `setInterval(tick, 60_000)`，回调里抛的 TypeError **没人接**，直接把整个宿主进程带走
    *    （`dsh: fatal uncaught exception`）。⇒ **定时器回调必须自己兜住所有异常**：
    *    插件再错也只该"这一轮没跑成"，绝不该杀宿主。
    */
+
+  /**
+   * ⭐⭐ **解析「自定义时间点」**（2026-10-19 加）。
+   *
+   * 存储编码（见 schema 里为什么不用对象数组）：
+   *   `"09:30"`     ⇒ `{ at: '09:30', on: true }`
+   *   `"09:30!off"` ⇒ `{ at: '09:30', on: false }`
+   *
+   * ⚠️ **容错优先**：任何读不懂的条目**跳过**，绝不抛 —— 这个结果会被定时器用，
+   *    在那里抛异常会带走整个宿主（上面那段事故）。
+   * ⚠️ 也**按时间去重**：同一个 `09:30` 只留第一条（重复会让 tick 多次触发，
+   *    虽然 tick 有"这一天跑过就跳过"的守卫，但配置本身脏了会让人困惑）。
+   *
+   * @returns {Array<{at: string, on: boolean}>} 按时间升序
+   */
+  const readSchedule = () => {
+    let raw = []
+    try { raw = Array.isArray(cfg.scheduleTimes) ? cfg.scheduleTimes : [] } catch { return [] }
+    const out = []
+    const seen = new Set()
+    for (const s of raw) {
+      if (typeof s !== 'string') continue
+      const t = s.trim()
+      const m = /^(\d{1,2}):(\d{2})(!off)?$/.exec(t)
+      if (!m) continue
+      const hh = Number(m[1]); const mm = Number(m[2])
+      // ⚠️ 时间要合法：`25:00` / `09:99` 这种直接丢掉（写进配置的是脏数据）
+      if (!(hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59)) continue
+      const at = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+      if (seen.has(at)) continue
+      seen.add(at)
+      out.push({ at, on: !m[3] })
+    }
+    return out.sort((a, b) => a.at.localeCompare(b.at))
+  }
+
+  /**
+   * 现在是 `HH:MM`（本地时间，精确到分钟）。
+   * ⚠️ 用本地时间而不是 UTC —— 使用者设的"9:30"就是他墙上的 9:30。
+   */
+  const nowHHMM = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+
   const tick = () => {
     try {
       if (!cfg.peakValley) return
@@ -3271,6 +3347,38 @@ export function apply(ctx, config) {
       const today = dayKey(now)
       const count = st.day === today ? Number(st.count || 0) : 0
       if (count >= Number(cfg.perDay || 0)) return
+
+      /**
+       * 🔴🔴 **两种模式：自定义时间点优先，空则回落峰谷窗口**（2026-10-19）。
+       *
+       * ⚠️ **是"优先"，不是"取并集"**：
+       *   使用者加时间点的意思就是"我想精确控制"，若再叠加中午/晚上两个窗口，
+       *   "我只想每天 9:30 跑一次"就变成了"9:30 + 中午 + 晚上"—— 完全不是他要的。
+       * ⇒ 所以 `scheduleTimes` 非空时**完全不看 noon/night**。
+       */
+      const times = readSchedule()
+      if (times.length) {
+        const cur = nowHHMM(now)
+        /**
+         * 命中条件：**当前这一分钟**等于某个"开着"的时间点。
+         * ⚠️ tick 是每 60 秒一跳 ⇒ 误差最多 1 分钟，这正是"精确到分钟"能做到的精度。
+         * ⚠️ 用 `today + at` 做去重键（`st.schedule`），保证**同一天同一时间点只跑一次**
+         *    —— 否则 09:30 这一分钟内 tick 只跳一次，但重启后可能又跳一次。
+         */
+        const hit = times.find((x) => x.on && x.at === cur)
+        if (!hit) return
+        const key = `${today}:${hit.at}`
+        if (st.schedule?.[key]) return
+        bumpState({
+          schedule: { ...(st.schedule || {}), [key]: true },
+          lastRunAt: now.toISOString(),
+          lastWhy: `time:${hit.at}`,
+        })
+        Promise.resolve(runDuty(`time:${hit.at}`)).catch((e) => log(`定时器起那一轮失败（已兜住）：${e?.stack ?? e}`))
+        return
+      }
+
+      // ② 回落：峰谷窗口（老行为，一点没变）
       for (const k of ['noon', 'night']) {
         if (!cfg[k]) continue
         if (!inWindow(now, WINDOWS[k])) continue
@@ -4096,7 +4204,7 @@ export function apply(ctx, config) {
         'commentPerRound', 'mentionName',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
-        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked',
+        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
