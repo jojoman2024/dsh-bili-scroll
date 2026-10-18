@@ -553,6 +553,13 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-pre]{margin:0;padding:10px;border-radius:var(--dsw-radius-sm,8px);max-height:180px;
   overflow:auto;font-size:11px;line-height:16px;white-space:pre-wrap;word-break:break-all;
   background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary,#61666b);}
+
+/* ── 弹窗里的「更新内容」正文（2026-10-18 加）──
+   它复用 [data-bd-pre] 的样子，但要**更高一点**：更新日志比日志块长得多，
+   180px 只能看到两三行 ⇒ 单独把上限提到 46vh（视口的 46%，不撑破弹窗）。
+   ⚠️ white-space:pre-wrap 由 [data-bd-pre] 那份给了 —— 这里**不要**重复写，
+      也**不要**改成 nowrap：正文的换行就是 readability 的一部分。 */
+[data-bd-pre][data-bd-clog]{max-height:46vh;font-size:12px;line-height:18px;word-break:normal;}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -880,6 +887,14 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
        * 点顶栏那个黑标才开；不点就一直只是个小胶囊（不打扰）。
        */
       const [showUpdateDlg, setShowUpdateDlg] = React.useState(false)
+      /**
+       * ⭐ **「更新内容」正文的状态**（2026-10-18 加）：
+       *   `null` = 还没点；`{loading:true}` = 正在拉；
+       *   `{text,version}` = 拿到了；`{error}` = 拉失败。
+       * ⚠️ 用一个对象装四种状态，而不是四个独立 state ——
+       *    独立 state 很容易出现"loading 还是 true 但 text 已有"这种自相矛盾的组合。
+       */
+      const [showChangelog, setShowChangelog] = React.useState(null)
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
@@ -1922,29 +1937,52 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               h('div', { 'data-bd-confirm-body': '' },
                 `新版 ${st.update.latest || '?'}（你现在 ${st.update.current || st.version || '?'}）。`,
                 h('br'),
-                '可以先去「查看更新内容」看看改了什么，再决定要不要升。',
-                h('br'),
-                // ⚠️ 说清升级是干什么的 —— 它会真的换掉磁盘上的代码
                 '升级会从国内镜像（npmmirror）装新版，装完要重启一次 dsh 才生效。'),
+              /**
+               * ⭐⭐ **更新内容直接在弹窗里显示**（2026-10-18 改）。
+               *
+               * 为什么改：原来点「查看更新内容」是**跳去 GitHub Releases** ——
+               *   ① 国内打开 GitHub 不稳；② 那个页面的正文当时还是**空的**。
+               * ⇒ 现在：点按钮 ⇒ 后端从 **jsDelivr**（有国内 CDN）拉仓库里的
+               *   `CHANGELOG.md`、切出这一版 ⇒ **正文直接铺在弹窗里**，不跳走。
+               *
+               * ⚠️ 正文是 markdown 的**纯文本**：面板没有 markdown 渲染器（本项目既有事实），
+               *    所以用 `white-space:pre-wrap` 保留换行，不硬塞 HTML。
+               */
+              showChangelog
+                ? h('div', null,
+                  h('div', { 'data-bd-note': '' },
+                    showChangelog.loading ? '正在取更新内容…'
+                      : showChangelog.error ? ('取不到：' + showChangelog.error)
+                        : `这一版（${showChangelog.version || '?'}）改了什么：`),
+                  showChangelog.text
+                    ? h('pre', { 'data-bd-pre': '', 'data-bd-clog': '' }, showChangelog.text)
+                    : null)
+                : null,
               h('div', { 'data-bd-confirm-foot': '' },
-                h('button', { 'data-bd-btn': '', onClick: () => setShowUpdateDlg(false) }, '以后再说'),
-                /**
-                 * ⭐ **「查看更新内容」**：新开一个标签页去 GitHub Releases。
-                 * ⚠️ 用 `window.open(url, '_blank', 'noopener,noreferrer')`：
-                 *    直接改 `location.href` 会把**整个 DSH 界面**导航走（那很糟）。
-                 * ⚠️ `noopener` 是必须的：否则新页面能通过 `window.opener` 反向操作本页。
-                 */
+                h('button', { 'data-bd-btn': '', onClick: () => { setShowUpdateDlg(false); setShowChangelog(null) } }, '以后再说'),
                 h('button', {
                   'data-bd-btn': '', 'data-primary': '',
-                  onClick: () => {
+                  /**
+                   * ⭐ 「查看更新内容」：**在弹窗里展开**（不跳走）。
+                   * ⚠️ 只在需要时拉一次（`showChangelog.text` 有值就不再请求）。
+                   * ⚠️ `?version=` 明确指定要哪一版 —— 否则后端会退化成"当前版本"，
+                   *    而使用者想看的是**新版**改了什么。
+                   */
+                  disabled: Boolean(showChangelog?.loading),
+                  onClick: async () => {
+                    if (showChangelog?.text) return   // 已经拿到了，不用再拉
+                    setShowChangelog({ loading: true })
                     try {
-                      window.open(st.update.page || 'https://github.com/jojoman2024/dsh-bili-scroll/releases', '_blank', 'noopener,noreferrer')
-                    } catch { say('打不开浏览器 —— 手动访问 ' + (st.update.page || ''), 'warn') }
+                      const r = await jget('/changelog?version=' + encodeURIComponent(st.update.latest || ''))
+                      if (r?.ok) setShowChangelog({ text: r.text || '', version: r.version })
+                      else setShowChangelog({ error: r?.error || '没拿到内容' })
+                    } catch (e) { setShowChangelog({ error: String(e?.message ?? e) }) }
                   },
-                }, '查看更新内容'),
+                }, showChangelog?.text ? '已显示在下面' : '查看更新内容'),
                 h('button', {
                   'data-bd-btn': '',
-                  onClick: () => { setShowUpdateDlg(false); onUpgrade() },
+                  onClick: () => { setShowUpdateDlg(false); setShowChangelog(null); onUpgrade() },
                 }, '直接升级')))) : null,
         /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },

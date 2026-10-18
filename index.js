@@ -3357,6 +3357,86 @@ export function apply(ctx, config) {
   }
 
   /**
+   * ⭐⭐ **取「更新内容」正文**（2026-10-18 加，使用者要求「只要 release 正文即可」）。
+   *
+   * ── 为什么不用 GitHub Release 的 body ────────────────────
+   *   实测确认过：**Release 的正文不存在于仓库文件里** ⇒
+   *   jsDelivr / ghproxy / raw.githubusercontent **全都拿不到它**，
+   *   只能走 `api.github.com`（国内不稳）。而仓库文件到处都有镜像。
+   *   ⇒ 正文改放仓库的 `CHANGELOG.md`，Release 说明从它复制过去。
+   *
+   * ── 多源回退（都实测过 200）──────────────────────────────
+   *   ① `cdn.jsdelivr.net/gh/<repo>@<tag>/CHANGELOG.md` —— 有国内 CDN，首选
+   *   ② `ghproxy.net/https://raw.githubusercontent.com/...` —— 也测通了
+   *   ③ `raw.githubusercontent.com` —— 国内最不稳，放最后
+   *   ⚠️ 三个都不通 ⇒ 如实说"取不到"，**不要拿本地 filesystem 的东西糊弄**
+   *      （本地那份是开发版，跟 tag 上的可能不一样）。
+   *
+   * @param {string} ver 要取哪个版本的（如 `0.1.5`）；空 = 取最新那段
+   * @returns {Promise<{ok:boolean, text?:string, version?:string, source?:string, error?:string}>}
+   */
+  const fetchChangelog = async (ver) => {
+    const v = String(ver || '').trim()
+    /**
+     * 🔴 **优先查 `main`，而不是查这个 tag**（2026-10-18 实测定下来的）。
+     *
+     * 为什么：实测发现 **tag 上的 CHANGELOG 永远是旧的** ——
+     *   因为 `v0.1.5` 这个 tag 是在写完代码、**升完版本**时就打的，
+     *   而"这个版本改了什么"往往**之后才写进 CHANGELOG** ⇒
+     *   tag 里那份不含 0.1.5 那段（实测 `@v0.1.5/CHANGELOG.md` 长度 2353、
+     *   搜不到 "0.1.5"）。
+     * ⇒ 改成查 **`main`**（最新那份一定包含刚写的版本），
+     *   tag 只作为**回退**（`main` 拿不到时才试）。
+     *
+     * ⚠️ 代价：`main` 上可能已经有**下一个还没发布的版本**的条目。
+     *   ⇒ 所以 `slice()` 是**按版本号切**的，切不到才退回整份 —— 不会串版。
+     */
+    const refs = [v ? 'main' : 'main', v ? 'v' + v.replace(/^v/i, '') : null].filter(Boolean)
+    const urls = []
+    for (const ref of refs) {
+      urls.push(
+        `https://cdn.jsdelivr.net/gh/${GH_REPO}@${ref}/CHANGELOG.md`,
+        `https://ghproxy.net/https://raw.githubusercontent.com/${GH_REPO}/${ref}/CHANGELOG.md`,
+      )
+    }
+    // 最后兜一个最不稳的（只在前面全挂时才用）
+    urls.push(`https://raw.githubusercontent.com/${GH_REPO}/main/CHANGELOG.md`)
+
+    /**
+     * 从整份 CHANGELOG 里切出某一段。
+     * ⚠️ 切法是**按 `## [` 分段**（格式在 CHANGELOG 开头写死了）；
+     *    切不到就返回整份 —— 宁可多给，也别给空。
+     */
+    const slice = (all, version) => {
+      if (!all) return ''
+      if (!version) return all
+      const esc = version.replace(/\./g, '\\.')
+      // 从 `## [1.2.3]` 开始，到下一个 `## [` 或文末
+      const re = new RegExp(`^## \\[${esc}\\][^\\n]*\\n([\\s\\S]*?)(?=^## \\[|$)`, 'm')
+      const m = re.exec(all)
+      if (m) return m[1].trim()
+      return all.trim()   // 切不到就整份给它（总比空白强）
+    }
+
+    const errors = []
+    for (const u of urls) {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 8000)
+      try {
+        const r = await fetch(u, { signal: ctrl.signal, headers: { 'User-Agent': 'dsh-bili-scroll' } })
+        if (!r.ok) { errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ HTTP ${r.status}`); continue }
+        const all = await r.text()
+        if (!all.trim()) { errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ 空文件`); continue }
+        return { ok: true, text: slice(all, v), version: v || 'latest', source: u }
+      } catch (e) {
+        errors.push(`${u.replace('https://', '').split('/')[0]} ⇒ ` + (e?.name === 'AbortError' ? '超时 8 秒' : String(e?.message ?? e)))
+      } finally { clearTimeout(timer) }
+    }
+    return { ok: false, error: '取不到更新内容（三个源都试过了）：' + errors.join('；') }
+  }
+
+
+  /**
    * ⭐⭐ **后台预热版本检测**（2026-10-18 加）—— 面板加载时自动查一次。
    *
    * ── 为什么需要"预热"这层 ────────────────────────────────
@@ -3761,6 +3841,18 @@ export function apply(ctx, config) {
     if (req.method === 'GET' && path === '/api/bili-duty/update') {
       // ⚠️ 逻辑已提到模块级 `checkUpdate()`（见上面那段注释），这里只做转发
       return sendJson(res, 200, await checkUpdate())
+    }
+
+    /**
+     * ⭐ **取某版本的更新内容正文**（2026-10-18 加）。
+     * 面板弹窗里「查看更新内容」直接调这个，把正文**显示在弹窗里**，
+     * 而不是把人甩去一个国内可能打不开的 GitHub 页面。
+     * ⚠️ 版本号不传 ⇒ 用当前版本（面板一般传「比本地新的那一版」）。
+     */
+    if (req.method === 'GET' && path === '/api/bili-duty/changelog') {
+      const ver = String(url.searchParams.get('version') || '').trim()
+        || (updateCache && updateCache.latest) || myVersion()
+      return sendJson(res, 200, await fetchChangelog(ver))
     }
 
     /* ── 旧的「比对 GitHub commit」那条路已移除（2026-10-18）─────────────────
