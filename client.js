@@ -1754,7 +1754,39 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                 'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 20,
                 value: perRound ?? '',
                 onChange: (e) => setPerRound(e.target.value),
-                onBlur: () => { const n = Math.max(1, Number(perRound) || 1); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
+                /**
+                 * 🥚 **彩蛋：在这里输入 5299 解锁私信通知**（2026-10-18 使用者要求）。
+                 *
+                 * 使用者原话：「私信通知的开关和他的描述，应该是默认隐藏的。
+                 *   只有当用户在每轮最多发几条那里，第一次输入 5299 的时候，才会显示出来，
+                 *   并且就一直显示了，应该有个本地去记这件事的。」
+                 *
+                 * ⚠️ **只在 onBlur 判**，不在 onChange 判：
+                 *    onChange 是逐字符触发的 —— 打 "5299" 会经过 "5" "52" "529"，判早了没用；
+                 *    而且用 onChange 的话，把数字改成 5299 以外的合法值也会反复触发。
+                 *    onBlur 是"输完离开"那一刻，语义正好。
+                 *
+                 * ⚠️ **解锁后立刻回填成正常值**：5299 显然不是"每轮想发 5299 条评论"，
+                 *    那是输入这个暗号的副作用。所以解锁的同时把它改回原来的 1（或当前值），
+                 *    否则配置里会留下一个荒唐的 commentPerRound=5299，
+                 *    真跑一轮时会试图发 5299 条评论。
+                 *    ⭐ 这是这个彩蛋**最容易埋雷**的地方 —— 别忘了。
+                 */
+                onBlur: () => {
+                  const raw = String(perRound ?? '').trim()
+                  if (raw === '5299' && !cfg.dmUnlocked) {
+                    // ① 解锁（持久化在 config.json，换浏览器也在）
+                    patch({ dmUnlocked: true }, '私信通知')
+                    // ② 把暗号从"条数"里清掉，别让它变成真的发送上限
+                    setPerRound('1')
+                    patch({ commentPerRound: 1 }, '每轮几条评论')
+                    note('已解锁「私信通知」—— 往下翻，在「说不说话」最下面', 'good')
+                    return
+                  }
+                  const n = Math.max(1, Number(perRound) || 1)
+                  setPerRound(String(n))
+                  patch({ commentPerRound: n }, '每轮几条评论')
+                },
               })),
             h(Field, {
               label: '要 @ 谁（B站 昵称）',
@@ -1801,7 +1833,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
            *   否则用户会以为"和评论一样只是换个地方发"。
            *   真正的写作规矩在 `<家>\dm.md`（模型那边会读），面板只用一句话点出来。
            */
-          h(ToggleRow, {
+          cfg.dmUnlocked ? h(ToggleRow, {
             label: '私信通知（发给你自己）',
             note: '挑中的视频会「私信」发给你，附视频链接。'
               + '⚠️ 和评论不一样：私信是「私聊」（只有你看到），正文里不会再 @ 你。'
@@ -1811,7 +1843,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               + '具体怎么写由家目录的 dm.md 规定，模型发之前会先读它。',
             on: sw('dmNotify'),
             onChange: (v) => patch({ dmNotify: v }, '私信通知'),
-          }),
+          }) : null,
 
         /* ════════ 五、怎么读（本地转写 —— 从「说不说话」里搬出来：这是"读"的事）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },

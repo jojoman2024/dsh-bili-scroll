@@ -110,6 +110,25 @@ export const Config = !z ? undefined : z.object({
    *   （有人想只在视频下评论、不打扰对方；也有人只想私信、不发公开评论）。
    */
   dmNotify: z.boolean().default(false).extra('volatile', true),
+  /**
+   * 🥚 **彩蛋：私信开关的解锁标记**（2026-10-18 加）。
+   *
+   * 使用者：「私信通知的开关和他的描述，应该是默认隐藏的。只有当用户在
+   *   每轮最多发几条那里，第一次输入 5299 的时候，才会显示出来，
+   *   并且就一直显示了，应该有个本地去记这件事的。最好找个现成的东西去记。」
+   *
+   * ⭐ **"现成的东西" = 这个 config.json** —— 它已经存在、已经持久化、
+   *    面板本来就通过 `/status` 读它 ⇒ 不用新增任何存储机制，而且：
+   *     · **换浏览器 / 清缓存也不会丢**（比 localStorage 稳）；
+   *     · 使用者能在 `config.json` 里**直接看到、也能删掉**这个标记
+   *       （想重新藏起来就删掉它）；
+   *     · 后端**不用**写任何"解锁"接口 —— 它就是个普通配置项。
+   *
+   * ⚠️ **解锁不撤销**：置 true 后一直显示（正是使用者的要求）；
+   *    要重新藏起来只能手工把这一项删掉/改 false。
+   * ⚠️ 它**只管面板显不显示那一行**，不参与任何发送逻辑。
+   */
+  dmUnlocked: z.boolean().default(false).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /**
@@ -351,6 +370,8 @@ export function apply(ctx, config) {
     adminMode: false,
     /** ⭐ 私信通知（2026-10-18）—— 复用 commentPerRound / mentionName，见 schema 里的注释 */
     dmNotify: false,
+    /** 🥚 彩蛋解锁标记：输入 5299 后置 true，之后私信那一行就一直在面板上 */
+    dmUnlocked: false,
     personaEnabled: true, personaMaxChars: 8000,
     llmProvider: '', llmModel: '', llmReasoningEffort: '',
   }
@@ -3957,7 +3978,7 @@ export function apply(ctx, config) {
         'commentPerRound', 'mentionName',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
-        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify',
+        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
