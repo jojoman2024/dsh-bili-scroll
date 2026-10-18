@@ -1830,22 +1830,43 @@ export function apply(ctx, config) {
   const ensureOverlay = () => {
     const lines = []
 
-    // ① B站 MCP（受 overlayMcp 开关控制）
+    /**
+     * ① B站 MCP（受 overlayMcp 开关控制）
+     *
+     * 🔴 **2026-10-18 改：环境没装好就【不写】这一段**。
+     *
+     * 原来是无条件写 —— 不管 venv 有没有装，都把 `command: 'python'` +
+     * `mcp_server.py` 塞进 overlay。后果实测过（全新环境）：
+     *   · `dsh-mcp-client` 的 `failOnStartupError` **默认是 false**
+     *     ⇒ MCP 起不来**不报错**，只是**一个工具都不注册**；
+     *   · 于是那一轮照常起、模型照常收到提示词，然后发现**手上没有任何 bili_* 工具** ——
+     *     表现成"模型不知道怎么干活"，而不是"环境没装好"。
+     * ⇒ 宁可**不挂**：不挂的话模型至少会明确说"没有这些工具"，
+     *    比"工具都在但全是死的"更容易定位。
+     *
+     * ⚠️ 这条**只影响后台那条**（overlay 只给 headless 子进程用）；
+     *    前台那条用的是插件进程里自己的 MCP，走 `ensureMcp()`。
+     */
     if (cfg.overlayMcp) {
-      const script = join(stateDir, 'mcp_server.py')
-      const posix = (p) => String(p).replace(/\\/g, '/')
-      lines.push(
-        '- insert:',
-        '    - id: mcp-bili-duty',
-        "      name: '@deepseek-ai/dsh-mcp-client'",
-        '      config:',
-        '        serverName: bili-duty',
-        '        transport: stdio',
-        `        command: '${posix(cfg.pythonPath || 'python')}'`,
-        '        args:',
-        `          - '${posix(script)}'`,
-        '',
-      )
+      if (venvReadyNow()) {
+        const script = join(stateDir, 'mcp_server.py')
+        const posix = (p) => String(p).replace(/\\/g, '/')
+        lines.push(
+          '- insert:',
+          '    - id: mcp-bili-duty',
+          "      name: '@deepseek-ai/dsh-mcp-client'",
+          '      config:',
+          '        serverName: bili-duty',
+          '        transport: stdio',
+          `        command: '${posix(cfg.pythonPath || 'python')}'`,
+          '        args:',
+          `          - '${posix(script)}'`,
+          '',
+        )
+      } else {
+        // ⚠️ 记一笔，别让它静默 —— 这是"为什么那一轮没有 bili_* 工具"的答案。
+        log('环境没装好（venv 里缺 bilibili_api）⇒ 这一轮**不挂** B站 MCP（否则它会静默不注册工具）')
+      }
     }
 
     // ② 模型覆盖（只在使用者真的选了 model 时才写）
@@ -2089,11 +2110,68 @@ export function apply(ctx, config) {
       return {
         started: true, why, mode: 'front', sessionId,
         workspace: workspace.path, provider: selection.provider, model: selection.model,
+        // ⭐ 方案 B：让调用方知道"前提是齐的"，与"进程起来了"分开看
+        preflight: { ok: true, problems: [] },
       }
     } catch (e) {
       log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
       return { started: false, why, error: String(e?.message ?? e) }
     }
+  }
+
+  /**
+   * ⭐⭐ **开跑前的体检**（2026-10-18 加）—— 解决的问题是「点了说成功、其实哑跑」。
+   *
+   * 🔴 为什么必须有它（实测出来的，不是想当然）：
+   *   原来 `POST /run` 直接调 `runDuty()`，**一个前提都不查**。全新用户点「现在跑一轮」
+   *   拿到的回执是 `{ started: true, pid: 24728 }` ⇒ 面板渲染成绿色
+   *   「已经在后台跑一轮了」。
+   *   而 `started: true` 的真实含义只是「**子进程 spawn 成功了**」——
+   *   那时 MCP 还没启动、Python 一次都没被调用过、依赖装没装完全不知道。
+   *   实测那一轮跑完：`duty.log` 共 10 行，**连"结束"都没记**；
+   *   真正的错误（`ModuleNotFoundError: No module named 'mcp'`）只在子进程 stderr 里。
+   *
+   * ⇒ 判据：**能不能跑，必须在 spawn 之前就判掉**，而不是等子进程死了再看日志。
+   *
+   * ⚠️ 这里只查**确定性的前提**（环境/登录），**不查网络与 B站 是否可达** ——
+   *    那种要发请求，会把这个接口拖慢好几秒，而且网络抖动不该阻止用户尝试。
+   *    真正的网络错误会在跑起来之后由那一轮自己报。
+   *
+   * @returns {{ ok: boolean, problems: Array<{ code: string, message: string, fix: string }> }}
+   */
+  const preflight = () => {
+    const problems = []
+
+    // ① Python 运行环境（venv 里要有 bilibili_api）
+    //    ⚠️ 判据必须与 `venvReadyNow()` 一致 —— 否则会出现"面板说已就绪、开跑却被拦"。
+    if (!venvReadyNow()) {
+      problems.push({
+        code: 'no-venv',
+        message: installing ? '运行环境正在装，还没好' : 'Python 运行环境还没装好',
+        fix: installing
+          ? '等它装完（面板「环境与账号」能看到进度），装好就能跑'
+          : '去「环境与账号」点「装主依赖」——它会在插件自己的目录里建 venv 并装齐依赖',
+      })
+    }
+
+    // ② B站 登录（没有凭证 ⇒ 搜出来的东西也没法评论）
+    if (!hasCredential()) {
+      problems.push({
+        code: 'no-login',
+        message: '还没登录 B站',
+        fix: '去「环境与账号」点「扫码登录」，手机 B站 扫一下就成',
+      })
+    }
+
+    // ③ 后台模式还要能找到 dsh（前台是在主应用里建会话，不需要）
+    if (cfg.runMode !== 'front') {
+      const dsh = resolveDsh()
+      if (dsh.error) {
+        problems.push({ code: 'no-dsh', message: '找不到 dsh 的入口', fix: dsh.error })
+      }
+    }
+
+    return { ok: problems.length === 0, problems }
   }
 
   /**
@@ -2103,6 +2181,28 @@ export function apply(ctx, config) {
    *    `tick()` 里那个 fire-and-forget 的调用已相应处理（它本来就不等）。
    */
   const runDuty = (why = 'window') => {
+    /**
+     * 🔴 **先体检，不通过就一个字都不启动**（2026-10-18 加，方案 A）。
+     *
+     * 回执带 `preflight` 字段（方案 B）：让调用方能区分
+     *   · `started: false` + `problems` ⇒ **根本没起跑**（缺环境/没登录），要点名下一步
+     *   · `started: true`  + `preflight.ok` ⇒ 进程起来了，且前提是齐的
+     * 而不是像原来那样一律 `started: true`。
+     */
+    const pf = preflight()
+    if (!pf.ok) {
+      const msg = '暂时跑不了：' + pf.problems.map((p) => p.message).join('；')
+      log(`刷B站没起跑（${why}）：${pf.problems.map((p) => `[${p.code}] ${p.message}`).join(' | ')}`)
+      return {
+        started: false, why,
+        error: msg,
+        problems: pf.problems,
+        // ⭐ 给面板/工具用的「下一步做什么」——它比 error 更该被展示
+        hint: pf.problems.map((p) => p.fix).join('；'),
+        preflight: pf,
+      }
+    }
+
     // ⭐ 每开一轮就**清空候选池** —— 池子是"这一轮"的，不跨轮次（跨轮的判重看 seen.md）。
     poolStart()
 
@@ -2199,9 +2299,26 @@ export function apply(ctx, config) {
     } catch (e) {
       log(`刷B站写入提示词失败（${why}）：${e?.message ?? e}`)
     }
+    /**
+     * ⭐ 顺手留一份 stderr 的尾巴（方案 C，2026-10-18）。
+     *
+     * ⚠️ **先纠正一个我先前的错判**：stderr 其实**一直都会**被原样追加进 `duty.log`
+     *    （就是下面那行 `child.stderr.on('data', pick)`），所以信息**没丢**。
+     *    我上次看到"日志里一个字都没有"，是**我的探针进程自己先崩了**、没活到子进程退出 ——
+     *    那是我探针的问题，不是产品的问题。
+     *
+     * 但"没丢"不等于"看得懂"：那堆 traceback 是**混在 stdout 中间**的一段裸文本，
+     * 跑完一轮之后日志几百行，人很难认出"哪一段才是失败原因"。
+     * ⇒ 所以在内存里留个尾巴，退出码非 0 时**单独打一块**点名原因。
+     *    （只留最后 2000 字符 —— 够看清 traceback 的末尾，又不会把日志撑爆。）
+     */
+    let stderrTail = ''
     const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
     child.stdout?.on('data', pick)
-    child.stderr?.on('data', pick)
+    child.stderr?.on('data', (buf) => {
+      pick(buf)
+      stderrTail = (stderrTail + String(buf)).slice(-2000)
+    })
 
     /**
      * ⭐⭐ **"后台还在跑吗"的判定**（2026-10-16 加，面板那个绿标就靠它）。
@@ -2224,6 +2341,25 @@ export function apply(ctx, config) {
 
     const finish = (what, code) => {
       log(`刷B站结束（${why}${code === undefined ? '' : '，code=' + code}）${what ? '：' + what : ''}`)
+      /**
+       * ⭐ **失败时单独打一块"为什么"**（方案 C，2026-10-18 加）。
+       *
+       * 为什么要单独打：stderr 本来就会被原样追加进日志，但它混在 stdout 中间、
+       * 一轮下来几百行 —— 人（和下次排查的 AI）很难一眼认出哪段是失败原因。
+       * ⇒ 退出码非 0 时，把 stderr 的尾巴**再单独贴一遍**，前面加一句人话。
+       *
+       * ⚠️ 只在**非 0** 时打：正常结束时 stderr 也常有一些噪声（警告之类），
+       *    那不该被渲染成"失败"。
+       */
+      if (code !== undefined && code !== 0) {
+        const tail = stderrTail.trim()
+        if (tail) {
+          log(`刷B站这一轮【失败】了（exit ${code}）—— 下面是子进程 stderr 的末尾，通常真正的原因在这里：`)
+          log(tail)
+        } else {
+          log(`刷B站这一轮【失败】了（exit ${code}），但子进程没往 stderr 写任何东西 —— 这种情况通常是它被外部杀掉，或者 stdin 没喂进去`)
+        }
+      }
       activeHeadless = null
       // ⚠️ 只在**还是这一轮**的时候删文件 —— 免得把刚起的新一轮的记录误删
       try {
@@ -2233,7 +2369,11 @@ export function apply(ctx, config) {
     }
     child.on('exit', (code) => finish('', code))
     child.on('error', (e) => finish(String(e?.message ?? e)))
-    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile, pid: child.pid }
+    return {
+      started: true, why, profile: cfg.headlessProfile, cwd, log: logFile, pid: child.pid,
+      // ⭐ 方案 B：`started` 只说"进程起来了"；`preflight` 说"前提是齐的" —— 两者分开看
+      preflight: { ok: true, problems: [] },
+    }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     activeHeadless = null

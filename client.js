@@ -1017,27 +1017,38 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         setBusy('run')
         try {
           const r = await jpost('/run', {})
-          if (r?.started) {
-            if (r.mode === 'front') {
-              // ⭐ 前台：会话已经建好了。**直接跳过去**，你就能看着它跑
-              //    （这正是前台模式的意义 —— 后台那轮你看不见）。
-              setRunNote({ tone: 'good', t: `已建前台会话（${r.sessionId || ''}），正在跳过去…` })
-              const openSession = resolveOpenSession()   // 点击时才取服务
-              if (openSession && r.sessionId) {
-                try { openSession(r.sessionId) } catch (e) { setRunNote({ tone: 'warn', t: `会话建好了，但跳转失败：${String(e?.message ?? e)}` }) }
-              } else if (r.sessionId) {
-                setRunNote({ tone: 'warn', t: `会话建好了（${r.sessionId}），但这个环境拿不到跳转能力 —— 去左侧会话列表里找「刷B站 …」` })
-              }
-            } else {
-              // ⚠️ 文案要说**真正的产物目录**（2026-10-16 修）。
-              //    原来写的是"报告会写在 out/ 里"—— 那是**汇总日报时代**的目录，
-              //    产物早就统一到 `<家>\reports\` 了 ⇒ 使用者按它去 out/ 找会扑空。
-              //    ⚠️ 所以这里不写死路径，而是用状态里那份真值（读不到就退化成不带路径的说法）。
-              say(`已经在后台跑一轮了 —— 挑中的每条会各写一份 md 到 ${st?.reportDir || '产物目录'}`, 'good')
+          /**
+           * 🔴 **2026-10-18 改：把"没起跑"和"起来了"分开说。**
+           *
+           * 原来这里只看 `r.started` —— 而**没装环境的用户点下去也是 `started:true`**
+           * （它只代表"子进程 spawn 成功了"），于是面板显示绿色
+           * 「已经在后台跑一轮了」，实际上那一轮跑完什么也没干。
+           * ⇒ 现在后端会先做体检：缺环境/没登录就 `started:false` + `problems`。
+           *    面板照实说**为什么没跑**，并把"下一步点哪里"顶在前面。
+           */
+          if (!r?.started) {
+            // ⚠️ 优先显示 `hint`（下一步做什么），而不是 `error`（一句话结论）——
+            //    用户需要的是"我该点哪儿"，不是"它失败了"。
+            const why = r?.hint || r?.error || '没起来，看日志'
+            setRunNote({ tone: 'warn', t: why })
+            return
+          }
+          if (r.mode === 'front') {
+            // ⭐ 前台：会话已经建好了。**直接跳过去**，你就能看着它跑
+            //    （这正是前台模式的意义 —— 后台那轮你看不见）。
+            setRunNote({ tone: 'good', t: `已建前台会话（${r.sessionId || ''}），正在跳过去…` })
+            const openSession = resolveOpenSession()   // 点击时才取服务
+            if (openSession && r.sessionId) {
+              try { openSession(r.sessionId) } catch (e) { setRunNote({ tone: 'warn', t: `会话建好了，但跳转失败：${String(e?.message ?? e)}` }) }
+            } else if (r.sessionId) {
+              setRunNote({ tone: 'warn', t: `会话建好了（${r.sessionId}），但这个环境拿不到跳转能力 —— 去左侧会话列表里找「刷B站 …」` })
             }
           } else {
-            // ⚠️ 如实回显失败原因（前台模式失败的原因往往是"服务拿不到"，不是"跑挂了"）
-            setRunNote({ tone: 'warn', t: r?.error ? `没起来：${r.error}` : '没起来，看 duty.log' })
+            // ⚠️ 文案要说**真正的产物目录**（2026-10-16 修）。
+            //    原来写的是"报告会写在 out/ 里"—— 那是**汇总日报时代**的目录，
+            //    产物早就统一到 `<家>\reports\` 了 ⇒ 使用者按它去 out/ 找会扑空。
+            //    ⚠️ 所以这里不写死路径，而是用状态里那份真值（读不到就退化成不带路径的说法）。
+            say(`已经在后台跑一轮了 —— 挑中的每条会各写一份 md 到 ${st?.reportDir || '产物目录'}`, 'good')
           }
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
@@ -1227,6 +1238,22 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               : null,
             h('div', { 'data-bd-grow': '' }),
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
+
+          /*
+           * ⭐ **点之前就把"现在点了也没用"讲清楚**（2026-10-18 加）。
+           *
+           * 为什么加：后端已经会拦（`preflight`），但**等点下去才告知**体验很差 ——
+           * 用户会以为按钮坏了。这里用顶栏那两个徽章本来就在说的信息
+           * （`st.venvReady` / `st.loggedIn`）提前提示一句，并告诉它去哪个页修。
+           * ⚠️ 判据与后端 `preflight()` 保持一致：环境 + 登录。
+           *    （后台模式还要 dsh，那个正常环境里总是有的，不在这儿重复提示。）
+           */
+          (!st.venvReady || !st.loggedIn)
+            ? h('div', { 'data-bd-note': '' },
+              '⚠️ 现在点「现在跑一轮」跑不了：',
+              !st.venvReady ? '运行环境还没装好（去「环境与账号」点「装主依赖」）。' : '',
+              !st.loggedIn ? '还没登录 B站（去「环境与账号」点「扫码登录」）。' : '')
+            : null,
 
           /* ── 子导航标签条（样式照抄官方「对话 / 轨迹」）──
              ⚠️ 用 role=tablist/tab + aria-selected，与官方那个结构一致（无障碍/测试都对得上）。 */
