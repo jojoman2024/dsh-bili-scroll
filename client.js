@@ -383,6 +383,21 @@ window.__ModuleLoader__.load({
   background:currentColor;flex:none;}
 [data-bd-badge][data-bd-run]:hover{background:color-mix(in srgb, var(--dsw-alias-state-success-primary,#22c55e) 22%, transparent);}
 
+/* ── ⭐「检测到有新版本」黑底白字胶囊（2026-10-18 加）──
+   使用者要求：「以同样的样式提示用户【检测到有新版本】用黑底白字，可点击」。
+   ⚠️ **同样的样式** = 与前面三个徽章**同尺寸同圆角同字号**（都走 [data-bd-badge]），
+      只把配色换成**黑底白字**（跟"绿标"同一个思路：形状一样、颜色区分性质）。
+   ⚠️ 黑底用 label-primary 那个令牌（官方近黑 #0f1115），不是写死 #000 ——
+      暗色主题下它会自动变成浅色底深字，否则黑底在深色背景上看不见。
+   ⚠️ 它是 button ⇒ 要抹掉浏览器默认样式（同 [data-bd-run] 那套理由）。 */
+[data-bd-badge][data-bd-new]{border:none;font-family:inherit;cursor:pointer;
+  background:var(--dsw-alias-label-primary,#0f1115);color:#fff;}
+[data-bd-badge][data-bd-new]:hover{opacity:.86;}
+/* ⚠️ 暗色主题下 label-primary 是**浅色**，白字会看不见 ⇒ 此时把字色反过来 */
+@media (prefers-color-scheme: dark){
+  [data-bd-badge][data-bd-new]{color:var(--dsw-alias-bg-base,#111);}
+}
+
 /* ── 子区块（开关打开后展开的那些）──
  *
  * 🔴 **不再缩进、也不再画左侧竖线**（2026-10-16 使用者要求："去掉这种缩进，不要他"）。
@@ -752,6 +767,58 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       )
     }
 
+    /**
+     * ⭐ **顶栏那一排徽章**（状态 + 版本 + 新版本 + 后台运行）—— 抽成纯函数（2026-10-18）。
+     *
+     * 为什么抽：与 `renderDshBlock` / `renderWatchBlock` 同一个理由 ——
+     *   组件内部拿不到 `st`（要靠 effect + fetch），离线渲染**测不了分支**；
+     *   而"有新版本"这条分支在真机上要等真出新版才看得到 ⇒ **不抽出来就永远没验过**。
+     *
+     * 顺序（使用者要求「后台任务提示往后挤」）：
+     *   ① 环境  ② B站登录  ③ 版本号  ④ **新版本标**  ⑤ **后台运行标**
+     * ⚠️ **间隔统一靠 `[data-bd-top]` 的 `gap:8px`**（父容器管），
+     *    这里**不要**给任何徽章单独写 margin —— 那会破坏"和前面几个块保持统一"。
+     *
+     * @param st     `/status` 响应
+     * @param onOpen 点「检测到有新版本」时的回调（打开弹窗）
+     * @param onRunLog 点「正在后台运行…」时的回调（默认走 say，测试时可注入）
+     */
+    function renderVersionBadges(st, onOpen, onRunLog) {
+      const showRun = (msg, tone) => {
+        if (typeof onRunLog === 'function') return onRunLog(msg, tone)
+        return undefined
+      }
+      return h(React.Fragment, null,
+        h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
+        h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
+        h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
+        /**
+         * ⭐⭐ **「检测到有新版本」黑底白字胶囊**（2026-10-18 加，使用者要求）。
+         *   · 位置：**紧跟版本号**（它是"版本相关"的提示）
+         *   · `st.update` 为 null（还没查过）⇒ 什么都不显示，**不要闪"检查中"**
+         *   · 只在真有新版时出现（不常驻"已是最新"）
+         */
+        st.update?.hasNew
+          ? h('button', {
+            'data-bd-badge': '', 'data-bd-new': '', type: 'button',
+            title: '有新版本，点一下看怎么升',
+            onClick: () => { if (typeof onOpen === 'function') onOpen() },
+          }, '检测到有新版本')
+          : null,
+        // ⭐ 「正在后台运行…」绿标（2026-10-16）。**2026-10-18 起排在新版本标之后**。
+        st.headless?.running
+          ? h('button', {
+            'data-bd-badge': '', 'data-bd-run': '', type: 'button',
+            title: '点一下看日志在哪',
+            onClick: () => showRun(
+              '正在后台跑 —— 日志：' + (st.log || '（读不到路径）')
+              + '（用「打开家目录」按钮能找到它；跑完这个标会自己消失）', 'good'),
+          }, '正在后台运行…')
+          : null,
+      )
+    }
+
+
     function useStatus(intervalMs) {
       const [st, setSt] = React.useState(null)
       React.useEffect(() => {
@@ -808,6 +875,11 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       const [reportFile, setReportFile] = React.useState(null)
       const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
+      /**
+       * ⭐ **「有新版本」弹窗是否打开**（2026-10-18 加）。
+       * 点顶栏那个黑标才开；不点就一直只是个小胶囊（不打扰）。
+       */
+      const [showUpdateDlg, setShowUpdateDlg] = React.useState(false)
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
@@ -1130,6 +1202,19 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
             setNewVer(r.latest || '有新版')
             say(`有新版本 ${r.latest}（现在 ${r.current}，比的是 ${src}）`
               + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
+            /**
+             * ⭐ **顺手把顶栏那个「检测到有新版本」点亮**（2026-10-18）。
+             * 为什么要写：`/status` 每 5 秒才轮询一次，而手动点完「检查更新」
+             *   如果顶栏没跟着变，使用者会觉得"它没查到"。这里直接改本地状态，
+             *   不用等那 5 秒。（后端那边缓存也已经写好了，轮询回来是同一个结果。）
+             */
+            setSt((old) => (old ? {
+              ...old,
+              update: {
+                hasNew: true, latest: r.latest || '', current: r.current,
+                page: r.page || 'https://github.com/jojoman2024/dsh-bili-scroll/releases',
+              },
+            } : old))
           } else if (r.localAhead) {
             /**
              * ⭐ **本地版本号比 npm 上的还新** ⇒ 改过还没发版。
@@ -1382,31 +1467,11 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         h('div', { 'data-bd-head': '' },
           // ⚠️ [data-bd-top] 现在自己就是 flex 行（不再套一层 row）—— 见上面 CSS 注释
           h('div', { 'data-bd-top': '' },
-            // ⭐ 「今天已挑 N / M 条」那个计数据使用者要求**去掉了**（2026-10-16）——
-            //    它每天归零、又和「拉多少次/记多少条」不是一回事，摆在这儿反而费解。
-            //    ⚠️ `st.ranToday` 后端仍照常统计（`/status` 里有），只是面板不显示了。
-            h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
-            h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
-            h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
-            // ⭐⭐ **「正在后台运行…」绿标**（2026-10-16 加，使用者要求）。
-            //    判定由后端给（`st.headless.running`）—— 它靠**子进程的 exit 事件**
-            //    与 **pid 探活**，不是"日志多久没动"（那种会误判，也会迟）。
-            //    ⚠️ 结束时会**自己消失**（后端把 running 翻 false，5 秒轮询就带过来了）。
-            //    ⭐ 点击**不弹面板** —— 只浮现一句"去哪看日志"（使用者定的：
-            //       "点击就浮现一下，告诉他去哪里看日志就好了"）。
-            st.headless?.running
-              ? h('button', {
-                'data-bd-badge': '', 'data-bd-run': '', type: 'button',
-                title: '点一下看日志在哪',
-                onClick: () => say(
-                  // ⚠️ 用 `st.log` —— `/status` 里**本来就有**这个字段（旧版也有），
-                  //    别再用我自己另造的那个 `dutyLog`（2026-10-16 踩过：
-                  //    新字段要重启 dsh 才存在，而 `client.js` 刷新就生效
-                  //    ⇒ 重启前点它只会显示"（读不到路径）"，看着像 bug）。
-                  '正在后台跑 —— 日志：' + (st.log || '（读不到路径）')
-                  + '（用「打开家目录」按钮能找到它；跑完这个标会自己消失）', 'good'),
-              }, '正在后台运行…')
-              : null,
+            /* ⭐ 顶栏那一排徽章 —— 已抽成 renderVersionBadges（可离线验的分支）。
+               顺序：环境 → B站 → 版本号 → 新版本 → 后台运行。
+               ⚠️ 间隔靠 [data-bd-top] 的 gap:8px 统一管，别给单个徽章补 margin。
+               ⚠️ 「今天已挑 N/M」那个计数已按使用者要求去掉（st.ranToday 后端仍在）。 */
+            renderVersionBadges(st, () => setShowUpdateDlg(true), say),
             h('div', { 'data-bd-grow': '' }),
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
 
@@ -1846,6 +1911,41 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                 h('button', { 'data-bd-btn': '', onClick: () => setConfirmReset(false) }, '取消'),
                 h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetReply }, '覆盖并恢复')))) : null),
 
+        /* ════════ 有新版本的弹窗（2026-10-18 加）════════
+           ⭐ 复用的是「恢复默认」那个确认弹层（`data-bd-confirm`）——
+              自绘浮层而不是 window.confirm，理由见上面那段注释。
+           ⭐ 使用者要求：弹窗里要有「查看更新内容」按钮，点了跳转去看更新内容。 */
+        showUpdateDlg && st.update?.hasNew
+          ? h('div', { 'data-bd-confirm': '' },
+            h('div', { 'data-bd-confirm-box': '' },
+              h('div', { 'data-bd-confirm-title': '' }, '检测到有新版本'),
+              h('div', { 'data-bd-confirm-body': '' },
+                `新版 ${st.update.latest || '?'}（你现在 ${st.update.current || st.version || '?'}）。`,
+                h('br'),
+                '可以先去「查看更新内容」看看改了什么，再决定要不要升。',
+                h('br'),
+                // ⚠️ 说清升级是干什么的 —— 它会真的换掉磁盘上的代码
+                '升级会从国内镜像（npmmirror）装新版，装完要重启一次 dsh 才生效。'),
+              h('div', { 'data-bd-confirm-foot': '' },
+                h('button', { 'data-bd-btn': '', onClick: () => setShowUpdateDlg(false) }, '以后再说'),
+                /**
+                 * ⭐ **「查看更新内容」**：新开一个标签页去 GitHub Releases。
+                 * ⚠️ 用 `window.open(url, '_blank', 'noopener,noreferrer')`：
+                 *    直接改 `location.href` 会把**整个 DSH 界面**导航走（那很糟）。
+                 * ⚠️ `noopener` 是必须的：否则新页面能通过 `window.opener` 反向操作本页。
+                 */
+                h('button', {
+                  'data-bd-btn': '', 'data-primary': '',
+                  onClick: () => {
+                    try {
+                      window.open(st.update.page || 'https://github.com/jojoman2024/dsh-bili-scroll/releases', '_blank', 'noopener,noreferrer')
+                    } catch { say('打不开浏览器 —— 手动访问 ' + (st.update.page || ''), 'warn') }
+                  },
+                }, '查看更新内容'),
+                h('button', {
+                  'data-bd-btn': '',
+                  onClick: () => { setShowUpdateDlg(false); onUpgrade() },
+                }, '直接升级')))) : null,
         /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
           h('div', { 'data-bd-h': '' }, '环境与账号'),
@@ -1858,9 +1958,13 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
             h('button', { 'data-bd-btn': '', disabled: busy === 'login', onClick: onLoginStart }, '扫码登录'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'check', onClick: onCheck }, '测一下'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'update', onClick: onCheckUpdate }, '检查更新'),
-            // ⚠️ `newVer` 现在装的是 **commit sha 前 7 位**（不是版本号）——
-            //    所以按钮上**不要**再写 "v" 前缀（那会看着像个版本号）。
-            newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade }, '升级到 ' + newVer) : null),
+            /**
+             * ⚠️ **`newVer` 现在装的是【版本号】了**（2026-10-18 改）。
+             *    旧注释写的是"装着 commit sha 前 7 位、所以别写 v 前缀"——
+             *    那是 sha 时代的话。现在 `checkUpdate` 比的是 npm 版本号，
+             *    给它加 `v` 前缀反而更清楚（和顶栏那个 `v0.1.4` 同一个写法）。
+             */
+            newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade }, '升级到 v' + newVer) : null),
           loginState ? h('div', { 'data-bd-msg': '', 'data-good': loginTone === 'good' ? '' : undefined, 'data-warn': loginTone === 'warn' ? '' : undefined }, loginState) : null,
           login?.qr ? h('div', { 'data-bd-qr': '' },
             h('img', { src: login.qr, alt: 'B站登录二维码' }),
@@ -2029,6 +2133,11 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       renderDshBlock,
       /** ⭐ 给探针用（同上）：两种「关注什么」模式的分支要能被离线渲染验证。 */
       renderWatchBlock,
+      /**
+       * ⭐ 给探针用（同上）：顶栏徽章那几个分支（有新版本 / 没新版 / 还没查过 / 后台在跑）。
+       *    靠真机验是"要等真出新版才看得到" ⇒ 必须能离线渲染。
+       */
+      renderVersionBadges,
       /**
        * ⚠️ 这里是**客户端服务短名**，不是包名。
        *    包名那份在 package.json 的 `dsh.client.inject`（两处含义不同）。
