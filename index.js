@@ -1805,10 +1805,47 @@ export function apply(ctx, config) {
          *      （那是他自己的环境，我们没资格改）。
          */
         const MIRROR = 'https://registry.npmmirror.com'
-        // 🔴 桌面版同样要 `--expose-internals` + `ELECTRON_RUN_AS_NODE=1`（见 electronAsNode 注释）
+        /**
+         * 🔴🔴 **`--profile` 不能写死 `web`**（2026-10-18 使用者实测抓到的真 bug）。
+         *
+         * 症状：在**桌面版**里点「一键升级」⇒ 日志说
+         *   `dsh: it stays installed but profile startup denies it until you grant an exemption`
+         * 然后重启也没变化，用户以为"按钮没用"。实测原因是：
+         *   · 插件装在 **`desktop`** profile（桌面版的 HOME = `C:\Users\<u>\.dsh`）；
+         *   · 而这里写死去升 **`web`** profile（CLI 版的 HOME = 另一个目录）
+         *   ⇒ **升的是另一个实例**，自己这边一个字都没变。
+         *
+         * ⇒ 现在从**当前宿主的命令行**里读出真正的 profile：
+         *   · CLI：`node …/dsh/lib/bin.js web --port 3100 …` ⇒ 第一个非选项参数是 `web`；
+         *   · 桌面版：`… --expose-internals …/dsh-desktop-host/lib/index.js <dsh> <HOME>\profiles\desktop …`
+         *     ⇒ 找一个形如 `<something>\profiles\<name>` 的路径，取末级目录名。
+         * ⚠️ 两处都拿不到 ⇒ **退回 `web`**（老行为，至少不比原来差），并在日志里说明。
+         */
+        const detectProfile = () => {
+          const argv = process.argv || []
+          // ① 路径形态：`…\profiles\<name>`（桌面版走这条）
+          for (const a of argv) {
+            const s = String(a || '')
+            const m = /[\\/]profiles[\\/]([^\\/]+)[\\/]?$/.exec(s)
+            if (m && m[1]) return { name: m[1], via: 'argv 里的 profiles 路径' }
+          }
+          // ② 位置参数形态：`bin.js <profile> --port …`（CLI 版走这条）
+          //    ⚠️ 跳过 `--xxx` 选项和它们的值、以及 `.js`/`.exe` 这类入口文件
+          for (const a of argv.slice(1)) {
+            const s = String(a || '')
+            if (!s || s.startsWith('-')) continue
+            if (/\.(js|mjs|cjs|exe|cmd)$/i.test(s)) continue
+            if (/[\\/]/.test(s)) continue          // 带路径的不像 profile 名
+            if (!/^[A-Za-z0-9._-]+$/.test(s)) continue
+            return { name: s, via: 'argv 里的位置参数' }
+          }
+          return { name: 'web', via: '拿不到，退回默认值' }
+        }
+        const prof = detectProfile()
+        appendInstall(`判断当前 profile：${prof.name}（来自${prof.via}）\n`)
         const args = [
           ...(dsh.electron ? ['--expose-internals'] : []),
-          ...dsh.args, 'plugin', '--profile', 'web', 'add',
+          ...dsh.args, 'plugin', '--profile', prof.name, 'add',
           // ⚠️ 顺序要紧：`--registry` 必须在包名之前（见上面那段注释）
           '--registry', MIRROR,
           SPEC,
@@ -1851,7 +1888,8 @@ export function apply(ctx, config) {
           })
         }
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
-        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add --registry ' + MIRROR + ' ' + SPEC + ' ===\n')
+        // ⚠️ 手动命令里也要用**检测到的** profile（否则桌面版用户照着跑，升的还是 web）
+        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile ' + prof.name + ' add --registry ' + MIRROR + ' ' + SPEC + ' ===\n')
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
     })()
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
