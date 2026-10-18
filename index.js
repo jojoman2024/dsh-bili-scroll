@@ -327,7 +327,31 @@ export function apply(ctx, config) {
   const hasPkg = (venvRoot, prefix) => {
     try { return readdirSync(sitePkgs(venvRoot)).some((n) => n.startsWith(prefix)) } catch { return false }
   }
-  const venvReadyNow = () => existsSync(venvPython()) && hasPkg(join(stateDir, '.venv'), 'bilibili_api')
+  /**
+   * 🔴🔴 **「环境已就绪」必须三个包都在**（2026-10-19 修，对应上游 `dd74bfe`）。
+   *
+   * ── 原来的 bug ─────────────────────────────────────
+   *   只查了 `bilibili_api` 一个包：
+   *     `existsSync(venvPython()) && hasPkg(…, 'bilibili_api')`
+   *   ⇒ `mcp` 或 `qrcode` 装失败时**照样显示「环境已就绪」**。
+   *
+   * ── 用户会怎么撞上（上游实测）────────────────────────
+   *   徽章显示「已就绪」、B站也登录了，一跑就：
+   *     `ModuleNotFoundError: No module named 'mcp'`
+   *   或者点「扫码登录」永远不出二维码（那是 `qrcode` 画的）。
+   *
+   * ── 三个包各自管什么 ───────────────────────────────
+   *   · `bilibili_api` —— 查数据（搜视频/读字幕/发评论）
+   *   · `mcp`         —— 跑那一轮的 MCP 服务器（**少了它整轮起不来**）
+   *   · `qrcode`      —— 画扫码登录那张图（少了它**永远不出码**）
+   *
+   * ⚠️ 判据要**三个都齐**，缺一个就是"没装好" —— 宁可让使用者多点一次「装主依赖」，
+   *    也别让他看着「已就绪」然后一跑就崩（后者难查得多）。
+   */
+  const VENV_DEPS = ['bilibili_api', 'mcp', 'qrcode']
+  /** 返回**还缺哪几个**包（空数组 = 齐了）—— 装依赖结束时要把这个写进日志 */
+  const missingVenvDeps = () => VENV_DEPS.filter((n) => !hasPkg(join(stateDir, '.venv'), n))
+  const venvReadyNow = () => existsSync(venvPython()) && missingVenvDeps().length === 0
   const asrReadyNow = () => existsSync(asrPython()) && hasPkg(asrDir, 'faster_whisper')
   const cfgFile = join(stateDir, 'config.json')
   const logFile = join(stateDir, 'duty.log')
@@ -2952,15 +2976,21 @@ export function apply(ctx, config) {
   const preflight = () => {
     const problems = []
 
-    // ① Python 运行环境（venv 里要有 bilibili_api）
+    // ① Python 运行环境（venv 里要有 `bilibili_api` / `mcp` / `qrcode` **三个**）
     //    ⚠️ 判据必须与 `venvReadyNow()` 一致 —— 否则会出现"面板说已就绪、开跑却被拦"。
+    //    ⭐ 2026-10-19：**把缺哪个包说出来**（原来只说"还没装好"，排查时得自己猜）
     if (!venvReadyNow()) {
+      const miss = missingVenvDeps()
       problems.push({
         code: 'no-venv',
-        message: installing ? '运行环境正在装，还没好' : 'Python 运行环境还没装好',
+        message: installing
+          ? '运行环境正在装，还没好'
+          : `Python 运行环境还没装好${miss.length ? `（缺 ${miss.join(' / ')}）` : ''}`,
         fix: installing
           ? '等它装完（面板「环境与账号」能看到进度），装好就能跑'
           : '去「环境与账号」点「装主依赖」——它会在插件自己的目录里建 venv 并装齐依赖',
+        // ⭐ 结构化也给一份：面板/日志想单独展示"缺什么"时不用去解析那句话
+        missing: miss,
       })
     }
 
@@ -3439,8 +3469,23 @@ export function apply(ctx, config) {
         if (uvCmd) code = await spawnLogged(uvCmd, ['pip', 'install', '--python', venvPy, '-i', mirror, '-r', reqFile])
         if (code !== 0) code = await spawnLogged(venvPy, ['-m', 'pip', 'install', '-i', mirror, '-r', reqFile])
         if (code === 0 && existsSync(venvPy)) { saveCfg({ pythonPath: venvPy }); appendInstall(`已把 pythonPath 设为 ${venvPy}\n`) }
-        appendInstall(`=== 结束（exit ${code}，venvReady=${venvReadyNow()}）===\n`)
-        log(`装依赖结束：exit=${code} venvReady=${existsSync(venvPy)}`)
+        /**
+         * ⭐ **结束时把「缺哪个包」写进日志**（2026-10-19 加，对应上游 `dd74bfe`）。
+         *
+         * 为什么必要：原来只写 `venvReady=false`，使用者（和排查的人）**不知道缺什么**
+         * ⇒ 只能瞎猜"是不是又没装成"。现在直接点名，比如 `缺：mcp / qrcode`。
+         *
+         * ⚠️ 两行原来还不一致：`appendInstall` 用 `venvReadyNow()`、
+         *    而 `log` 用 `existsSync(venvPy)` —— 后者只要 python.exe 在就报 true，
+         *    **哪怕一个包都没装上**。这里统一成 `venvReadyNow()`。
+         */
+        {
+          const miss = missingVenvDeps()
+          appendInstall(`=== 结束（exit ${code}，venvReady=${venvReadyNow()}`
+            + `${miss.length ? '，缺：' + miss.join(' / ') : ''}）===\n`)
+          log(`装依赖结束：exit=${code} venvReady=${venvReadyNow()}`
+            + `${miss.length ? ' 缺：' + miss.join(',') : ''}`)
+        }
       } catch (e) {
         appendInstall(`装依赖崩了：${e?.stack ?? e}\n`)
         log(`装依赖崩了：${e?.message ?? e}`)
