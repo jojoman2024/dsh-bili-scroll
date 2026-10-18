@@ -35,7 +35,7 @@ import { join, dirname, resolve, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { pyEnv } from './lib/pyenv.mjs'
-import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey } from './lib/state.mjs'
+import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey, withFileLock } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
 
@@ -552,19 +552,29 @@ export function apply(ctx, config) {
   /**
    * 记一笔"本轮用了一个额度"。
    * ⚠️ **只在真发成功之后调** —— 先记后发的话，发失败也会占掉额度。
+   *
+   * ⭐ **2026-10-18 改成 async + 加锁**：这是另一个**读-改-写**
+   *    （readLedger → 改 rounds → writeLedger）。
+   *    ⚠️ 它保护的不只是"别丢记录" —— 更是**额度不能算错**：
+   *       两轮并发时若各读到同一份旧账本，可能都把"已用 0 条"看成 0
+   *       ⇒ **两边都放行，超发**。加锁之后这个窗口就没了。
+   *    ⚠️ 但抢不到锁时仍然 fail-open（`withFileLock` 兜底）——
+   *       额度偶尔算松一点，比"整轮发不出去"好。
    */
-  const markRoundUse = (kind, key) => {
+  const markRoundUse = async (kind, key) => {
     const id = readRoundId()
     if (!id) return false
-    const led = readLedger()
-    const r = led.rounds[id] || { at: new Date().toISOString(), why: '', replies: [], comments: [] }
-    const arr = Array.isArray(r[kind]) ? r[kind] : []
-    if (!arr.includes(key)) arr.push(key)
-    led.rounds[id] = { ...r, [kind]: arr }
-    // 轮次记录别无限攒：只留最近 60 轮
-    const ids = Object.keys(led.rounds)
-    if (ids.length > 60) for (const k of ids.slice(0, ids.length - 60)) delete led.rounds[k]
-    return writeLedger(led)
+    return withFileLock(ledgerFile, () => {
+      const led = readLedger()
+      const r = led.rounds[id] || { at: new Date().toISOString(), why: '', replies: [], comments: [] }
+      const arr = Array.isArray(r[kind]) ? r[kind] : []
+      if (!arr.includes(key)) arr.push(key)
+      led.rounds[id] = { ...r, [kind]: arr }
+      // 轮次记录别无限攒：只留最近 60 轮
+      const ids = Object.keys(led.rounds)
+      if (ids.length > 60) for (const k of ids.slice(0, ids.length - 60)) delete led.rounds[k]
+      return writeLedger(led)
+    })
   }
 
   /**
@@ -610,43 +620,57 @@ export function apply(ctx, config) {
    * ⚠️ 但**不许降级**：调用方若要写「看过」，而表里已是「挑中/评论」，就跳过不写
    *    （重的记录不该被轻的覆盖）—— 这条由 `markSeen` 自己判，调用方不必操心。
    */
-  const markSeen = (bvid, { rpid = '', note = '', kind = '' } = {}) => {
+  const markSeen = async (bvid, { rpid = '', note = '', kind = '' } = {}) => {
     const id = String(bvid || '').trim()
     if (!/^BV[0-9A-Za-z]+$/.test(id)) return false
-    // kind 的权重：评论 > 挑中 > 看过（数字越大越重）
-    const weight = (k) => (k === '评论' ? 3 : k === '挑中' ? 2 : k === '看过' ? 1 : 0)
-    const HEADER = '# 刷B站 · 判重表\n\n'
-      + '> 这个文件由**插件自动维护**，也可以手工增删。\n'
-      + '> 「怎么来的」有三种：**看过**（读过字幕）/ **挑中**（判定值得看）/ **评论**（真发了）。\n'
-      + '> ⭐ 三者都算「这条已经占用过使用者的注意力」⇒ 下一轮**不再占候选预算**。\n\n'
-      + '| BV | 日期 | 怎么来的 | rpid | 备注 |\n|---|---|---|---|---|\n'
-    try {
-      const old = readSeen().get(id)
-      if (old && weight(old.kind) > weight(kind)) return false   // 不许降级
-      // ⭐ 保险：**别把已有的 rpid 清空**（2026-10-16 补）。
-      //    rpid 是"真评论过"的证据 ⇒ 一旦有，后续任何写入都不该抹掉它
-      //    （即使 kind 相等、或调用方没传 rpid）。
-      const keepRpid = old && String(old.rpid || '') !== '' ? String(old.rpid) : ''
-      const finalRpid = String(rpid || '') !== '' ? String(rpid) : keepRpid
-      const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
-      const row = `| ${id} | ${dayKey()} | ${clean(kind).slice(0, 6)} | ${clean(finalRpid)} | ${clean(note).slice(0, 40)} |`
-      // 读出旧文件 → 保住所有**别的**数据行（含手写的）→ 去掉这个 BV 的旧行 → 新的追加到最后
-      let others = []
+    /**
+     * ⭐⭐ **整段「读 → 判断 → 写」都在锁里**（2026-10-18 改）。
+     *
+     * 🔴 为什么必须包住**整段**、而不只是最后那个 writeFileSync：
+     *    `if (old && weight > ...) return false`（不许降级）这个判断依赖**读到的旧内容**；
+     *    如果读在锁外、写在锁内，两个进程可能都读到"还没有这条"，
+     *    然后一个写「评论」、另一个写「看过」⇒ 反而可能把重的覆盖成轻的。
+     *   ⇒ 读和写必须在**同一个临界区**里。
+     *
+     * ⚠️ 改异步是有代价的：所有调用点都得加 `await`（漏一个就会静默不写）。
+     *    所以这次改了 4 处调用点，并且用探针逐个验过。
+     */
+    return withFileLock(seenFile, () => {
+      // kind 的权重：评论 > 挑中 > 看过（数字越大越重）
+      const weight = (k) => (k === '评论' ? 3 : k === '挑中' ? 2 : k === '看过' ? 1 : 0)
+      const HEADER = '# 刷B站 · 判重表\n\n'
+        + '> 这个文件由**插件自动维护**，也可以手工增删。\n'
+        + '> 「怎么来的」有三种：**看过**（读过字幕）/ **挑中**（判定值得看）/ **评论**（真发了）。\n'
+        + '> ⭐ 三者都算「这条已经占用过使用者的注意力」⇒ 下一轮**不再占候选预算**。\n\n'
+        + '| BV | 日期 | 怎么来的 | rpid | 备注 |\n|---|---|---|---|---|\n'
       try {
-        // ⚠️ 只认**真正的数据行**：`| BV<字母数字>`。
-        //    关键是 `[0-9A-Za-z]+` 那一段 —— 没有它的话表头 `| BV | 日期 | …` 也会被当成数据行，
-        //    于是每次写都把表头复制一份到数据区（写探针时真踩过：过滤条件写松了，误判成插件 bug）。
-        others = readFileSync(seenFile, 'utf8').split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => /^\|\s*BV[0-9A-Za-z]+\s*\|/.test(l))
-          .filter((l) => !new RegExp(`^\\|\\s*${id}\\s*\\|`).test(l))   // 去掉这个 BV 的旧行
-      } catch { /* 文件还不存在 ⇒ others 为空 */ }
-      writeFileSync(seenFile, HEADER + [...others, row].join('\n') + '\n', 'utf8')
-      return true
-    } catch (e) {
-      log(`写判重表失败：${e?.message ?? e}`)
-      return false
-    }
+        const old = readSeen().get(id)
+        if (old && weight(old.kind) > weight(kind)) return false   // 不许降级
+        // ⭐ 保险：**别把已有的 rpid 清空**（2026-10-16 补）。
+        //    rpid 是"真评论过"的证据 ⇒ 一旦有，后续任何写入都不该抹掉它
+        //    （即使 kind 相等、或调用方没传 rpid）。
+        const keepRpid = old && String(old.rpid || '') !== '' ? String(old.rpid) : ''
+        const finalRpid = String(rpid || '') !== '' ? String(rpid) : keepRpid
+        const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
+        const row = `| ${id} | ${dayKey()} | ${clean(kind).slice(0, 6)} | ${clean(finalRpid)} | ${clean(note).slice(0, 40)} |`
+        // 读出旧文件 → 保住所有**别的**数据行（含手写的）→ 去掉这个 BV 的旧行 → 新的追加到最后
+        let others = []
+        try {
+          // ⚠️ 只认**真正的数据行**：`| BV<字母数字>`。
+          //    关键是 `[0-9A-Za-z]+` 那一段 —— 没有它的话表头 `| BV | 日期 | …` 也会被当成数据行，
+          //    于是每次写都把表头复制一份到数据区（写探针时真踩过：过滤条件写松了，误判成插件 bug）。
+          others = readFileSync(seenFile, 'utf8').split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => /^\|\s*BV[0-9A-Za-z]+\s*\|/.test(l))
+            .filter((l) => !new RegExp(`^\\|\\s*${id}\\s*\\|`).test(l))   // 去掉这个 BV 的旧行
+        } catch { /* 文件还不存在 ⇒ others 为空 */ }
+        writeFileSync(seenFile, HEADER + [...others, row].join('\n') + '\n', 'utf8')
+        return true
+      } catch (e) {
+        log(`写判重表失败：${e?.message ?? e}`)
+        return false
+      }
+    })   // ← withFileLock 的回调在这里闭合
   }
 
   const seenCount = () => readSeen().size
@@ -710,10 +734,12 @@ export function apply(ctx, config) {
    * 写入/更新一条（同一个名字只留一行）。
    * ⭐ 与 `markSeen` 同款做法：**先删旧行再插新行**，别让同一个名字留两行。
    */
-  const markAccount = (name, uid, { fans = 0 } = {}) => {
+  const markAccount = async (name, uid, { fans = 0 } = {}) => {
     const nm = String(name || '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
     const id = Number(uid)
     if (!nm || !Number.isFinite(id) || id <= 0) return false
+    // ⭐ 与 markSeen 同样的道理：读-改-写要整段在锁里（见 markSeen 的注释）
+    return withFileLock(accountsFile, () => {
     const HEADER = '# 刷B站 · 账号表\n\n'
       + '> ⭐ 这个文件**记录「昵称 → uid」**，由插件自动维护，**也可以手工改**。\n'
       + '> 为什么要它：取某个 UP 主的视频要 uid，而使用者报的是**昵称**。\n'
@@ -739,6 +765,7 @@ export function apply(ctx, config) {
       log(`写账号表失败：${e?.message ?? e}`)
       return false
     }
+    })   // ← withFileLock 回调闭合
   }
 
   /* ─────────────── 工具 ─────────────── */
@@ -876,7 +903,7 @@ export function apply(ctx, config) {
        *   `bili_user_videos`（传名字）时再落账 —— 那时它已经明确选定了 uid。
        */
       if (users.length === 1 && users[0]?.uid) {
-        try { markAccount(users[0].name || keyword, users[0].uid, { fans: users[0].fans }) } catch { /* 记不上不影响搜索 */ }
+        try { await markAccount(users[0].name || keyword, users[0].uid, { fans: users[0].fans }) } catch { /* 记不上不影响搜索 */ }
       }
 
       return {
@@ -966,7 +993,7 @@ export function apply(ctx, config) {
             pickedBy: exact.length === 1 ? '完全同名' : '粉丝最多（这是猜的，报告里要说明）',
           }
           // ③ 记账（只记**明确的**那档；多个候选且靠猜的也记，但 resolved 里标了 pickedBy）
-          try { markAccount(pick.name || name, uid, { fans: pick.fans }) } catch { /* 记不上不影响 */ }
+          try { await markAccount(pick.name || name, uid, { fans: pick.fans }) } catch { /* 记不上不影响 */ }
         }
       }
 
@@ -1056,7 +1083,7 @@ export function apply(ctx, config) {
       //    而实际读过字幕的有十几条 ⇒ 没记的下轮还会被搜出来、白占候选预算。
       //    ⚠️ 已有记录不覆盖（后记的「评论/挑中」比「看过」更重，别被降级）。
       try {
-        if (!readSeen().has(bvid)) markSeen(bvid, { kind: '看过', note: '读过字幕' })
+        if (!readSeen().has(bvid)) await markSeen(bvid, { kind: '看过', note: '读过字幕' })
       } catch { /* 记账失败不影响取字幕 */ }
       return r
     },
@@ -1245,7 +1272,7 @@ export function apply(ctx, config) {
         // 已经发过评论 —— 那是比"挑中"更强的记录，不覆盖
         return { ok: true, skipped: true, hint: `${bvid} 已经在表里（${already.kind}），不用重复记。` }
       }
-      const ok = markSeen(bvid, { kind: '挑中', note: String(args.note ?? '').slice(0, 40) })
+      const ok = await markSeen(bvid, { kind: '挑中', note: String(args.note ?? '').slice(0, 40) })
       return { ok, bvid, kind: '挑中', total: seenCount() }
     },
   })
@@ -1431,7 +1458,7 @@ export function apply(ctx, config) {
         ? true
         : (typeof rec === 'object' ? rec.success !== false && rec.ok !== false : true)
       if (okNow) {
-        markSeen(bvid, {
+        await markSeen(bvid, {
           kind: '评论',
           rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '',
           note: String(args.text ?? '').slice(0, 40),
@@ -1439,7 +1466,7 @@ export function apply(ctx, config) {
         // ⭐ **记本轮的额度用量**（两种都记，但记在各自的格子里）——
         //    ⚠️ 必须在**真发成功之后**：先记后发的话，发失败也占掉额度。
         //    ⚠️ 索引键：**回复**用 source_id（`replyTo`，没有就退回 rpid），**新评论**用 BV。
-        markRoundUse(isReply ? 'replies' : 'comments',
+        await markRoundUse(isReply ? 'replies' : 'comments',
           isReply ? (String(args.replyTo ?? '').trim() || String(Number(args.rpid) || '')) : bvid)
 
         // ⭐ 回复账本：只在**真回成功**时写 `repliedAt` ⇒ `bili_replies` 才会把这条摘掉。
@@ -1593,7 +1620,7 @@ export function apply(ctx, config) {
       if (args.mark) {
         const id = String(args.mark).trim()
         alreadyThere = readSeen().has(id)
-        marked = markSeen(id, { kind: '挑中', note: String(args.note ?? '') })
+        marked = await markSeen(id, { kind: '挑中', note: String(args.note ?? '') })
       }
       const map = readSeen()
       const out = {
