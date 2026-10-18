@@ -52,7 +52,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    const API = '/api/bili-duty'
+    const API = '/api/bili-scroll-jojo'
     const jget = async (p) => (await fetch(API + p, { credentials: 'same-origin' })).json()
     const jpost = async (p, body) => (await fetch(API + p, {
       method: 'POST',

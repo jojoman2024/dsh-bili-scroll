@@ -8,7 +8,7 @@
  *      开了哪个窗口才在哪个窗口自动跑；「定量刷」的数字是**每天总量上限**。
  *   3. **跑一轮** = 起一个 `dsh --profile headless <prompt>`（跟老方案同一条路，已被验证过），
  *      把 `duty.md` 交给它，报告写进 `<家>/out/<日期>.md`。
- *   4. **设置页**（`client.js`）通过 `/api/bili-duty/*` 读写配置、看状态、扫码登录。
+ *   4. **设置页**（`client.js`）通过 `/api/bili-scroll-jojo/*` 读写配置、看状态、扫码登录。
  *
  * 家里（`$DSH_HOME/bili-duty/`）都有什么：`config.json` / `mcp_server.py`（从 vendor 铺过来，
  * 这样凭证 `bili_credential.json` 落在家里而不是插件包里）/ `duty.md` / `out/` / `duty.log`。
@@ -3631,7 +3631,7 @@ export function apply(ctx, config) {
 
   const handle = async (req, res, url) => {
     const path = url.pathname
-    if (req.method === 'GET' && path === '/api/bili-duty/status') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/status') {
       /**
        * ⭐ **顺手预热一次版本检测**（2026-10-18 加，使用者要"启动时自动查"）。
        * ⚠️ **故意不 await** —— 它要发网络请求（~200ms），而 `/status` 每 5 秒一次；
@@ -3644,11 +3644,11 @@ export function apply(ctx, config) {
       return sendJson(res, 200, status())
     }
 
-    if (req.method === 'GET' && path === '/api/bili-duty/config') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/config') {
       return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
     }
 
-    if (req.method === 'POST' && path === '/api/bili-duty/config') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/config') {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
@@ -3705,7 +3705,7 @@ export function apply(ctx, config) {
      *      （dsh-llm 用声明合并加了 Context.llm，但服务只能用 ctx.get 取）
      *   ② listModels 是 async，要 await；且**单个 provider 失败不能拖垮整张表**（逐个 try）
      */
-    if (req.method === 'GET' && path === '/api/bili-duty/models') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/models') {
       try {
         const llm = ctx.get('llm')
         if (!llm) return sendJson(res, 200, { ok: true, providers: [], note: '拿不到 llm 服务（ctx.get("llm") 是 undefined）' })
@@ -3729,11 +3729,11 @@ export function apply(ctx, config) {
     }
 
     /* ── 人设（persona）：设置页的文本框 ⇄ 家目录里的 persona.md ──
-     * 读：GET  /api/bili-duty/persona   ⇒ { ok, text, file, enabled, maxChars }
-     * 写：POST /api/bili-duty/persona   { text }  ⇒ 落盘 persona.md
+     * 读：GET  /api/bili-scroll-jojo/persona   ⇒ { ok, text, file, enabled, maxChars }
+     * 写：POST /api/bili-scroll-jojo/persona   { text }  ⇒ 落盘 persona.md
      * ⭐ 不需要重启、也不需要重挂：promptFor() 每一轮**现读**这个文件 ⇒ 写完即时生效
      */
-    if (req.method === 'GET' && path === '/api/bili-duty/persona') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/persona') {
       const text = readPersona()
       return sendJson(res, 200, {
         ok: true, text, file: personaFile,
@@ -3743,30 +3743,30 @@ export function apply(ctx, config) {
       })
     }
 
-    if (req.method === 'POST' && path === '/api/bili-duty/persona') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/persona') {
       const body = await readBody(req)
       const text = writePersona(body?.text)
       log(`人设已更新（${text.length} 字符）→ ${personaFile}`)
       return sendJson(res, 200, { ok: true, file: personaFile, chars: text.length })
     }
 
-    if (req.method === 'POST' && path === '/api/bili-duty/run') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/run') {
       // ⚠️ 前台那条要 await 建会话（几百毫秒~几秒），所以这个路由**必须是 async 的**
       //    —— `handle` 本来就是 async，这里直接 await 即可。
       return sendJson(res, 200, { ok: true, ...(await runDuty('manual')) })
     }
 
     /* ── 回复细则（reply）：设置页的文本框 ⇄ 家目录里的 reply.md ──
-     * 读：GET  /api/bili-duty/reply          ⇒ { ok, text, file, chars, isDefault }
-     * 写：POST /api/bili-duty/reply { text } ⇒ 落盘 reply.md
-     * 恢复：POST /api/bili-duty/reply/reset  ⇒ 用**出厂源**覆盖家目录那份
+     * 读：GET  /api/bili-scroll-jojo/reply          ⇒ { ok, text, file, chars, isDefault }
+     * 写：POST /api/bili-scroll-jojo/reply { text } ⇒ 落盘 reply.md
+     * 恢复：POST /api/bili-scroll-jojo/reply/reset  ⇒ 用**出厂源**覆盖家目录那份
      *
      * ⭐ 与 persona 的区别：**它有出厂源** ⇒ 多一条 reset 路由。
      * ⭐ 与 duty 的区别：duty 是"每次启动按内容覆盖"，reply 是"只在缺文件时铺一次"
      *    ⇒ 因为 reply **允许使用者改**（改了不被冲掉），想回出厂就点「恢复默认」。
      * ⚠️ 三处都要现读/现写，不缓存 —— 与 persona 同理，改完下一轮即生效。
      */
-    if (req.method === 'GET' && path === '/api/bili-duty/reply') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/reply') {
       const text = readReply()
       const def = readReplyDefault()
       return sendJson(res, 200, {
@@ -3783,7 +3783,7 @@ export function apply(ctx, config) {
       })
     }
 
-    if (req.method === 'POST' && path === '/api/bili-duty/reply') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/reply') {
       const body = await readBody(req)
       const text = writeReply(body?.text)
       log(`回复细则已更新（${text.length} 字符）→ ${replyFile}`)
@@ -3792,7 +3792,7 @@ export function apply(ctx, config) {
 
     // ⭐ **恢复默认**：把出厂源那份写回家目录（会**覆盖使用者改过的内容**）。
     //    ⚠️ 面板侧必须先弹确认再调它 —— 这是破坏性操作。
-    if (req.method === 'POST' && path === '/api/bili-duty/reply/reset') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/reply/reset') {
       const def = readReplyDefault()
       if (!def.trim()) {
         return sendJson(res, 200, { ok: false, error: `出厂源读不到或为空：${replyDefaultFile}` })
@@ -3804,18 +3804,18 @@ export function apply(ctx, config) {
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）
-    if (req.method === 'POST' && path === '/api/bili-duty/install') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/install') {
       return sendJson(res, 200, runInstall())
     }
 
     // 装"本地转写"那套（独立环境：faster-whisper + yt-dlp + Whisper 模型）
-    if (req.method === 'POST' && path === '/api/bili-duty/install-asr') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/install-asr') {
       return sendJson(res, 200, runAsrInstall())
     }
 
     // ⭐ **产物清单**（2026-10-16 加）：每条视频一份 md，列出来给面板。
     //    （旧的「看今天的报告」那条路由留着不动 —— 兼容旧日报，但不再新写。）
-    if (req.method === 'GET' && path === '/api/bili-duty/reports') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/reports') {
       const dir = reportDirFor()
       let files = []
       try {
@@ -3834,7 +3834,7 @@ export function apply(ctx, config) {
     }
 
     // 看某一份产物（按文件名取，**只认产物目录里的**）
-    if (req.method === 'GET' && path === '/api/bili-duty/report-file') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/report-file') {
       const name = String(url.searchParams.get('name') || '')
       // 🔴 防路径穿越：只接受**纯文件名**（不许带分隔符或 ..）
       if (name === '' || name.includes('/') || name.includes('\\') || name.includes('..')) {
@@ -3848,7 +3848,7 @@ export function apply(ctx, config) {
     }
 
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
-    if (req.method === 'GET' && path === '/api/bili-duty/report') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/report') {
       const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
       // 日报**只有一处**（`<家>\out\`）—— 前台那条路也走 `bilij_write` 写到这里。
       // （中途曾把前台日报改到工作区里，那是弯路：使用者反馈"看到 out 目录但没有输出"。
@@ -3872,7 +3872,7 @@ export function apply(ctx, config) {
      *      这个按钮**一直在开错文件夹**（使用者截图指出："打开产物文件夹按钮打开的目录也不对"）。
      *      ⇒ 现在 `'out'` 指向真正的产物目录；老的 `out` 单独给个名字。
      */
-    if (req.method === 'POST' && path === '/api/bili-duty/open') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/open') {
       const body = await readBody(req)
       const what = String(body?.what || 'out')
       const dir = what === 'home' ? stateDir
@@ -3905,12 +3905,12 @@ export function apply(ctx, config) {
     }
 
     // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）
-    if (req.method === 'POST' && path === '/api/bili-duty/upgrade') return sendJson(res, 200, runUpgrade())
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/upgrade') return sendJson(res, 200, runUpgrade())
 
 
     /** 读本插件目录自己那一份 git 的当前 commit（读不到返回 ''）。 */
 
-    if (req.method === 'GET' && path === '/api/bili-duty/update') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/update') {
       // ⚠️ 逻辑已提到模块级 `checkUpdate()`（见上面那段注释），这里只做转发
       return sendJson(res, 200, await checkUpdate())
     }
@@ -3921,7 +3921,7 @@ export function apply(ctx, config) {
      * 而不是把人甩去一个国内可能打不开的 GitHub 页面。
      * ⚠️ 版本号不传 ⇒ 用当前版本（面板一般传「比本地新的那一版」）。
      */
-    if (req.method === 'GET' && path === '/api/bili-duty/changelog') {
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/changelog') {
       const ver = String(url.searchParams.get('version') || '').trim()
         || (updateCache && updateCache.latest) || myVersion()
       return sendJson(res, 200, await fetchChangelog(ver))
@@ -3935,12 +3935,12 @@ export function apply(ctx, config) {
      * （实测：领先 fork/main 16 个提交时必然 404）。
      * ──────────────────────────────────────────────────────────────────── */
     // 「测一下」：真跑一次，回答"能不能用"
-    if (req.method === 'POST' && path === '/api/bili-duty/check') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/check') {
       return sendJson(res, 200, await checkUp())
     }
 
     // ── 扫码登录（设置页用）──
-    if (req.method === 'POST' && path === '/api/bili-duty/login/start') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/login/start') {
       const { key, url } = await loginStart()
       const png = await renderQrPng(cfg.pythonPath, stateDir, url)
       let qr = null
@@ -3949,7 +3949,7 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, key, url, qr })
     }
 
-    if (req.method === 'POST' && path === '/api/bili-duty/login/poll') {
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/login/poll') {
       const body = await readBody(req)
       const r = await loginPoll(String(body.key || ''))
       if (r.state === 'ok') {
@@ -3966,13 +3966,13 @@ export function apply(ctx, config) {
   try {
     ctx.effect(() => ctx.webServer.register({
       kind: 'prefix',
-      path: '/api/bili-duty',
+      path: '/api/bili-scroll-jojo',
       handler: async (req, res) => {
         try { await handle(req, res, new URL(req.url, 'http://127.0.0.1')) } catch (e) {
           sendJson(res, 500, { ok: false, error: e?.message ?? String(e) })
         }
       },
-    }), 'bili-duty: /api/bili-duty 路由')
+    }), 'bili-duty: /api/bili-scroll-jojo 路由')
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'bili-duty: 收 MCP 子进程')
