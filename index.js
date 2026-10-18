@@ -643,6 +643,96 @@ export function apply(ctx, config) {
 
   const seenCount = () => readSeen().size
 
+  /* ─────────────── 账号表 accounts.md（2026-10-18 加） ───────────────
+   *
+   * ⭐ **它解决什么问题**：使用者说「关注 AIGC深一度 这个 UP 主」时，
+   *    模型得先把**昵称**换成 **uid** 才能取他的视频（`bili_user_videos` 要 uid）。
+   *
+   * ── 为什么要缓存（⚠️ 不是为省时间）──────────────────────────
+   *   实测量过（本机，3 次取中位数）：
+   *     · 搜用户拿 uid          ≈ 142 ms
+   *     · 有 uid 后取视频       ≈ 446 ms
+   *     · 本地读一个 json       ≈ 0.4 ms
+   *   ⇒ 缓存只省 **142ms**，而这一轮后面还要读字幕（每条几秒）、让模型判断……
+   *     占整轮**不到 0.1%** ⇒ **"省时间"这个理由不成立**。
+   *
+   *   🔴 真正值钱的是另外三件事：
+   *     ① **可复核**：这个"昵称→uid"是**你确认过一次**的，不是模型每次现猜。
+   *        猜错的代价是把**别人的视频**当成你的目标 —— 比 142ms 贵得多。
+   *     ② **同名账号**：搜"某某"可能出来好几个。缓存记下"上次选的是哪个（多少粉丝）"，
+   *        下次**不用重新纠结**，也方便你手工改成另一个。
+   *     ③ **手工可纠正**：它是 markdown 表格，你可以直接改 uid —— 比让模型重搜可靠。
+   *
+   * ── 为什么是 markdown 而不是 json ──
+   *   与 `seen.md` 同一个理由：**人要能直接读、直接改**。
+   *   ⚠️ 所以解析要宽容：任何一行读不懂就跳过，别整张表作废。
+   */
+  const accountsFile = join(stateDir, 'accounts.md')
+
+  /** 解析 accounts.md → Map<名字小写, { uid, name, fans, at }> */
+  const readAccounts = () => {
+    const map = new Map()
+    let text = ''
+    try { text = readFileSync(accountsFile, 'utf8') } catch { return map }
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim()
+      // 数据行：| 昵称 | uid | 粉丝数 | 什么时候 |（uid 必须是纯数字）
+      const m = /^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|([^|]*)\|([^|]*)\|\s*$/.exec(t)
+      if (!m) continue
+      const name = m[1].trim()
+      if (!name) continue
+      map.set(name.toLowerCase(), {
+        name,
+        uid: Number(m[2]),
+        fans: Number(String(m[3]).trim()) || 0,
+        at: m[4].trim(),
+      })
+    }
+    return map
+  }
+
+  /** 按名字查缓存（大小写/首尾空格不敏感）；查不到返回 null */
+  const lookupAccount = (name) => {
+    const k = String(name || '').trim().toLowerCase()
+    if (!k) return null
+    return readAccounts().get(k) || null
+  }
+
+  /**
+   * 写入/更新一条（同一个名字只留一行）。
+   * ⭐ 与 `markSeen` 同款做法：**先删旧行再插新行**，别让同一个名字留两行。
+   */
+  const markAccount = (name, uid, { fans = 0 } = {}) => {
+    const nm = String(name || '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
+    const id = Number(uid)
+    if (!nm || !Number.isFinite(id) || id <= 0) return false
+    const HEADER = '# 刷B站 · 账号表\n\n'
+      + '> ⭐ 这个文件**记录「昵称 → uid」**，由插件自动维护，**也可以手工改**。\n'
+      + '> 为什么要它：取某个 UP 主的视频要 uid，而使用者报的是**昵称**。\n'
+      + '> 记下来之后：① 下次直接用、不用再猜；② 搜出同名账号时能看出上次选的是谁；\n'
+      + '> ③ 你**可以直接把 uid 改成你想要的那个** —— 比让模型重搜可靠。\n'
+      + '> ⚠️ uid 必须是纯数字；名字改了会被当成新的一行（旧行留着无害，可以手动删）。\n\n'
+      + '| 昵称 | uid | 粉丝数 | 什么时候 |\n|---|---|---|---|\n'
+    const clean = (s) => String(s ?? '').replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim()
+    const row = `| ${clean(nm).slice(0, 60)} | ${id} | ${Number(fans) || 0} | ${dayKey()} |`
+    try {
+      let others = []
+      try {
+        others = readFileSync(accountsFile, 'utf8').split(/\r?\n/)
+          .map((l) => l.trim())
+          // ⚠️ 只认**真的数据行**（uid 是数字）—— 否则表头 `| 昵称 | uid | …` 会被当成数据行，
+          //    每次写都复制一份表头（`seen.md` 那边踩过同一个坑）
+          .filter((l) => /^\|\s*[^|]+\|\s*\d+\s*\|/.test(l))
+          .filter((l) => l.split('|')[1]?.trim().toLowerCase() !== nm.toLowerCase())
+      } catch { /* 文件还不存在 */ }
+      writeFileSync(accountsFile, HEADER + [...others, row].join('\n') + '\n', 'utf8')
+      return true
+    } catch (e) {
+      log(`写账号表失败：${e?.message ?? e}`)
+      return false
+    }
+  }
+
   /* ─────────────── 工具 ─────────────── */
 
   const textOutput = {
@@ -747,24 +837,138 @@ export function apply(ctx, config) {
   })
 
   tool({
-    name: 'bili_user_videos',
-    description: '取**某个 UP 主自己的投稿**（按 uid）。\n'
-      + '⭐ 使用者要求「关注某个账号」时**用这个**，不要拿账号名去 `bili_search` —— '
-      + '那是搜"别人提到他"，不是他的作品。\n'
-      + '⚠️ 需要 uid（数字）。不知道 uid 就先想办法拿到；**不要瞎猜一个 uid**。',
+    name: 'bili_search_user',
+    description: '按**昵称**搜 B站 用户（UP 主），返回 uid / 粉丝数 / 投稿数 / 签名。\n'
+      + '⭐ 使用者说「关注某某 UP 主」时**先调这个** —— '
+      + '🔴 **不要**拿账号名去 `bili_search` 搜视频：实测搜回来的多半是"别人提到他"，'
+      + '一条他的都没有（真踩过）。\n'
+      + '⭐ 查到之后用 `bili_user_videos` 取他的投稿；uid 会被自动记进家目录的 `accounts.md`，下次直接用。',
     parameters: {
-      uid: { type: 'number', description: 'UP 主的 UID（数字）。必需' },
+      keyword: { type: 'string', description: '用户昵称（全名或一部分都行）' },
+      num: { type: 'number', description: '返回几个候选（默认 10）' },
+    },
+    async execute(args) {
+      const keyword = String(args.keyword ?? '').trim()
+      if (!keyword) return { ok: false, error: 'keyword 不能为空' }
+      const pageSize = Math.max(1, Math.min(Number(args.num) || 10, 50))
+      const r = await call('bili_search_user', { keyword, page_size: pageSize })
+
+      let obj = r
+      if (typeof r === 'string') { try { obj = JSON.parse(r) } catch { /* 非 JSON 就原样回 */ } }
+      const users = Array.isArray(obj?.users) ? obj.users : []
+
+      /**
+       * ⭐ **缓存只自动写"唯一候选"那一档**（2026-10-18 定的规矩）。
+       *
+       * 为什么不是"搜到就写第一个"：
+       *   搜"某某"可能出来好几个同名号 ⇒ 自动写第一个等于**替使用者做了选择**，
+       *   而选错的表现是"刷回来的视频全不是他要的那个人"，很难发现。
+       * ⇒ 判据：**只有恰好 1 个结果时**才自动记；
+       *   多个 ⇒ **不写**，让模型按提示词的要求**报出它选了谁**，由模型调
+       *   `bili_user_videos`（传名字）时再落账 —— 那时它已经明确选定了 uid。
+       */
+      if (users.length === 1 && users[0]?.uid) {
+        try { markAccount(users[0].name || keyword, users[0].uid, { fans: users[0].fans }) } catch { /* 记不上不影响搜索 */ }
+      }
+
+      return {
+        ...(obj && typeof obj === 'object' ? obj : { raw: r }),
+        // ⚠️ 提示词要求"必须报出选了谁" ⇒ 这里顺手说清该怎么读这份结果
+        hint: users.length === 0
+          ? '没搜到。换个写法再试（去掉空格 / 用简称 / 名字可能打错了）—— **不要**改成去搜视频找 uid。'
+          : users.length === 1
+            ? `只有这一个结果（${users[0].name}，${users[0].fans} 粉丝）⇒ 就是他了，已记进 accounts.md。`
+            : `有 ${users.length} 个候选 ⇒ **自己挑一个**（看粉丝数 / 投稿数 / 签名 / 认证），`
+              + '但**必须在报告里写明你选了哪一个、凭什么**（例如"选了 AIGC深一度，14501 粉丝"，'
+              + '因为它是唯一同名的那条）；拿不准就照实说"有这几个，我不确定是哪个"。',
+      }
+    },
+  })
+
+  tool({
+    name: 'bili_user_videos',
+    description: '取**某个 UP 主自己的投稿**。\n'
+      + '⭐ 给 `name`（昵称）就会**自动解析 uid**：先查家目录的 `accounts.md` 缓存，'
+      + '查不到才去搜用户，搜到后自动记进缓存 —— 所以同一个账号只需解析一次。\n'
+      + '⭐ 已经知道 uid 就直接给 `uid`（更省一步）。\n'
+      + '🔴 **不要**拿账号名去 `bili_search` 搜视频找 uid —— 那是搜"别人提到他"，不是他的作品。',
+    parameters: {
+      uid: { type: 'number', description: 'UP 主的 UID（数字）。与 name 二选一' },
+      name: { type: 'string', description: 'UP 主的昵称。与 uid 二选一；会走缓存/自动解析' },
       num: { type: 'number', description: '返回几条（默认取设置里的「每次搜取回几条」，最大 50）' },
       order: { type: 'string', description: 'pubdate=最新（默认）/ click=播放 / stow=收藏' },
       keyword: { type: 'string', description: '在该 UP 主的视频里再按关键词过滤（可省）' },
     },
     async execute(args) {
-      const uid = Number(args.uid)
+      /**
+       * ⭐ **两种入参**（2026-10-18 加 `name` 这条路）：
+       *   · 给 `uid`  ⇒ 直接用（模型已经从 bili_search_user 拿到了）
+       *   · 给 `name` ⇒ ① 先查 `accounts.md` 缓存；② 没有再搜用户；③ 搜到就记账
+       *
+       * 🔴 为什么要支持 `name`：使用者的原话是「关注某某 UP 主」——**报的是昵称**。
+       *    若模型必须自己先搜一次 uid 再调这个，就多一步、也多一次"它可能偷懒不搜"的机会
+       *    （实测它就真的跳过搜索、直接拿名字去搜视频了）。
+       *    ⇒ 把"解析 uid"**下沉到工具里**，模型只需把名字给它。
+       */
+      let uid = Number(args.uid)
+      let resolved = null   // 解析过程（回给模型看，便于它复核"我选的是谁"）
+
+      if ((!Number.isFinite(uid) || uid <= 0) && String(args.name || '').trim()) {
+        const name = String(args.name).trim()
+        // ① 缓存
+        const hit = lookupAccount(name)
+        if (hit) {
+          uid = hit.uid
+          resolved = { via: 'cache', uid, name: hit.name, fans: hit.fans }
+        } else {
+          // ② 搜用户
+          const sr = await call('bili_search_user', { keyword: name, page_size: 10 })
+          let so = sr
+          if (typeof sr === 'string') { try { so = JSON.parse(sr) } catch { /* 非 JSON */ } }
+          const users = Array.isArray(so?.users) ? so.users : []
+          if (!users.length) {
+            return {
+              ok: false, resolved: { via: 'search', name, found: 0 },
+              error: `没搜到昵称「${name}」的用户。换个写法再试（去掉空格 / 用简称），`
+                + '或者确认名字没打错。**不要**改成去搜视频找 uid。',
+            }
+          }
+          /**
+           * ⚠️ **多个候选时不替使用者做选择**（除非能确定）：
+           *   · 有**完全同名**的（昵称逐字相等）⇒ 取那个，但记下"是从多个里挑的"；
+           *   · 没有完全同名的 ⇒ 取粉丝最多的那个，**并明确标出这是猜的**。
+           *   ⭐ 两种都要把 `candidates` 一起回给模型 ⇒ 它才能在报告里**报出选了谁**。
+           */
+          const exact = users.filter((u) => String(u.name || '').trim() === name)
+          const pick = exact.length === 1
+            ? exact[0]
+            : [...users].sort((a, b) => (Number(b.fans) || 0) - (Number(a.fans) || 0))[0]
+          uid = Number(pick.uid)
+          resolved = {
+            via: 'search',
+            uid,
+            name: pick.name,
+            fans: pick.fans,
+            videos: pick.videos,
+            // ⭐ 人多的时候必须把候选一起带回去 —— 提示词要求"报出选了谁"
+            candidates: users.length > 1
+              ? users.map((u) => ({ uid: u.uid, name: u.name, fans: u.fans, videos: u.videos, sign: (u.sign || '').slice(0, 40) }))
+              : undefined,
+            ambiguous: users.length > 1,
+            pickedBy: exact.length === 1 ? '完全同名' : '粉丝最多（这是猜的，报告里要说明）',
+          }
+          // ③ 记账（只记**明确的**那档；多个候选且靠猜的也记，但 resolved 里标了 pickedBy）
+          try { markAccount(pick.name || name, uid, { fans: pick.fans }) } catch { /* 记不上不影响 */ }
+        }
+      }
+
       // ⚠️ 校验 uid：拿不到数字就别发请求（否则会搜出一个莫名其妙的号）
       if (!Number.isFinite(uid) || uid <= 0) {
         return {
           ok: false,
-          error: 'uid 不是有效数字。先用 bili_search 搜他的名字、从结果里取那条视频的 UP 主 uid；拿不到就如实说"没解析出这个账号"，别猜。',
+          error: '没给 uid 也没给 name，或 name 解析不出来。'
+            + '先用 bili_search_user 按昵称搜（会返回 uid），再带着 uid 调这个；'
+            + '也可以直接给 name 让这里自动解析。拿不到就如实说"没解析出这个账号"，**别猜**。',
         }
       }
       const num = Math.max(1, Math.min(Number(args.num) || Number(cfg.searchNum) || 20, 50))
@@ -805,13 +1009,25 @@ export function apply(ctx, config) {
           ...(obj && typeof obj === 'object' ? obj : { raw: r }),
           videos: fresh,
           skippedSeen: skipped,
+          /**
+           * ⭐ **把"这个 uid 是怎么来的"一并回给模型**（2026-10-18）。
+           * 为什么必要：使用者要的是"报出你选了谁" ——
+           *   而 `via:'cache'` 与 `via:'search'` 的可信度不同，
+           *   传 `name` 时还可能 `ambiguous:true`（多个同名，靠粉丝数猜的）。
+           * 模型拿到这个字段才知道**要不要在报告里声明"我是猜的"**。
+           */
+          ...(resolved ? { resolved } : {}),
           poolCount: size,
           poolTarget: target,
           poolEnough: size >= target,
           poolHint: (skipped > 0 ? `（本轮已跳过 ${skipped} 条看过的）` : '')
             + (size >= target
               ? `候选池已够（${size} ≥ ${target}）⇒ 可以开始读字幕筛选了。`
-              : `候选池还不够（${size} < ${target}）⇒ 换个主题搜、或换个 UP 主（放宽一点）。`),
+              : `候选池还不够（${size} < ${target}）⇒ 换个主题搜、或换个 UP 主（放宽一点）。`)
+            + (resolved?.ambiguous
+              ? `\n⚠️ 这次有 ${resolved.candidates?.length} 个同名候选，我按「${resolved.pickedBy}」选了 `
+                + `${resolved.name}（${resolved.fans} 粉丝）—— **报告里要把这个说明写出来**。`
+              : ''),
         }
       } catch { return r }
     },
@@ -1745,10 +1961,17 @@ export function apply(ctx, config) {
           + `      - **主题**（例如"大模型论文""RAG 实践"）⇒ 自己组合出更具体的搜索词，\n`
           + `        分批调 \`bili_search\`（一轮里换 2~4 组不同组合，别只用一组就下结论）；\n`
           + `        字要落在「领域 + 具体内容」上，避开「入门 / 教程 / 毕设 / 水论文」这类流量词。\n`
-          + `      - **账号 / UP 主**（例如"关注一下某某 UP 主"）⇒ 用 \`bili_user_videos\` 取他**自己的投稿**，\n`
-          + `        ⚠️ **不要**拿他的名字去 \`bili_search\` 搜（那搜回来的是"别人提到他"，不是他的作品）。\n`
-          + `        账号名要先换成 uid：拿不到 uid 就先用 \`bili_search\` 搜他的名字找到那条视频的 UP 主，\n`
-          + `        或者如实说"这个账号我没解析出 uid"，**别瞎猜一个 uid**。\n`
+          + `      - **账号 / UP 主**（例如"关注一下某某 UP 主"）⇒ 🔴 **找人和找内容是两回事**：\n`
+          + `          ① 先 \`bili_search_user\`（按**昵称**搜**用户**）拿 uid ——\n`
+          + `             ⚠️ **不要**拿账号名去 \`bili_search\` 搜视频！实测那搜回来的是"别人聊到这个号"，\n`
+          + `             一条他本人的视频都没有（真踩过）。搜不到就换个写法再试，**不要**退回去搜视频。\n`
+          + `          ② 再 \`bili_user_videos\` 取他的投稿。⭐ 也可以**直接给它 name**，\n`
+          + `             它会先查家目录 \`accounts.md\` 的缓存、没有才去搜 —— 同一个号只解析一次。\n`
+          + `          ③ 🔴 **必须报出你选了谁**：搜出多个同名号时自己挑（看粉丝数 / 投稿数 / 签名 / 认证），\n`
+          + `             但要在报告里写明「选了 XXX（N 粉丝），因为……」。拿不准就照实说\n`
+          + `             "有这几个候选，我不确定是哪个"，**不要**随便选一个当没事。\n`
+          + `             （工具回执里的 resolved.pickedBy / resolved.candidates 会告诉你\n`
+          + `              这次是"完全同名"还是"按粉丝数猜的"。）\n`
           + `      - 两类都要时，**两类都要做**（先做哪类都行）。\n`
           + `  · ⭐ **注意他写进去的条件**：像"不要入门教程""只看最近半年的""要长视频"这类，`
           + `都是**筛选条件**，判候选时要照着用，不是背景装饰。\n`

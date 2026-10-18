@@ -1188,6 +1188,72 @@ async def bili_user_info(uid: int) -> str:
     }, ensure_ascii=False)
 
 
+# ========== Tool 17.5: 搜索用户（按昵称找 UP 主） ==========
+#
+# 🔴 为什么必须有这个（2026-10-18 加的，起因是实测的一次错误路径）：
+#   使用者让它「关注 AIGC深一度 这个 UP 主」，模型理解了"这是账号需求"，
+#   但手上没有搜用户的工具 ⇒ 只能拿名字去 bili_search 搜**视频**。
+#   实测那三搜回来的 3 条**没有一条**是这个 UP 主的（都是别人聊 AIGC）。
+#   ⇒ 等于这个需求根本做不成，而且**不报错**。
+#
+# ⭐ 实测数据（搜" AIGC深一度"）：
+#     搜视频 ⇒ 3 条结果，0 条是那个 UP 主
+#     搜用户 ⇒ numResults=1，直接给出 mid=271476035（还带粉丝数/视频数/签名）
+#   ⇒ 找账号**必须**走用户搜索，这是两条不同的接口。
+
+@mcp.tool()
+async def bili_search_user(keyword: str, page: int = 1, page_size: int = 10) -> str:
+    """
+    按昵称搜索B站用户（UP主），返回 uid / 昵称 / 粉丝数 / 投稿数 / 签名。
+
+    ⚠️ 找某个 UP 主**用这个**，不要用 bili_search 搜视频 ——
+       搜视频回来的多半是"别人提到他"，不一定有他的视频。
+
+    Args:
+        keyword: 用户昵称（可以是全名或一部分）
+        page: 页码，默认1
+        page_size: 每页数量，默认10
+
+    Returns:
+        JSON，含 users 列表（每个有 uid/name/fans/videos/sign/level）
+        和 numResults（一共搜到几个）
+    """
+    cred = get_cred()
+    try:
+        result = await search.search_by_type(
+            keyword=keyword,
+            search_type=search.SearchObjectType.USER,
+            page=page,
+            page_size=page_size,
+        )
+    except Exception as e:
+        return json.dumps({"error": f"搜用户失败：{e}"}, ensure_ascii=False)
+
+    users = []
+    for item in (result.get("result") or []):
+        users.append({
+            "uid": item.get("mid", 0),
+            "name": item.get("uname", ""),
+            # ⭐ 粉丝数/投稿数是**区分同名账号的唯一可靠依据** —— 必须给
+            "fans": item.get("fans", 0),
+            "videos": item.get("videos", 0),
+            "sign": item.get("usign", ""),
+            "level": item.get("level", 0),
+            # 官方认证信息（黄 V / 蓝 V）—— 另一个区分依据
+            "official": (item.get("official_verify") or {}).get("desc", ""),
+        })
+
+    return json.dumps({
+        "keyword": keyword,
+        "numResults": result.get("numResults", len(users)),
+        "users": users,
+        # ⚠️ 搜不到**不是错误**，是"没有这个人" —— 别让调用方误判成网络问题
+        "hint": ("没搜到这个昵称的用户。换个写法再试（去掉空格/简称/加@），"
+                 "或者确认名字没打错 —— 不要改成去搜视频找 uid。")
+        if not users else "",
+    }, ensure_ascii=False)
+
+
 # ========== Tool 18: 用户视频列表 ==========
 
 @mcp.tool()
