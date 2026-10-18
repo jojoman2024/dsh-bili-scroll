@@ -119,7 +119,16 @@ export const Config = !z ? undefined : z.object({
   searchNum: z.natural().default(20).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
   pythonPath: z.string().default('python').extra('volatile', true),
-  /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
+  /**
+   * dsh 的 `lib/bin.js` —— ⚠️ **正常情况不用填，留空就好**（2026-10-18 改）。
+   *
+   * 原来这里写着"不填就试自动探测，再退化成 shell 里的 dsh" ——
+   * 后半句**已经不成立了**（shell 那条路会让提示词按空格被切断，见 `resolveDsh` 的注释）。
+   *
+   * 现在它只是**自动探测全部失败时的手动兜底**；探测顺序见 `resolveDsh()`，
+   * 而在探测成功时，`/status` 会把"用的是哪个、怎么找到的"回给面板显示
+   * （⇒ 使用者不用为了知道这件事去翻 config.json）。
+   */
   dshBin: z.string().default('').extra('volatile', true),
   /** headless 那一轮用哪个 profile */
   headlessProfile: z.string().default('headless').extra('volatile', true),
@@ -1475,54 +1484,86 @@ export function apply(ctx, config) {
    *
    *   ⇒ 所以这条函数**再也不会返回 `shell:true`** —— 它成了不可能状态，不是"判断出来的"。
    *
-   * ── 找 bin.js 的顺序（按可靠度）──────────────────────────────
+   * ── 找入口的顺序（按可靠度）──────────────────────────────────
    *   ① **`process.argv[1]`** —— 插件**就运行在 dsh 进程里面**，
-   *      这个参数天然就是那个 `bin.js` 的路径。⭐ 最准，而且不用用户配。
-   *   ② 用户在面板/配置里填的 `dshBin`。
+   *      这个参数天然就是那个 `lib/bin.js` 的路径。⭐ 最准，而且不用用户配。
+   *   ①b 🔴 **桌面版（Electron）**：那时 `argv[1]` 是 **Electron 主进程的入口**
+   *      （实测甚至是 `undefined`），① 直接 miss —— 而桌面版里 dsh 藏在
+   *      `<resources>\app.asar\dsh\node_modules\...`，两种形态都实测过：
+   *        · `@deepseek-ai/dsh/lib/bin.js`（完整 dsh —— `--version` 实测输出 0.2.0-rc.2）
+   *        · `@deepseek-ai/dsh-desktop-host/lib/cli.js`（桌面版自己的 CLI 入口，同样能用）
+   *      ⚠️ **`resourcesPath` 只在 Electron 里有值** ⇒ 普通 node 下那条路径是 `''`，
+   *         `okBin('')` 也是 false ⇒ **CLI 路径完全不变**。
+   *   ② 用户在面板/配置里填的 `dshBin`（**现在只是兜底**，正常不用填）。
    *   ③ 几个常见的全局安装位置（兜底）。
    *
    * ⚠️ 都找不到 ⇒ 返回 `{ error }`，**由调用方明确报错** ——
    *    绝不静默降级到 shell（那正是这个 bug 的来源）。
-   * @returns {{ command: string, args: string[], shell: false } | { error: string }}
+   * @returns {{ command: string, args: string[], shell: false, via: string, bin: string,
+   *             electron: boolean } | { error: string }}
    */
   const resolveDsh = () => {
-    /** 只认「真的是 dsh 的 bin.js」：存在 + 是个文件 + 名字对得上 */
+    /** 只认「真的是 dsh 的入口」：存在 + 是个文件 + 名字对得上 */
     const okBin = (p) => {
       const s = String(p || '').trim()
       if (!s || !isAbsolute(s)) return false
       try { if (!statSync(s).isFile()) return false } catch { return false }
-      return /(^|[\\/])bin\.js$/.test(s) && /dsh/i.test(s)
+      // `bin.js` = CLI 版；`cli.js` = 桌面版的 CLI 入口（两者都实测可直接当 node 脚本跑）
+      return /(^|[\\/])(bin|cli)\.js$/.test(s) && /dsh/i.test(s)
     }
 
+    /**
+     * 桌面版里 dsh 的两个入口（顺着 `process.resourcesPath` 找）。
+     * ⚠️ Electron 的 asar **对 `statSync` 是透明的**（实测 `isFile()` 为 true），
+     *    所以这里不用为 asar 做特殊处理 —— 当普通路径用就行。
+     */
+    const asarEntries = (() => {
+      const rp = String(process.resourcesPath || '').trim()
+      if (!rp) return []
+      const nm = join(rp, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai')
+      return [
+        // ① 完整 dsh（有 `lib/bin.js`，与 CLI 版**同一个入口**）—— 首选
+        join(nm, 'dsh', 'lib', 'bin.js'),
+        // ② 桌面版自己的 CLI（它的 `runtime\cli\bin\dsh.cmd` 用的就是它）—— 备选
+        join(nm, 'dsh-desktop-host', 'lib', 'cli.js'),
+      ]
+    })()
+
     const candidates = [
-      // ① 我们自己就住在 dsh 里 ⇒ 这个最准
-      process.argv[1],
-      // ② 用户填的
-      String(cfg.dshBin || '').trim(),
+      // ① 我们自己就住在 dsh 里 ⇒ 这个最准（CLI 版走这条）
+      { p: process.argv[1], via: 'argv' },
+      // ①b 桌面版：dsh 在 app.asar 里（普通 node 下 resourcesPath 为空 ⇒ 自动跳过）
+      ...asarEntries.map((p) => ({ p, via: 'asar' })),
+      // ② 用户填的（正常为空）
+      { p: String(cfg.dshBin || '').trim(), via: 'cfg' },
       // ③ 常见全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib）
-      join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
-      '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
-      '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+      { p: join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), via: 'guess' },
+      { p: '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js', via: 'guess' },
+      { p: '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js', via: 'guess' },
     ]
 
     for (const c of candidates) {
-      if (!okBin(c)) continue
+      if (!okBin(c.p)) continue
       // ⭐ `shell: false` 是**写死的**：这条路永远不经过 cmd。
       return {
         command: process.execPath,
-        // ⚠️ `--expose-internals` 见下面 `electronAsNode` 的注释（桌面版要用）
-        args: [c],
+        // ⚠️ `--expose-internals` 见 `electronAsNode` 的注释（桌面版要用）
+        args: [c.p],
         shell: false,
-        // ⭐ **是不是跑在 Electron 里**（桌面版）。判据见下面那个函数。
+        // ⭐ **是不是跑在 Electron 里**（桌面版）。判据见 `electronAsNode`。
         electron: electronAsNode(),
-        via: c === process.argv[1] ? 'argv' : 'cfg/guess',
+        /** 这一条是怎么找到的 —— `/status` 原样回给面板显示，别让使用者去猜 */
+        via: c.via,
+        /** 找到的那个入口文件（同上，面板显示用） */
+        bin: c.p,
       }
     }
 
     // ⚠️ **明确失败**，不要降级（降级 = 提示词被切碎 + 不报错）
     return {
-      error: '找不到 dsh 的启动器（lib/bin.js）⇒ 后台模式跑不了。'
-        + '去面板「环境与账号」把「dsh 启动器路径」填成 <dsh 安装目录>/lib/bin.js 再试。'
+      error: '找不到 dsh 的入口（lib/bin.js）。'
+        + '正常情况下这一步是自动的 —— 自动探测全部失败时才需要你手动指一下：'
+        + '面板「环境与账号」→「后台跑要用哪个 dsh」。'
         + '（**不会**退回命令行模式 —— 那条路在 Windows 上会把提示词按空格切断）',
     }
   }
@@ -2492,6 +2533,25 @@ export function apply(ctx, config) {
       // ⚠️ 日志路径不在这里重复给 —— `/status` **本来就有 `log` 字段**（见下面），
       //    面板直接用那个就行（再加一个同义字段只会多一个要同步的东西）。
       lastFrontSessionId: String(readJson(dutyStateFile, {}).lastFrontSessionId || ''),
+      /**
+       * ⭐⭐ **后台跑要用哪个 dsh —— 自动探测的结果**（2026-10-18 加）。
+       *
+       * 为什么要把这个回给面板：使用者原话「这个没有办法自动获取的吗？
+       * 如果有的话，这个东西是不应该让用户自己设置的啊」。
+       * 他是对的 —— 探测**本来就有**（`process.argv[1]`），但**结果显示不出来**，
+       * 面板上只有个空输入框 ⇒ 看着像"必须先填才能用"。
+       *
+       * ⇒ 现在面板显示「自动找到：…（来源:…）」，输入框只在**探测失败**时才需要动。
+       *
+       * ⚠️ 这里**每次都现算**：它只是个几次 `statSync` 的活，而缓存反而会让
+       *    "换了个 dsh 之后面板还显示旧的"（那种错很难看出来）。
+       */
+      dsh: (() => {
+        const r = resolveDsh()
+        return r.error
+          ? { ok: false, error: r.error }
+          : { ok: true, via: r.via, bin: r.bin, electron: Boolean(r.electron), command: r.command }
+      })(),
     }
   }
 

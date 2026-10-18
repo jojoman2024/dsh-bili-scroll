@@ -588,6 +588,90 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       return h('div', { 'data-bd-row': '' }, text, children)
     }
 
+    /**
+     * ⭐ **「后台跑要用哪个 dsh」那一块** —— 抽成纯函数（2026-10-18）。
+     *
+     * 为什么抽出来（两个理由，都实在）：
+     *  ① 使用者原话：「这个没有办法自动获取的吗？如果有的话，这个东西是不应该让用户自己设置的啊」
+     *     ⇒ 这块的**核心任务是"报告自动探测的结果"**，输入框只是探测失败时的兜底。
+     *  ② 原来它是内联在 Panel 里的一坨 IIFE ⇒ **测不了**（组件内部自己 fetch，SSR 拿不到 st）。
+     *     抽成纯函数之后，`tmp-probe-ui.mjs` 能把 5 个分支逐个渲染出来验。
+     *
+     * @param st   `/status` 的响应（`st.dsh` 是后端算的探测结果；旧版宿主没有这个字段）
+     * @param cfg  配置（只看 `dshBin`）
+     * @param ui   `{ draft, setDraft, patch }` —— 输入框的草稿与落盘
+     */
+    function renderDshBlock(st, cfg, ui) {
+      const d = st && st.dsh
+      const saved = String((cfg && cfg.dshBin) || '').trim()
+      const draft = ui && ui.draft
+      /**
+       * 三种情形分开显示：
+       *   ① 探测成功 ⇒ 只说"自动找到 X"，**不出现输入框**（绝大多数人都停在这里）；
+       *   ② 探测失败 ⇒ 明说失败 + 给输入框让它手动指；
+       *   ③ `st.dsh` 读不到（旧版宿主还没重启）⇒ **不说成"失败"** —— 那会让人去改
+       *      一个根本不需要改的设置。🔴 ③ 与 ② 必须分开。
+       */
+      const head = (() => {
+        if (!d) {
+          return h('div', { 'data-bd-note': '' },
+            '（这一版面板拿不到自动探测的结果 —— 宿主那边要重启一次才会给。）')
+        }
+        if (d.ok) {
+          // 让使用者知道"它是怎么自己找到的"，而不是只看到一个路径
+          const VIA = {
+            argv: '它自己就住在这个 dsh 里，所以不用配',
+            asar: '桌面版内置的那份 dsh（自动找到的）',
+            cfg: '按你填的路径',
+            guess: '在常见的全局安装位置上找到的',
+          }
+          return h('div', null,
+            h('div', { 'data-bd-msg': '', 'data-good': '' }, '✓ 已自动找到，不用你设置'),
+            h('div', { 'data-bd-note': '' },
+              (VIA[d.via] || '自动探测') + (d.electron ? '（桌面版：会带上 ELECTRON_RUN_AS_NODE）' : '')),
+            h('div', { 'data-bd-kv': '' }, d.bin || ''),
+            // 只有"这个值不是自动来的"才多解释一句 —— 免得它以为是自己配的
+            d.via === 'cfg'
+              ? h('div', { 'data-bd-note': '' }, '这一条是按你填的路径用的。清空下面的输入框就会回到自动探测。')
+              : null)
+        }
+        return h('div', null,
+          h('div', { 'data-bd-msg': '', 'data-warn': '' }, '✗ 自动探测没成功 —— 需要你指一下'),
+          h('div', { 'data-bd-note': '' }, String(d.error || '')))
+      })()
+
+      /**
+       * 输入框**只在需要手填时才出现**：
+       *   · 探测失败 ⇒ 一定要给（否则没别的办法）；
+       *   · 已经填过 ⇒ 也要给（否则想改 / 想清空都做不到）。
+       * 其余情况（探测成功 + 没填过）⇒ **一个字都不显示**。
+       */
+      const needInput = (d && !d.ok) || saved.length > 0
+      const input = needInput
+        ? h(Field, {
+          label: '手动指定（一般用不到）',
+          note: '填 <dsh 安装目录>\\lib\\bin.js 的完整路径。清空 = 回到自动探测。改完即时生效，不用重启。',
+          stack: true,
+          children: h('input', {
+            'data-bd-input': '', type: 'text',
+            placeholder: '例如 C:\\...\\npm-global\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+            value: draft ?? saved,
+            onChange: (e) => ui.setDraft(e.target.value),
+            onBlur: () => {
+              const v = String(draft ?? saved).trim()
+              ui.setDraft(v)
+              ui.patch({ dshBin: v }, 'dsh 启动器路径')
+            },
+          }),
+        })
+        : null
+
+      return h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
+        h('div', { 'data-bd-h': '' }, '后台跑要用哪个 dsh'),
+        head,
+        input)
+    }
+
     function useStatus(intervalMs) {
       const [st, setSt] = React.useState(null)
       React.useEffect(() => {
@@ -1633,33 +1717,15 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               + '如果你不打算亲自在这个会话里让它做越界的事，建议关掉。')
             : null),
 
-        /* ════════ dsh 启动器路径（→「环境与账号」页）════════
-           ⭐ 2026-10-17 加：这一项**以前面板里根本没有**，只能手工改 config.json。
-           它只影响**后台**模式（前台是在主应用里建会话，不 spawn 子进程）。
-           ⚠️ 留空通常也没事 —— 插件会先用 `process.argv[1]`（它自己就住在 dsh 里），
-              实在找不到才会报错让你来填。 */
-        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
-          h('div', { 'data-bd-h': '' }, '后台跑要用哪个 dsh'),
-          h('div', { 'data-bd-note': '' },
-            '只有「跑在哪 = 后台」才用得到它。留空也行 —— 插件会先用它自己所在的那个 dsh；'
-            + '实在找不到时，那一轮会明确报错让你来这儿填（不会偷偷走命令行，'
-            + '那条路在 Windows 上会把提示词按空格切断）。'),
-          h(Field, {
-            label: 'dsh 启动器路径',
-            note: '填 <dsh 安装目录>\\lib\\bin.js 的完整路径。改完即时生效（不用重启）。',
-            stack: true,
-            children: h('input', {
-              'data-bd-input': '', type: 'text',
-              placeholder: '例如 C:\\...\\npm-global\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
-              value: dshBinDraft ?? (cfg.dshBin || ''),
-              onChange: (e) => setDshBinDraft(e.target.value),
-              onBlur: () => {
-                const v = String(dshBinDraft ?? (cfg.dshBin || '')).trim()
-                setDshBinDraft(v)
-                patch({ dshBin: v }, 'dsh 启动器路径')
-              },
-            }),
-          })),
+        /* ════════ dsh 启动器（→「环境与账号」页）════════
+           ⭐ 2026-10-17 加这一项（以前面板里根本没有，只能手工改 config.json）。
+           🔴 2026-10-18 改：**默认不让人填**。
+           使用者原话：「这个没有办法自动获取的吗？如果有的话，这个东西是不应该让用户自己设置的啊」。
+           ⇒ 他是对的：自动探测**本来就有**（插件自己就住在 dsh 里 ⇒ `process.argv[1]`；
+             桌面版走 `resourcesPath` 里的 app.asar），所以这一块现在**先报自动找到的是什么**，
+             输入框只在探测失败（或已经手填过）时才出现。详见 `renderDshBlock`。
+           ⚠️ 只影响**后台**模式（前台是在主应用里建会话，不 spawn 子进程）。 */
+        renderDshBlock(st, cfg, { draft: dshBinDraft, setDraft: setDshBinDraft, patch }),
 
         /* ════════ 九、它的地盘（产物与路径 → 子导航「功能设置」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
@@ -1727,6 +1793,12 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
     }
 
     return {
+      /**
+       * ⭐ **给探针用**（不是 DSH 认的字段，纯导出）——
+       *    「dsh 那一块」是个纯函数才能被离线渲染验证。
+       *    ⚠️ DSH 只读 `inject` / `apply`，多一个字段不影响加载。
+       */
+      renderDshBlock,
       /**
        * ⚠️ 这里是**客户端服务短名**，不是包名。
        *    包名那份在 package.json 的 `dsh.client.inject`（两处含义不同）。
