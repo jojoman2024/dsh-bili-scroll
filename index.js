@@ -104,6 +104,38 @@ export const Config = !z ? undefined : z.object({
    * 前 12 条里 8 条是入门课和水论文技巧）。让模型按主题拆成多个具体词组合，召回质量高得多。
    */
   keywordMode: z.string().default('llm').extra('volatile', true),
+  /**
+   * ⭐⭐ **自由文本「关注什么」**（2026-10-18 加，实验功能开关控制）。
+   *
+   * 使用者原话：「我希望能够有更大的自由度，用户就纯自然语言写一段话，
+   *   也不需要考虑换行分隔，让模型自己去理解用户需要关注哪些东西，
+   *   关注一件事还是多件事。另外，比如用户指定去关注某些账号的内容而不是主题的时候，
+   *   模型也应该能够理解和区分。」
+   *
+   * ── 它与 `keywords` 的关系（**不是替代搜索，是换一种输入**）──────
+   *   ⚠️ 这里最容易理解错：自由文本**不改变"怎么搜"** —— 仍然要靠模型自己组合出关键词
+   *      去调 `bili_search`（那就是 `keywordMode=llm` 一直在做的事）。
+   *   变的只是**输入的表达力**：
+   *     · `keywords`（一行一个）= 好几个**独立意图**，模型逐行拆；
+   *     · `watchNote`（一段话） = **一个整体意图**，模型通读后自己切成几件事。
+   *
+   * ⭐ **为什么一段话确实更强**（这是加这个功能真正的理由）：
+   *   「一行一个」这种结构**表达不了这些事**：
+   *     · "顺便关注一下 XX 这个 UP 主"（**账号**，不是主题）
+   *     · "大模型的论文，但不要入门教程那种"（带**排除条件**）
+   *     · "最近在搞 RAG，相关的都看看"（带**背景**，模型能据此扩展）
+   *   ⇒ 一段话能把这些都写进去，而一行一个只能写"搜索主题"。
+   */
+  freeformWatch: z.boolean().default(false).extra('volatile', true),
+  /**
+   * ⭐ 自由文本正文（`freeformWatch` 开着时才生效）。
+   *
+   * ⚠️ 与 `keywords` 的取舍（使用者确认过）：**开着时旧的 `keywords` 不丢弃**，
+   *   而是作为「使用者以前已经点名关注的东西」**合并进提示词当参考** ——
+   *   因为他可能已经填了一堆、不想重打一遍。
+   *   但**不并列**：自由文本是主体，旧关键词只是附注（见 `kwLine` 的实现）。
+   */
+  watchNote: z.string().default('').extra('volatile', true),
   /** ⭐ 搜索排序：totalrank=综合（默认）/ pubdate=最新 / click=播放 / dm=弹幕 */
   searchOrder: z.string().default('totalrank').extra('volatile', true),
   /**
@@ -286,6 +318,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
+    freeformWatch: false, watchNote: '',
     commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     adminMode: false,
     personaEnabled: true, personaMaxChars: 8000,
@@ -708,6 +741,65 @@ export function apply(ctx, config) {
             + (size >= target
               ? `候选池已够（${size} ≥ ${target}）⇒ 可以开始读字幕筛选了。`
               : `候选池还不够（${size} < ${target}）⇒ 换个关键词继续搜（放宽词 / 换角度）。`),
+        }
+      } catch { return r }
+    },
+  })
+
+  tool({
+    name: 'bili_user_videos',
+    description: '取**某个 UP 主自己的投稿**（按 uid）。\n'
+      + '⭐ 使用者要求「关注某个账号」时**用这个**，不要拿账号名去 `bili_search` —— '
+      + '那是搜"别人提到他"，不是他的作品。\n'
+      + '⚠️ 需要 uid（数字）。不知道 uid 就先想办法拿到；**不要瞎猜一个 uid**。',
+    parameters: {
+      uid: { type: 'number', description: 'UP 主的 UID（数字）。必需' },
+      num: { type: 'number', description: '返回几条（默认取设置里的「每次搜取回几条」，最大 50）' },
+      order: { type: 'string', description: 'pubdate=最新（默认）/ click=播放 / stow=收藏' },
+      keyword: { type: 'string', description: '在该 UP 主的视频里再按关键词过滤（可省）' },
+    },
+    async execute(args) {
+      const uid = Number(args.uid)
+      // ⚠️ 校验 uid：拿不到数字就别发请求（否则会搜出一个莫名其妙的号）
+      if (!Number.isFinite(uid) || uid <= 0) {
+        return {
+          ok: false,
+          error: 'uid 不是有效数字。先用 bili_search 搜他的名字、从结果里取那条视频的 UP 主 uid；拿不到就如实说"没解析出这个账号"，别猜。',
+        }
+      }
+      const num = Math.max(1, Math.min(Number(args.num) || Number(cfg.searchNum) || 20, 50))
+      const order = String(args.order || 'pubdate')
+      const payload = { uid, num, order }
+      if (String(args.keyword || '').trim()) payload.keyword = String(args.keyword).trim()
+      const r = await call('bili_user_videos', payload)
+      /**
+       * ⭐ **和 `bili_search` 一样接进候选池 + 判重**（2026-10-18）。
+       *
+       * 为什么必须一致：这是"另一条捞视频的路" —— 如果它不并入候选池，
+       * 那一轮的「池子够不够」判断会**低估**（按 UP 主捞回来的那些不算数）；
+       * 不查判重表则会把看过的又捞回来白读字幕。
+       * ⇒ 两条路**共用同一套记账**，模型不需要知道区别。
+       */
+      try {
+        let obj = r
+        if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON 就算了 */ } }
+        const all = Array.isArray(obj?.videos) ? obj.videos : []
+        const seen = readSeen()
+        const fresh = all.filter((v) => v?.bvid && !seen.has(v.bvid))
+        const skipped = all.length - fresh.length
+        const size = poolAdd(fresh)
+        const target = poolTarget()
+        return {
+          ...(obj && typeof obj === 'object' ? obj : { raw: r }),
+          videos: fresh,
+          skippedSeen: skipped,
+          poolCount: size,
+          poolTarget: target,
+          poolEnough: size >= target,
+          poolHint: (skipped > 0 ? `（本轮已跳过 ${skipped} 条看过的）` : '')
+            + (size >= target
+              ? `候选池已够（${size} ≥ ${target}）⇒ 可以开始读字幕筛选了。`
+              : `候选池还不够（${size} < ${target}）⇒ 换个主题搜、或换个 UP 主（放宽一点）。`),
         }
       } catch { return r }
     },
@@ -1602,6 +1694,56 @@ export function apply(ctx, config) {
      * 想恢复原样（把每行当一个现成搜索词）就把设置里的「关键词怎么用」改成 fixed。
      */
     const kwLine = (() => {
+      /**
+       * ⭐⭐ **自由文本模式**（2026-10-18 加，实验功能开关控制）。
+       *
+       * 使用者要的是：**一段话，不用考虑分行，模型自己理解他要关注什么**
+       * ——包括"关注一件事还是多件事"、以及**账号 vs 主题**的区别。
+       *
+       * 🔴 **但它不替代搜索**：真正去搜时仍然要 `bili_search(keyword=...)`，
+       *    也就是**仍然要模型自己组合关键词**（这正是 `keywordMode=llm` 那条路）。
+       *    自由文本改的只是**输入的表达力**：一段话能写进
+       *    "顺便关注 XX 这个 UP 主""不要入门教程那种""最近在搞 RAG"，
+       *    而"一行一个"只能写搜索主题。
+       *    ⇒ 所以这里**要多给两样东西**：怎么切分意图 + 账号走另一个工具。
+       */
+      if (cfg.freeformWatch) {
+        const note = String(cfg.watchNote || '').trim()
+        // ⚠️ 自由文本为空时**不要**编一个空壳：退回 keywords 那条老路，
+        //    否则使用者刚打开开关还没写字，那一轮会拿到一段空指令、白跑。
+        if (!note) {
+          return kws.length
+            ? `使用者开了「自由描述关注点」但还没写内容 ⇒ 先按他以前填的这些关注：${kws.join('、')}`
+            : '关注主题没填 —— 就用章程里的默认那几组主题，照样自己拆成多个具体搜索词去搜'
+        }
+        /**
+         * ⚠️ **旧的 `keywords` 不丢弃**（使用者确认过）：它是"以前已经点名关注的东西"，
+         *    合并进上下文当参考 —— 但**不并列**：自由文本是主体，旧词是附注。
+         *    这样他不用把已经填过的东西重打一遍。
+         */
+        const oldNote = kws.length
+          ? `\n（另外，他以前是逐条填的关注项，一并当作参考、别漏掉：${kws.join('、')}）`
+          : ''
+        return `⭐ 使用者用**一段自然语言**描述了他要关注什么（**不是**搜索词表，也没有分行含义）：\n`
+          + `"""\n${note}\n"""\n`
+          + `⇒ 你要**先读懂这段话**，再自己决定怎么搜。具体要求：\n`
+          + `  · 🔴 **先判断这是几件事**：可能只有一件，也可能好几件并列（"顺便""另外""还有"这种）。`
+          + `把每一件都算进来，别只抓第一件。\n`
+          + `  · 🔴 **分清"主题"和"账号"** —— 这两类**走不同的路**，别混：\n`
+          + `      - **主题**（例如"大模型论文""RAG 实践"）⇒ 自己组合出更具体的搜索词，\n`
+          + `        分批调 \`bili_search\`（一轮里换 2~4 组不同组合，别只用一组就下结论）；\n`
+          + `        字要落在「领域 + 具体内容」上，避开「入门 / 教程 / 毕设 / 水论文」这类流量词。\n`
+          + `      - **账号 / UP 主**（例如"关注一下某某 UP 主"）⇒ 用 \`bili_user_videos\` 取他**自己的投稿**，\n`
+          + `        ⚠️ **不要**拿他的名字去 \`bili_search\` 搜（那搜回来的是"别人提到他"，不是他的作品）。\n`
+          + `        账号名要先换成 uid：拿不到 uid 就先用 \`bili_search\` 搜他的名字找到那条视频的 UP 主，\n`
+          + `        或者如实说"这个账号我没解析出 uid"，**别瞎猜一个 uid**。\n`
+          + `      - 两类都要时，**两类都要做**（先做哪类都行）。\n`
+          + `  · ⭐ **注意他写进去的条件**：像"不要入门教程""只看最近半年的""要长视频"这类，`
+          + `都是**筛选条件**，判候选时要照着用，不是背景装饰。\n`
+          + `  · ⚠️ **每次搜索都要用你自己现编的关键词**（keyword 参数），`
+          + `**不要**把那段话原样丢进 keyword —— 那是给你读的，不是搜索词。`
+          + oldNote
+      }
       if (kws.length === 0) {
         return cfg.keywordMode === 'fixed'
           ? '关键词用章程里的默认那几组'
@@ -2709,6 +2851,7 @@ export function apply(ctx, config) {
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
+        'freeformWatch', 'watchNote',
         'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {

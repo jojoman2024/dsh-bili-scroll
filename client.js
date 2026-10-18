@@ -678,6 +678,80 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         input)
     }
 
+    /**
+     * ⭐ **「关注什么」这一项** —— 抽成纯函数（2026-10-18），理由与 `renderDshBlock` 同：
+     *  组件内部拿不到 st（要 effect + fetch），离线渲染测不了分支；
+     *  抽出来之后 `tmp-probe-ui2.mjs` 能把两种模式各渲染一次、逐条比对文案。
+     *
+     * 两种模式的**语义差别**（不只是控件不同）：
+     *   · 一行一个（默认）= 好几件**独立**的事，模型逐行拆搜索词；
+     *   · 自由描述         = **一段话**，模型先读懂"几件事 / 是什么事"，
+     *                        能表达**账号**、**排除条件**、**背景** —— 一行一个写不了。
+     *
+     * ⚠️ 它只返回**这一项**（Field + 可选的说明），**不含分节外壳** ——
+     *    分节里还有「按什么排序」等几项，那些与模式无关、留在外面。
+     *
+     * @param cfgState `{ freeformWatch, watchNote }`（来自 `/status` 的 config）
+     * @param ui       `{ kws, setKws, kwMode, setKwMode, patch, watchDraft, setWatchDraft, onSaveWatch }`
+     */
+    function renderWatchBlock(cfgState, ui) {
+      const free = Boolean(cfgState && cfgState.freeformWatch)
+      const kwMode = ui.kwMode
+      return h(React.Fragment, null,
+        free
+          // ── 自由描述模式 ──
+          ? h(Field, {
+            label: '关注什么（随便写，一段话就行）',
+            note: '不用分行、不用列点。模型会自己读懂你要关注几件事、每件是什么。'
+              + '也能写「顺便看看某某 UP 主」「不要入门教程那种」「最近在搞 RAG」这类 —— '
+              + '账号和主题它会分开处理。',
+            stack: true,
+            children: h('textarea', {
+              'data-bd-input': '', rows: 6,
+              placeholder: '例：\n最近在看大模型相关的论文解读和工程实践，特别是 RAG 和多智能体。\n'
+                + '顺便关注一下「某某」这个 UP 主的更新。\n入门教程那种就别给我了。',
+              value: ui.watchDraft ?? '',
+              onChange: (e) => ui.setWatchDraft(e.target.value),
+              onBlur: ui.onSaveWatch,
+            }),
+          })
+          // ── 一行一个（原来的写法）──
+          : h(Field, {
+            label: '关注什么（一行一个）',
+            stack: true,
+            children: h('textarea', {
+              'data-bd-input': '', rows: 5,
+              placeholder: '一行一个主题；留空用内置那几组\n例：\n有关大模型的论文\nDSH 插件',
+              value: ui.kws ?? '', onChange: (e) => ui.setKws(e.target.value),
+            }),
+          }),
+
+        /*
+         * ⚠️ **「这些字怎么用」那个下拉只在「一行一个」模式下出现**。
+         * 为什么：自由描述**本来就隐含"让模型自己组合搜索词"**（那正是它的用法），
+         * 再暴露成「当主题 / 当现成搜索词」会让人困惑 ——
+         * 而且「当现成搜索词」对一段话**根本没有意义**（没有"每行"这回事）。
+         */
+        free
+          ? h('div', { 'data-bd-note': '' },
+            '它会拿这段话自己去组合搜索词、分批搜（跟原来的「当主题」一个路子）—— '
+            + '你写的是想关注什么，不是搜索词。')
+          : h(Field, {
+            label: '这些字怎么用',
+            note: kwMode === 'fixed'
+              ? '每行会原样当搜索词。宽泛的词（如「有关大模型的论文」）搜回来多半是入门教程和水论文技巧。'
+              : '模型会按这些主题自己编几个更具体的搜索词、一轮里换 3~5 组去搜，攒够候选才开始筛。',
+            stack: true,
+            children: h('select', {
+              'data-bd-input': '', value: kwMode ?? 'llm',
+              onChange: (e) => { ui.setKwMode(e.target.value); ui.patch({ keywordMode: e.target.value }, '关键词用法') },
+            },
+              h('option', { value: 'llm' }, '当「主题」—— 让模型自己组合出多种搜索词（推荐）'),
+              h('option', { value: 'fixed' }, '当「现成搜索词」—— 每行原样拿去搜')),
+          }),
+      )
+    }
+
     function useStatus(intervalMs) {
       const [st, setSt] = React.useState(null)
       React.useEffect(() => {
@@ -780,10 +854,17 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       const [mProvider, setMProvider] = React.useState(null)
       const [mModel, setMModel] = React.useState(null)
       const [mEffort, setMEffort] = React.useState(null)
+      /**
+       * ⭐ **自由描述「关注什么」的草稿**（2026-10-18 加）。
+       * 与 `kws` 一样是**草稿**（独立于 5 秒轮询，否则打字会被冲掉）——
+       * 落盘时机见 `onSaveWatch`。
+       */
+      const [watchDraft, setWatchDraft] = React.useState(null)
 
       const cfg = st?.config
       React.useEffect(() => {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
+        if (cfg && watchDraft === null) setWatchDraft(String(cfg.watchNote || ''))
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -1092,6 +1173,15 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
         await patch({ keywords: list }, '关键词')
+      }
+
+      /**
+       * ⭐ 保存「自由描述」（2026-10-18）。
+       * ⚠️ **原样存**（不 split、不 trim 成数组）—— 使用者要的就是"一段话，不用管分行"。
+       *    只把首尾空白去掉，中间怎么断句、怎么换行都**原样保留**给模型读。
+       */
+      const onSaveWatch = async () => {
+        await patch({ watchNote: String(watchDraft ?? '') }, '关注什么（自由描述）')
       }
 
       // ⭐ 保存人设：POST /persona ⇒ 落盘 persona.md。下一轮 promptFor() 现读 ⇒ 即时生效
@@ -1429,27 +1519,11 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
           h('div', { 'data-bd-h': '' }, '怎么找'),
           h('div', { 'data-bd-note': '' }, '决定它从 B站 捞回什么。改完下一轮生效。'),
 
-          h(Field, {
-            label: '关注什么（一行一个）',
-            stack: true,
-            children: h('textarea', {
-              'data-bd-input': '', rows: 5,
-              placeholder: '一行一个主题；留空用内置那几组\n例：\n有关大模型的论文\nDSH 插件',
-              value: kws ?? '', onChange: (e) => setKws(e.target.value),
-            }),
-          }),
-          h(Field, {
-            label: '这些字怎么用',
-            note: kwMode === 'fixed'
-              ? '每行会原样当搜索词。宽泛的词（如「有关大模型的论文」）搜回来多半是入门教程和水论文技巧。'
-              : '模型会按这些主题自己编几个更具体的搜索词、一轮里换 3~5 组去搜，攒够候选才开始筛。',
-            stack: true,
-            children: h('select', {
-              'data-bd-input': '', value: kwMode ?? 'llm',
-              onChange: (e) => { setKwMode(e.target.value); patch({ keywordMode: e.target.value }, '关键词用法') },
-            },
-              h('option', { value: 'llm' }, '当「主题」—— 让模型自己组合出多种搜索词（推荐）'),
-              h('option', { value: 'fixed' }, '当「现成搜索词」—— 每行原样拿去搜')),
+          /* ⭐ 两种「关注什么」的写法（2026-10-18 加，由实验功能的开关切换）。
+             **语义也不一样**，详见 renderWatchBlock 的注释。 */
+          renderWatchBlock(cfg, {
+            kws, setKws, kwMode, setKwMode, patch,
+            watchDraft, setWatchDraft, onSaveWatch,
           }),
 
           h(Field, {
@@ -1724,7 +1798,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
             h('pre', { 'data-bd-pre': '' }, st.installTail)) : null),
 
         /* ════════ 实验功能（→ 子导航「实验功能」页，2026-10-17 加）════════
-           ⭐ 这一页放"打开就会改变安全边界"的开关。现在只有「管理员权限」一个。 */
+           ⭐ 这一页放"打开就会改变行为边界"的开关。 */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab' },
           h('div', { 'data-bd-h': '' }, '实验功能'),
           h('div', { 'data-bd-note': '' },
@@ -1741,6 +1815,37 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
             on: sw('adminMode'),
             onChange: (v) => patch({ adminMode: v }, '管理员权限'),
           }),
+
+          /*
+           * ⭐⭐ **自由描述「关注什么」**（2026-10-18 加）。
+           *
+           * 使用者要的是：「用户就纯自然语言写一段话，也不需要考虑换行分隔，
+           *   让模型自己去理解用户需要关注哪些东西，关注一件事还是多件事。
+           *   另外比如用户指定去关注某些账号的内容而不是主题的时候，模型也应该能够理解和区分。」
+           *
+           * ⚠️ 说明里要讲清**两种模式真正的差别**（不是"写法不同"，是"表达力不同"）：
+           *   一行一个只能写"搜索主题"；一段话能写账号、排除条件、背景。
+           */
+          h(ToggleRow, {
+            label: '自由描述关注点',
+            note: '默认关闭。关着时：「关注什么」是一行一个主题，适合"我要关注这几件事"。'
+              + '打开后：改成随便写一段话，不用分行 —— 模型会自己判断你要关注几件事、分别是什么。'
+              + '一段话还能写进一行一个表达不了的东西：'
+              + '「顺便看看某个 UP 主」（会按账号去取他的投稿，而不是搜他的名字）、'
+              + '「不要入门教程那种」（当作筛选条件）、「最近在搞 RAG」（当背景）。'
+              + '⚠️ 两种模式都仍然是让模型自己组合搜索词去搜，区别只在"你能把意思说多清楚"。',
+            on: sw('freeformWatch'),
+            onChange: (v) => patch({ freeformWatch: v }, '自由描述关注点'),
+          }),
+
+          // ⚠️ 打开时指一下"去哪写"——否则开关拨了但不知道下一步做什么
+          sw('freeformWatch')
+            ? h('div', { 'data-bd-note': '' },
+              '已打开 —— 去「功能设置 → 怎么找」里那段「关注什么（随便写）」写。'
+              + (Array.isArray(cfg.keywords) && cfg.keywords.length
+                ? '你以前填的那些关注项会自动一起交给模型当参考，不用重打一遍。'
+                : ''))
+            : null,
 
           // ⚠️ 打开时给一条**显眼但不吵**的风险提示（它确实放宽了安全边界）
           sw('adminMode')
@@ -1832,6 +1937,8 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
        *    ⚠️ DSH 只读 `inject` / `apply`，多一个字段不影响加载。
        */
       renderDshBlock,
+      /** ⭐ 给探针用（同上）：两种「关注什么」模式的分支要能被离线渲染验证。 */
+      renderWatchBlock,
       /**
        * ⚠️ 这里是**客户端服务短名**，不是包名。
        *    包名那份在 package.json 的 `dsh.client.inject`（两处含义不同）。
