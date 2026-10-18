@@ -521,13 +521,15 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
    ① **flex-direction:row** —— 该元素同时挂了 data-bd-grow，
       而通用规则是 display:flex + flex-direction:column（用于"标题上、控件下"）
       ⇒ 不覆盖就**竖排**（冒号和两个框上下叠）。
-   ② **flex:1 1 auto**（不是 none）—— 这一行是 flex 行，
-      时间容器要**吃掉左侧剩余空间**，开关才会被顶到最右与其它行对齐。
-      ⚠️ 我第一版写 flex:none ⇒ 内容整体靠左、开关紧贴时间框（使用者截图指出）。
+   ② **flex:none（只占内容宽度）** —— ⚠️ 这里**不要**让它 flex:1 吃剩余空间！
+      要让"吃掉剩余空间"的是 **X 与开关之间那个空 [data-bd-spacer]**，
+      这样 X 才会紧跟着时间框（使用者要求："X 要跟着时间设置，不靠右"），
+      而开关仍被推到最右。两件事各由一个元素负责，不会互相牵制。
+      ⚠️ 我先后写错过两次：flex:none ⇒ 开关贴时间框；flex:1 ⇒ X 贴开关。
    ③ 两个 input 固定 46px —— data-bd-num 的默认 92px 太宽，
       两个就 184px，窄侧栏里会把 X 挤出行外。 */
 [data-bd-time]{display:flex !important;flex-direction:row !important;align-items:center;
-  flex:1 1 auto !important;gap:6px;min-width:0;}
+  flex:0 0 auto !important;gap:6px;min-width:0;}
 [data-bd-time] input[type="number"]{width:46px !important;min-width:46px !important;
   max-width:46px !important;flex:none;text-align:center;padding-left:4px;padding-right:4px;
   -moz-appearance:textfield;appearance:textfield;}
@@ -1752,12 +1754,17 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 },
                 h('path', { d: 'M4 4 L12 12' }),
                 h('path', { d: 'M12 4 L4 12' }))),
+                /* ⭐ 中间这层空白：把开关推到最右，同时**让 X 紧跟着时间**。
+                   🔴 为什么需要它（使用者第二次指出）：
+                      上一版让 `[data-bd-time]` 自己有 `flex:1`，
+                      于是"吃掉剩余空间"的是时间容器本身 ⇒ X 被推到时间框右边很远、
+                      贴着开关，看起来像"X 属于开关"。
+                      正确做法：时间容器只占内容宽度（flex:none），
+                      再插一个**空的 grow 元素**承担"吃掉剩余空间"的职责
+                      ⇒ X 紧贴时间、开关仍贴右，两件事同时成立。 */
+                h('div', { 'data-bd-grow': '', 'data-bd-spacer': '' }),
                 /* ⭐ 这一行自己的开关 —— 放在**最末尾** ⇒ 贴右边缘，
-                   与上面「峰谷时段自动刷」那行的开关**右对齐**。
-                   ⚠️ 顺序是「时间输入 → X → 开关」：X 要跟着时间输入（使用者要求），
-                      开关要在最右（与其它行的开关同一列）。
-                   ⚠️ 对齐靠 CSS：`[data-bd-time]` 要 `flex:1` 吃掉左侧剩余空间，
-                      开关才会被顶到最右（第一版写 flex:none ⇒ 开关紧贴时间框）。 */
+                   与上面「峰谷时段自动刷」那行的开关**右对齐**。 */
                 h(Switch, {
                   on: row.on,
                   onChange: (v) => {
