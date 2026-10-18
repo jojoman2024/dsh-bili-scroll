@@ -769,7 +769,19 @@ export function apply(ctx, config) {
       }
       const num = Math.max(1, Math.min(Number(args.num) || Number(cfg.searchNum) || 20, 50))
       const order = String(args.order || 'pubdate')
-      const payload = { uid, num, order }
+      /**
+       * ⚠️ **参数名必须对齐 MCP 那个函数的签名**（实测核对过，别按感觉写）：
+       *   `def bili_user_videos(uid: int, pn: int = 1, ps: int = 30, order: str = "pubdate", keyword: str = "")`
+       *   ⇒ 每页条数叫 **`ps`**，不是 `num`。
+       *
+       * 🔴 我第一版传的是 `num` —— 那是 `bili_search` 的参数名，两个工具**不一样**。
+       *    传错的后果是 `ps` 用默认值 30、`num` 被当成未知参数
+       *    （FastMCP 会忽略或报错，取决于版本）⇒ 表现为"条数设置不生效"，
+       *    **不报错**、很难看出来。
+       *
+       * ⚠️ 另：`pn`（页码）不传，用默认 1（只要第一页）。
+       */
+      const payload = { uid, ps: num, order }
       if (String(args.keyword || '').trim()) payload.keyword = String(args.keyword).trim()
       const r = await call('bili_user_videos', payload)
       /**
