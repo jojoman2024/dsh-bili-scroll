@@ -513,13 +513,40 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 input[type="time"][data-bd-input]{min-width:0;font-family:inherit;}
 input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55;cursor:pointer;}
 
-/* 删除这类"只有符号"的按钮：**无外框、无底色**，只有一个大一点的 ×。
+/* ── 时间点行：小时/分钟两个数字框 + 中间的冒号（2026-10-19）
+   ⚠️ 不用原生 input[type=time] —— 那个的 12/24 制跟系统区域设置走，
+      DOM 上的 lang 改不了它（实测真机仍显示上午/下午）。
+
+   🔴 三个必须覆盖的规则（都是被通用规则坑出来的）：
+   ① **flex-direction:row** —— 该元素同时挂了 data-bd-grow，
+      而通用规则是 display:flex + flex-direction:column（用于"标题上、控件下"）
+      ⇒ 不覆盖就**竖排**（冒号和两个框上下叠）。
+   ② **flex:1 1 auto**（不是 none）—— 这一行是 flex 行，
+      时间容器要**吃掉左侧剩余空间**，开关才会被顶到最右与其它行对齐。
+      ⚠️ 我第一版写 flex:none ⇒ 内容整体靠左、开关紧贴时间框（使用者截图指出）。
+   ③ 两个 input 固定 46px —— data-bd-num 的默认 92px 太宽，
+      两个就 184px，窄侧栏里会把 X 挤出行外。 */
+[data-bd-time]{display:flex !important;flex-direction:row !important;align-items:center;
+  flex:1 1 auto !important;gap:6px;min-width:0;}
+[data-bd-time] input[type="number"]{width:46px !important;min-width:46px !important;
+  max-width:46px !important;flex:none;text-align:center;padding-left:4px;padding-right:4px;
+  -moz-appearance:textfield;appearance:textfield;}
+/* 去掉 number 的上下箭头（窄框里它们会把数字挤没了） */
+[data-bd-time] input[type="number"]::-webkit-outer-spin-button,
+[data-bd-time] input[type="number"]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
+[data-bd-time-sep]{flex:none;color:var(--dsw-alias-label-tertiary,#81858c);font-size:13px;line-height:20px;}
+
+/* 删除按钮：**无外框、无底色**，只有一个大一点的 ×。
    ⚠️ 必须**显式清掉** [data-bd-btn] 基础样式给的 border 与 background
       （基础样式是 padding 7px 12px + 描边 + 浅底）⇒ 否则会是一个带框小方块。
-   ⭐ × 是内联 SVG 的两条对角线（见下面那段 JSX），不用字符 ×：
-      字符的字形随字体变（粗细/端点/倾斜角都不受控），而使用者要的是
-      "互相垂直的那种" —— 两条 45° 线交叉、端点圆头、粗细一致，这才精确。
-      ⚠️ stroke 用 currentColor ⇒ 颜色跟着按钮走，hover 变色自动生效。
+
+   ⭐ × 是**内联 SVG 的两条对角线**（见下面那段 JSX），不用字符 ×：
+      字符的字形随字体变（粗细/端点/倾斜角都不受控），
+      而使用者要的是"互相垂直的那种" —— 两条 45° 线交叉、端点圆头、粗细一致。
+   🔴 那段 SVG 的属性名**必须是 React 驼峰**（strokeWidth / strokeLinecap / viewBox）：
+      写成连字符（stroke-width）会被 React 丢弃 ⇒ stroke 无值 ⇒ **X 透明看不见**（真机踩过）。
+   ⚠️ stroke 用 currentColor ⇒ 颜色跟按钮走，hover 变色自动生效。
+
    ⚠️ 尺寸 30px 是为了与开关（22px 高）在同一行**垂直居中**，不是随手给的。 */
 [data-bd-btn][data-bd-icon]{flex:none;width:30px;height:30px;padding:0;
   display:inline-flex;align-items:center;justify-content:center;
@@ -527,7 +554,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
   color:var(--dsw-alias-label-tertiary,#81858c);transition:color .15s,background .15s;}
 [data-bd-btn][data-bd-icon]:hover{color:var(--dsw-alias-state-warn-primary,#f0a020);
   background:var(--dsw-alias-interactive-bg-hover,#2631480f);}
-/* 图标本身：比原来大一圈（16 → 18），跟按钮的 currentColor 走 */
+/* 图标尺寸：跟着按钮的 currentColor 走，不用单独写颜色 */
 [data-bd-btn][data-bd-icon] svg{width:18px;height:18px;display:block;}
 
 /* ── 提示条：**浮现式 toast**（2026-10-16）
@@ -1663,35 +1690,74 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             return h('div', { 'data-bd-sub': '' },
               /* ① 已设置的时间行（每行：时间 + 开关 + 删除） */
               ...list.map((row, i) => h('div', { 'data-bd-row': '', key: 't' + i },
-                h('input', {
-                  'data-bd-input': '', 'data-bd-grow': '', type: 'time',
-                  /**
-                   * 🔴 **强制 24 小时制**（2026-10-19 使用者要求："不要上午下午的"）。
-                   *
-                   * `lang` 是浏览器选 12/24 小时制的**决定性依据**：
-                   *   · `lang="en-US"` ⇒ 界面上出现 AM/PM；
-                   *   · `lang="zh-CN"` ⇒ 24 小时制（`09:30`，不是「上午 9:30」）。
-                   * ⚠️ 光靠系统 locale 不可靠 —— 同一台机器上浏览器/Electron 的 locale
-                   *    可能不同，用户也可能改过 ⇒ **显式写死 zh-CN** 才稳。
-                   * ⚠️ 另外**别加 `step`** —— 写了 `step="60"` 某些浏览器仍按 12 小时显示。
-                   */
-                  lang: 'zh-CN',
-                  value: row.at,
-                  /**
-                   * ⚠️ **用 onChange 直接写回**（不是 onBlur）：
-                   *    `<input type="time">` 的取值是"整块"给的（选完就是合法 HH:MM），
-                   *    不像文本框有"打到一半"的中间态 ⇒ 立即生效更符合预期。
-                   * ⚠️ 空值（用户清空）⇒ 忽略，不要把空串写进配置。
-                   */
-                  onChange: (e) => {
-                    const v = String(e.target.value || '')
-                    if (!/^\d{2}:\d{2}$/.test(v)) return
-                    const next = list.slice()
-                    next[i] = { ...next[i], at: v }
-                    save(next)
-                  },
-                }),
-                /* 这一行自己的开关 */
+                /* 🔴🔴 **不用原生 input[type=time]**（2026-10-19 第二次修）。
+                   第一版加了 lang=zh-CN，真机上**仍然显示上午/下午** ——
+                   原生 time 控件的 12/24 制跟的是**浏览器/系统区域设置**，
+                   DOM 上的 lang 属性**不生效**（Chrome/Electron 实测）。
+                   ⇒ 改成**两个数字框自己拼 24 小时制**：[0-23] : [0-59]，
+                     完全不依赖任何 locale，永远 24 小时制。
+                   ⚠️ 另外两个好处：宽度可控（原生控件在窄侧栏里会被压变形）、
+                     没有那个时钟弹层（面板里不需要）。 */
+                h('div', { 'data-bd-grow': '', 'data-bd-time': '' },
+                  h('input', {
+                    'data-bd-input': '', 'data-bd-num': '', type: 'number',
+                    min: 0, max: 23, inputMode: 'numeric',
+                    'aria-label': '小时（0-23）',
+                    value: row.at.slice(0, 2),
+                    onChange: (e) => {
+                      const raw = String(e.target.value || '').replace(/\D/g, '')
+                      if (raw === '') return
+                      const hh = Math.max(0, Math.min(23, Number(raw)))
+                      const next = list.slice()
+                      next[i] = { ...next[i], at: String(hh).padStart(2, '0') + ':' + String(next[i].at).slice(3) }
+                      save(next)
+                    },
+                  }),
+                  h('span', { 'data-bd-time-sep': '' }, ':'),
+                  h('input', {
+                    'data-bd-input': '', 'data-bd-num': '', type: 'number',
+                    min: 0, max: 59, inputMode: 'numeric',
+                    'aria-label': '分钟（0-59）',
+                    value: row.at.slice(3),
+                    onChange: (e) => {
+                      const raw = String(e.target.value || '').replace(/\D/g, '')
+                      if (raw === '') return
+                      const mm = Math.max(0, Math.min(59, Number(raw)))
+                      const next = list.slice()
+                      next[i] = { ...next[i], at: String(next[i].at).slice(0, 2) + ':' + String(mm).padStart(2, '0') }
+                      save(next)
+                    },
+                  })),
+                /* 删除这一行（X 紧跟时间输入）
+                   🔴 **SVG 的属性名必须用 React 的驼峰写法**（真机踩过）：
+                   第一版写成 `'stroke-width': '1.6'` / `'stroke-linecap': 'round'`
+                   ⇒ React 丢弃这两个未知属性 ⇒ **X 完全看不见**（stroke 无值 = 透明）。
+                   正确写法：`strokeWidth` / `strokeLinecap` / `strokeLinejoin`。
+                   ⚠️ 另外 `viewBox` 本身就是驼峰（写 `viewbox` 也会失效）。
+                   外观：两条对角线各一条 path，+45° 与 -45° 交叉，端点圆头
+                   —— 这就是使用者要的「互相垂直的那种 X」。 */
+                h('button', {
+                  'data-bd-btn': '', 'data-bd-icon': '', type: 'button',
+                  title: '删掉这个时间',
+                  'aria-label': '删掉这个时间',
+                  onClick: () => save(list.filter((_, k) => k !== i)),
+                },
+                h('svg', {
+                  viewBox: '0 0 16 16',
+                  fill: 'none',
+                  stroke: 'currentColor',
+                  strokeWidth: 1.6,
+                  strokeLinecap: 'round',
+                  'aria-hidden': 'true',
+                },
+                h('path', { d: 'M4 4 L12 12' }),
+                h('path', { d: 'M12 4 L4 12' }))),
+                /* ⭐ 这一行自己的开关 —— 放在**最末尾** ⇒ 贴右边缘，
+                   与上面「峰谷时段自动刷」那行的开关**右对齐**。
+                   ⚠️ 顺序是「时间输入 → X → 开关」：X 要跟着时间输入（使用者要求），
+                      开关要在最右（与其它行的开关同一列）。
+                   ⚠️ 对齐靠 CSS：`[data-bd-time]` 要 `flex:1` 吃掉左侧剩余空间，
+                      开关才会被顶到最右（第一版写 flex:none ⇒ 开关紧贴时间框）。 */
                 h(Switch, {
                   on: row.on,
                   onChange: (v) => {
@@ -1699,25 +1765,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     next[i] = { ...next[i], on: v }
                     save(next)
                   },
-                }),
-                /* 删除这一行 */
-                h('button', {
-                  'data-bd-btn': '', 'data-bd-icon': '', type: 'button',
-                  title: '删掉这个时间',
-                  'aria-label': '删掉这个时间',
-                  onClick: () => save(list.filter((_, k) => k !== i)),
-                },
-                /* ⭐ 内联 SVG 的两条对角线（不是字符 ×）——
-                   使用者要"互相垂直的那种"：字符的字形随字体变，
-                   粗细/端点/角度都不受控；SVG 两条 45° 线交叉才精确。
-                   ⚠️ stroke 用 currentColor ⇒ 颜色跟按钮走，hover 变色自动生效。 */
-                h('svg', {
-                  viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor',
-                  'stroke-width': '1.6', 'stroke-linecap': 'round',
-                  'aria-hidden': 'true',
-                },
-                h('path', { d: 'M4 4 L12 12' }),
-                h('path', { d: 'M12 4 L4 12' }))))),
+                }))),
 
               /* ② 添加一行 */
               h('div', { 'data-bd-row': '' },
