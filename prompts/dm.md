@@ -69,10 +69,20 @@ https://www.bilibili.com/video/<BV号>
 
 ## 工具
 
-`bili_send_message`，参数：
+**`bilij_send_dm`**（插件提供的工具，**前台/后台都能用**）。
 
-- `receiver_uid`：**数字**（不是昵称，见上面「发给谁」）
-- `text`：正文
+参数：
+
+- `name`：收件人**昵称** —— 推荐用这个，工具会自己去 `accounts.md` 查 uid、查不到再搜，
+  搜到了还会记进 `accounts.md` 下次直接用；
+- 或者 `uid`：**数字**（你已经知道 uid 时用）；
+- `text`：正文。
+
+⚠️ **不要再去找 `bili_send_message`** —— 那个是 MCP 侧的名字，**前台那轮手上没有**
+（曾经因此整轮发不出去）。用 `bilij_send_dm` 这一个就够。
+
+⚠️ 回执里 `ok: false` **就是没发出去**（常见原因：对方设置了「不收陌生人私信」）——
+不要把它写成"已发送"。
 
 ## 失败了怎么办
 

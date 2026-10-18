@@ -1103,6 +1103,113 @@ export function apply(ctx, config) {
     },
   })
 
+  /**
+   * ⭐⭐ **发私信**（2026-10-18 加）。
+   *
+   * 🔴 为什么必须加这个工具（真机实测踩到的）：
+   *    使用者跑了前台那轮，模型说：
+   *      「规矩说用 `bili_send_message`，但我手上没有这个工具，也没有发私信的正规入口。」
+   *    ⇒ 查清原因：**MCP 那份 `bili_send_message` 只有"后台那条"能拿到**
+   *      （它靠 `headless-overlay.yml` 挂进 headless 子进程）；
+   *      而**前台那条**用的是**插件进程自己的 MCP**（走 `call()`），
+   *      插件里又**没有**注册私信工具 ⇒ 前台那轮压根没有发私信的能力。
+   *
+   *    ⚠️ 模型这次的表现其实很好（没工具就如实说、没去绕接口、还把稿子存了文件）——
+   *       但这说明**产品缺口**：规矩文档写了怎么做，工具却不在。
+   *
+   * ⭐ 设计：**和 `bilij_user_videos` 一样，接受 `uid` 或 `name`**
+   *    （模型手上多半是昵称；让它自己去搜 uid 会多一步，实测它会偷懒跳过）。
+   */
+  tool({
+    name: 'bilij_send_dm',
+    description: '给 B站用户**发一条私信**。\n'
+      + '⭐ 给 `name`（昵称）会**自动解析 uid**（先查家目录 `accounts.md`，查不到再搜用户）。\n'
+      + '🔴 **发给谁 / 发几条由设置决定**（「要 @ 谁」+「每轮最多发几条」）；'
+      + '怎么写见家目录的 `dm.md`（用 `bilij_read` 读）。\n'
+      + '⚠️ 私信是**私聊**：正文里不要再 @ 对方，但要带视频链接。',
+    parameters: {
+      uid: { type: 'number', description: '收件人 UID（数字）。与 name 二选一' },
+      name: { type: 'string', description: '收件人昵称。与 uid 二选一；会走缓存/自动解析' },
+      text: { type: 'string', description: '私信正文' },
+    },
+    async execute(args) {
+      const text = String(args.text ?? '').trim()
+      if (!text) return { ok: false, error: 'text 不能为空' }
+
+      /* ① 收件人：uid 或 name（与 bilij_user_videos 同一套解析） */
+      let uid = Number(args.uid)
+      let resolved = null
+      if ((!Number.isFinite(uid) || uid <= 0) && String(args.name || '').trim()) {
+        const name = String(args.name).trim()
+        const hit = lookupAccount(name)
+        if (hit) {
+          uid = hit.uid
+          resolved = { via: 'cache', uid, name: hit.name }
+        } else {
+          const sr = await call('bili_search_user', { keyword: name, page_size: 10 })
+          let so = sr
+          if (typeof sr === 'string') { try { so = JSON.parse(sr) } catch { /* 非 JSON */ } }
+          const users = Array.isArray(so?.users) ? so.users : []
+          if (!users.length) {
+            return {
+              ok: false,
+              error: `没搜到昵称「${name}」的用户，私信没发。`
+                + '换个写法再试，或确认名字没打错。**别猜一个 uid 发出去** —— 那会发给陌生人。',
+            }
+          }
+          // 与 bilij_user_videos 同样的裁决：唯一就直接用，多个就按粉丝数挑并标明"这是挑的"
+          if (users.length === 1) {
+            uid = Number(users[0].uid)
+            resolved = { via: 'search', uid, name: users[0].name, unique: true }
+          } else {
+            const sorted = [...users].sort((a, b) => (Number(b.fans) || 0) - (Number(a.fans) || 0))
+            uid = Number(sorted[0].uid)
+            resolved = {
+              via: 'search', uid, name: sorted[0].name, fans: sorted[0].fans, ambiguous: true,
+              candidates: sorted.slice(0, 5).map((u) => ({ name: u.name, uid: u.uid, fans: u.fans })),
+              pickedBy: '粉丝最多',
+            }
+          }
+          try { await markAccount(resolved.name, uid, { fans: resolved.fans }) } catch { /* 记不上不影响发送 */ }
+        }
+      }
+      if (!Number.isFinite(uid) || uid <= 0) {
+        return { ok: false, error: '要么给 uid（数字），要么给 name（昵称）—— 两个都没给/都不对，私信没发。' }
+      }
+
+      /* ② 真发（走插件自己的 MCP ⇒ **前台后台都能用**） */
+      let r
+      try {
+        r = await call('bili_send_message', { receiver_uid: uid, text })
+      } catch (e) {
+        return { ok: false, resolved, error: '调发私信接口失败：' + String(e?.message ?? e) }
+      }
+      let obj = r
+      if (typeof r === 'string') { try { obj = JSON.parse(r) } catch { /* 非 JSON */ } }
+
+      /**
+       * ⚠️ MCP 那边返回 `{success:false, error}` —— **别把它当成功**。
+       *    实测最容易踩的失败是"对方设置了不收陌生人私信"，
+       *    那种要如实回给模型（它要在报告里写清楚），**不能重试成风**。
+       */
+      const ok = obj?.success === true || obj?.ok === true
+      if (!ok) {
+        return {
+          ok: false, resolved,
+          error: obj?.error || obj?.message || '发送失败（对方可能设置了「不收陌生人私信」）',
+          hint: '不要把失败当成功写进报告。**最多再试一次**，还不行就如实记下来，别反复重试。',
+        }
+      }
+      return {
+        ok: true,
+        resolved,
+        receiverUid: uid,
+        chars: text.length,
+        hint: '私信已发出。⚠️ 私信**没有**像评论那样的额度硬闸 —— 每轮几条靠你自己守（见 dm.md）。',
+      }
+    },
+  })
+
   tool({
     name: 'bilij_subtitle',
     description: '取一个视频的字幕（AI 字幕）全文。**判断内容就靠它** —— 没有字幕时，'
@@ -2294,6 +2401,23 @@ export function apply(ctx, config) {
           + `其它任何理由都**不算**：`
           + `"这轮只看不写"、"等使用者开口"、"先汇报完再说"、"reportLevel 是 off" —— **一律不要拿它当借口**。`
           + `\n  ⚠️ 「不写报告」和「不发评论」是**两件事**：前者只管文件，后者是**对外发言**，别混`
+          /**
+           * 🔴 **报告里"发没发"必须照实说**（2026-10-18 真机抓到）。
+           *
+           * 实测：那一轮**确实发了 2 条评论**（`replies.json` 里记着
+           * `BV1YrWw6xEyq` / `BV1E1pm64EGW`，`seen.md` 里也有对应 rpid），
+           * 但它在报告里写「没有发评论，我自己一句都没回」。
+           *
+           * ⚠️ 它多半是把「回复评论（楼中楼）关着」当成了「没发评论」——
+           *    而这两件事完全不同：`replyToComments` 管的是**回复别人**，
+           *    `autoComment` 管的是**在视频下发评论**。
+           * ⇒ 明写这条区分，并要求它**以工具回执为准**，别凭印象写总结。
+           */
+          + `\n  📝 **报告里"发没发"要照实写，以工具回执为准**：`
+          + `发了几条就写几条（带上 BV 号）。`
+          + `\n  🔴 **别把「回复评论关着」说成「没有发评论」** —— 那是两件事：`
+          + `「回复评论」管的是**回别人的楼中楼**，「自动评论」管的是**在视频下发评论**。`
+          + `前者关着、后者照样发过，就别写成"一句都没发"。`
         : '关着的（只写报告，别发评论）'}。`
       + `\n  ⚠️ **评论就是评论，保持简洁**（一两句、150 字内）—— `
       + `**别把上面那份笔记的内容搬进评论**：笔记是给人细读的，评论只是**叫他来看一眼**。\n`
@@ -2320,8 +2444,21 @@ export function apply(ctx, config) {
           + `\n  🔴 **这是命令**：只要挑中了至少一条，就**至少发一条**私信；`
           + `唯一例外是本轮一条都没挑中。`
           + `\n  📩 **发之前先读规矩**：用 \`bilij_read\` 读家目录的 \`dm.md\`（\`path\` 传 \`dm.md\`）—— `
-          + `里面写了怎么写（和评论不一样：私聊不 @ 他、必须带视频链接）、发几条、`
-          + `以及**怎么把昵称换成 uid**（发私信要数字，家目录 \`accounts.md\` 里有对照表）。`
+          + `里面写了怎么写（和评论不一样：私聊不 @ 他、必须带视频链接）、发几条。`
+          /**
+           * 🔴 **工具名必须写死在这里**（2026-10-18 真机踩到）。
+           *
+           * 实测那次模型说：「规矩说用 `bili_send_message`，但我手上没有这个工具，
+           *   也没有发私信的正规入口。」⇒ 整轮私信发不出去（它还很有纪律地
+           *   没去绕 B站 接口，而是把稿子存成文件、告诉使用者"给我补一个工具"）。
+           *
+           * 根因：`dm.md` 里写的是 **MCP 侧**的名字，而**前台那轮手上只有插件工具**。
+           * ⇒ 现在插件注册了 `bilij_send_dm`（走自己的 MCP，前后台都可用），
+           *   并且**在提示词里直接点名**，不让模型去猜、也不让它去找不存在的工具。
+           */
+          + `\n  🛠 **用 \`bilij_send_dm\` 发**（给 \`name\`=昵称就行，它会自己解析 uid；`
+          + `也可以给 \`uid\`=数字）。⚠️ **不要**去找 \`bili_send_message\` —— 那是 MCP 的名字，`
+          + `**前台这轮手上没有它**（以前就是因此整轮发不出去）。`
           /**
            * 🔴 **语气必须按人设**（2026-10-18 使用者要求）。
            *
