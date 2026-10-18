@@ -513,13 +513,22 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 input[type="time"][data-bd-input]{min-width:0;font-family:inherit;}
 input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55;cursor:pointer;}
 
-/* 删除这类"只有符号"的按钮：方形、不占宽度、hover 才显警示色。
-   ⚠️ 尺寸写死 28px 是为了与开关（22px 高）在一行里**垂直居中对齐**，
-      而不是让它跟着文字行高走（那会顶高整行）。 */
-[data-bd-btn][data-bd-icon]{flex:none;width:28px;height:28px;padding:0;line-height:1;
+/* 删除这类"只有符号"的按钮：**无外框、无底色**，只有一个大一点的 ×。
+   ⚠️ 必须**显式清掉** [data-bd-btn] 基础样式给的 border 与 background
+      （基础样式是 padding 7px 12px + 描边 + 浅底）⇒ 否则会是一个带框小方块。
+   ⭐ × 是内联 SVG 的两条对角线（见下面那段 JSX），不用字符 ×：
+      字符的字形随字体变（粗细/端点/倾斜角都不受控），而使用者要的是
+      "互相垂直的那种" —— 两条 45° 线交叉、端点圆头、粗细一致，这才精确。
+      ⚠️ stroke 用 currentColor ⇒ 颜色跟着按钮走，hover 变色自动生效。
+   ⚠️ 尺寸 30px 是为了与开关（22px 高）在同一行**垂直居中**，不是随手给的。 */
+[data-bd-btn][data-bd-icon]{flex:none;width:30px;height:30px;padding:0;
   display:inline-flex;align-items:center;justify-content:center;
-  font-size:16px;color:var(--dsw-alias-label-tertiary,#81858c);}
-[data-bd-btn][data-bd-icon]:hover{color:var(--dsw-alias-state-warn-primary,#c27c0e);}
+  border:0;background:none;border-radius:var(--dsw-radius-sm,8px);
+  color:var(--dsw-alias-label-tertiary,#81858c);transition:color .15s,background .15s;}
+[data-bd-btn][data-bd-icon]:hover{color:var(--dsw-alias-state-warn-primary,#f0a020);
+  background:var(--dsw-alias-interactive-bg-hover,#2631480f);}
+/* 图标本身：比原来大一圈（16 → 18），跟按钮的 currentColor 走 */
+[data-bd-btn][data-bd-icon] svg{width:18px;height:18px;display:block;}
 
 /* ── 提示条：**浮现式 toast**（2026-10-16）
  *
@@ -1656,6 +1665,17 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               ...list.map((row, i) => h('div', { 'data-bd-row': '', key: 't' + i },
                 h('input', {
                   'data-bd-input': '', 'data-bd-grow': '', type: 'time',
+                  /**
+                   * 🔴 **强制 24 小时制**（2026-10-19 使用者要求："不要上午下午的"）。
+                   *
+                   * `lang` 是浏览器选 12/24 小时制的**决定性依据**：
+                   *   · `lang="en-US"` ⇒ 界面上出现 AM/PM；
+                   *   · `lang="zh-CN"` ⇒ 24 小时制（`09:30`，不是「上午 9:30」）。
+                   * ⚠️ 光靠系统 locale 不可靠 —— 同一台机器上浏览器/Electron 的 locale
+                   *    可能不同，用户也可能改过 ⇒ **显式写死 zh-CN** 才稳。
+                   * ⚠️ 另外**别加 `step`** —— 写了 `step="60"` 某些浏览器仍按 12 小时显示。
+                   */
+                  lang: 'zh-CN',
                   value: row.at,
                   /**
                    * ⚠️ **用 onChange 直接写回**（不是 onBlur）：
@@ -1686,7 +1706,18 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   title: '删掉这个时间',
                   'aria-label': '删掉这个时间',
                   onClick: () => save(list.filter((_, k) => k !== i)),
-                }, '×'))),
+                },
+                /* ⭐ 内联 SVG 的两条对角线（不是字符 ×）——
+                   使用者要"互相垂直的那种"：字符的字形随字体变，
+                   粗细/端点/角度都不受控；SVG 两条 45° 线交叉才精确。
+                   ⚠️ stroke 用 currentColor ⇒ 颜色跟按钮走，hover 变色自动生效。 */
+                h('svg', {
+                  viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor',
+                  'stroke-width': '1.6', 'stroke-linecap': 'round',
+                  'aria-hidden': 'true',
+                },
+                h('path', { d: 'M4 4 L12 12' }),
+                h('path', { d: 'M12 4 L4 12' }))))),
 
               /* ② 添加一行 */
               h('div', { 'data-bd-row': '' },
