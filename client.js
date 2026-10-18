@@ -850,8 +850,8 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       //    因为 `uiWorkspace` 是异步 inject 上来的，按值捕获会拿到 null（真机踩过）。
       //    解析不出来返回 null ⇒ 面板**如实显示"这个环境不支持跳转"**，而不是点了没反应。
       const resolveOpenSession = (props && props.resolveOpenSession) || (() => null)
-      // ⭐ 目录选择器（给「前台工作区」用）；拿不到就是 null
-      const doPickDirectory = (props && props.doPickDirectory) || null
+      // ⚠️ **`doPickDirectory` 已删**（2026-10-18）：它唯一的消费者是「会话建在哪个目录」
+      //    那个按钮，而那一整块已按使用者要求从面板去掉。
       const [st, setSt] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
       // （旧的 msg/msgTone 已删：提示统一走 runNote 那个浮现式 toast，见 say()）
@@ -874,9 +874,8 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       const [seenNote, setSeenNote] = React.useState(null) // 判重表条数（从 /status 拿）
       // ⭐ 前台/后台（2026-10-16 加）：决定它跑在一个你看得见的会话里、还是后台子进程
       const [runMode, setRunMode] = React.useState(null)
-      // ⭐ 前台会话的工作区（2026-10-16 加）：空 = 用默认（家目录下的 front-sessions）
-      const [wsPath, setWsPath] = React.useState(null)
-      const [wsBusy, setWsBusy] = React.useState(false)
+      // ⚠️ `wsPath` / `wsBusy` 已删（2026-10-18）：随「会话建在哪个目录」那块一起去掉。
+      //    🔴 后端仍然支持 `frontWorkspace`（老配置照旧生效），只是**面板不再提供入口**。
       // ⭐ 产物清单（2026-10-16 加：改成每条一份 md，不再是汇总日报）
       const [reports, setReports] = React.useState(null)
       const [reportFile, setReportFile] = React.useState(null)
@@ -1022,7 +1021,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         if (cfg && sNum === null) setSNum(String(cfg.searchNum ?? 20))
         if (st && seenNote === null) setSeenNote(Number(st.seenCount) || 0)
         if (cfg && runMode === null) setRunMode(cfg.runMode || 'headless')
-        if (st && wsPath === null) setWsPath(String(st.frontWorkspace || ''))
+        // ⚠️ 原来这里还有一行给 wsPath 赋初值 —— 随那块 UI 一起去掉了（2026-10-18）
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -1546,62 +1545,25 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               h('option', { value: 'front' }, '前台（能看、能追溯）'),
               h('option', { value: 'headless' }, '后台（另起子进程）'))),
 
-          (runMode ?? 'headless') === 'front'
-            ? h('div', { 'data-bd-sub': '' },
-                h('div', { 'data-bd-row': '' },
-                  h('div', { 'data-bd-grow': '' },
-                    h('div', { 'data-bd-label': '' }, '会话建在哪个目录'),
-                    // 🔴 **这句是上面那项的描述，不是独立一项**（2026-10-16 使用者指出：
-                    //    "下面那句跟上面的设置是一个语义的，不应该被分隔"）。
-                    //    原来它是 sub 的直接子元素 ⇒ 被当成一行、还画了分隔线 ⇒ 看着像两个设置。
-                    //    ⇒ 收进同一个 grow 里，与 label 就是"标题 + 描述"这一对，
-                    //      间距由那条统一的 4px 规则给；没设过目录时才显示。
-                    (cfg.frontWorkspace
-                      ? h('div', { 'data-bd-note': '' }, st.frontWorkspace || '（读不到）')
-                      : h('div', { 'data-bd-note': '' },
-                          '默认放插件家目录下的 front-sessions。',
-                          h('br'),
-                          st.frontWorkspace || ''))),
-                  h('button', {
-                    'data-bd-btn': '', disabled: wsBusy,
-                    onClick: async () => {
-                      if (!doPickDirectory) { note('这个环境拿不到目录选择器（缺 uiWorkspace 服务）', 'warn'); return }
-                      setWsBusy(true)
-                      try {
-                        const picked = await doPickDirectory()
-                        if (picked === null) return              // 用户取消
-                        await patch({ frontWorkspace: picked }, '会话目录')
-                        setWsPath(picked)
-                        note(`会话目录已设为：${picked}`, 'good')
-                      } catch (e) { note(String(e?.message ?? e), 'warn') }
-                      finally { setWsBusy(false) }
-                    },
-                  }, wsBusy ? '正在选…' : (cfg.frontWorkspace ? '改目录' : '选择目录')),
-                  cfg.frontWorkspace
-                    ? h('button', {
-                        'data-bd-btn': '', disabled: wsBusy,
-                        onClick: async () => {
-                          setWsBusy(true)
-                          try { await patch({ frontWorkspace: '' }, '会话目录'); setWsPath(''); note('已改回默认目录', 'good') }
-                          catch (e) { note(String(e?.message ?? e), 'warn') }
-                          finally { setWsBusy(false) }
-                        },
-                      }, '用默认')
-                    : null),
-                st.lastFrontSessionId
-                  ? h('div', { 'data-bd-row': '' },
-                      h('div', { 'data-bd-grow': '' },
-                        h('div', { 'data-bd-note': '' }, `最近一次：${st.lastFrontSessionId}`)),
-                      h('button', {
-                        'data-bd-btn': '',
-                        onClick: () => {
-                          const openSession = resolveOpenSession()
-                          if (!openSession) { note('这个环境拿不到跳转能力（缺 uiWorkspace 服务）', 'warn'); return }
-                          try { openSession(st.lastFrontSessionId) } catch (e) { note(`跳转失败：${String(e?.message ?? e)}`, 'warn') }
-                        },
-                      }, '去到那个会话'))
-                  : null)
-            : null,
+          /**
+           * ⚠️ **原来这里还有两块，2026-10-18 按使用者要求去掉了**：
+           *   ① 「会话建在哪个目录」（选目录 / 改目录 / 用默认 三个按钮）
+           *   ② 「最近一次：<sessionId>」+「去到那个会话」
+           *
+           * 为什么去掉（使用者原话）：「把这两个设置从面板里去掉吧」。
+           * 判断：这两项都是**调试/诊断用**的，不是正常使用要调的东西 ——
+           *   · 会话目录一般就用默认的（家目录下 front-sessions），
+           *     放出来反而让人以为"必须选一个"；
+           *   · 「去到那个会话」更是排查时才用。
+           * ⇒ 面板只留使用者真正要决定的事。
+           *
+           * 🔴 **后端没动**：`cfg.frontWorkspace` / `st.frontWorkspace` /
+           *    `st.lastFrontSessionId` 在 `/status` 里照旧给，
+           *    `POST /config {frontWorkspace}` 也照旧接受 ——
+           *    所以老配置仍然生效，只是**面板不再提供改它的入口**。
+           *    ⚠️ 要恢复入口：把这两块 JSX 加回 `runMode === 'front'` 的分支里即可。
+           */
+
 
           h(ToggleRow, {
             label: '峰谷时段自动刷',
@@ -2173,7 +2135,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
      *    ⇒ 现在改成：`makeTab(resolveOpenSession)` 在 `apply()` 里调用，
      *      而且传的是**解析函数**（点击时现取服务），不是那一刻的值。
      */
-    function makeTab(resolveOpenSession, doPickDirectory) {
+    function makeTab(resolveOpenSession) {
       return function BiliScrollTab() {
         // 🔴 **必须现取，不能按值捕获**（2026-10-16 真机抓到）：
         //    `openSession` 由 `ctx.inject(['uiWorkspace'], cb)` **异步**填上，
@@ -2181,7 +2143,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         //    ⇒ 按值传的话注册那刻拿到 `null`，之后填上也改不了已捕获那份
         //      ⇒ 按钮永远说"拿不到跳转能力"。
         //    ⚠️ 所以这里传的是**解析函数**，按钮**点击时**才真正取服务。
-        return h('div', { 'data-bd-tabwrap': '' }, h(Panel, { resolveOpenSession, doPickDirectory }))
+        return h('div', { 'data-bd-tabwrap': '' }, h(Panel, { resolveOpenSession }))
       }
     }
 
@@ -2215,20 +2177,15 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 面板样式')
 
         /**
-         * ⭐ **打开 DSH 原生的目录选择器**（2026-10-16 加，给"前台工作区"用）。
+         * ⚠️ **`pickDirectory` 已删**（2026-10-18）。
          *
-         * 照 `dsh-workspace-auto` 的现成做法（`src/client/WorkspaceRootSetting.tsx`）：
-         *   目录选择器挂在 **`ctx.uiWorkspace.pickDirectory()`** ——
-         *   ⚠️ **不是** `ctx.workspaces`（那个在新版只剩纯数据命令 list/create/rename…）。
-         *   签名 `pickDirectory(): Promise<string | null>`（null = 用户取消）。
+         * 它原来只为「会话建在哪个目录」那个按钮服务（走 `ctx.uiWorkspace.pickDirectory()`），
+         * 而那一整块已按使用者要求从面板去掉 ⇒ 这段没有消费者了。
          *
-         * ⚠️ 与 `openSession` 同样：**异步 inject** ⇒ 每次现取，别按值捕获。
+         * ⭐ 要恢复的话（比如以后又想让用户选目录）：
+         *   `const ws = ctx.get('uiWorkspace'); ws.pickDirectory()   // Promise<string|null>，null=取消`
+         *   ⚠️ 与 `openSession` 同样要**每次现取**（它是异步 inject 填上的）。
          */
-        const pickDirectory = async () => {
-          const ws = ctx.get('uiWorkspace')
-          if (ws && typeof ws.pickDirectory === 'function') return await ws.pickDirectory()
-          throw new Error('这个环境拿不到目录选择器（缺 uiWorkspace 服务）')
-        }
 
         /**
          * ⭐ **跳到某个会话**（前台跑完之后用）。
@@ -2295,7 +2252,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
         //    ⭐ 组件在**这里**建，并把**解析函数**给它（`uiWorkspace` 是异步填上的，
         //       按值传会拿到 null ⇒ 按钮永远说"拿不到跳转能力"，真机踩过）。
         try {
-          const Tab = makeTab(resolveOpenSession, pickDirectory)
+          const Tab = makeTab(resolveOpenSession)
           ctx.effect(() => slots.inject('sidebar.right.pane.tab', () =>
             slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, Tab),
           ), 'bili-duty: 右侧栏 tab 本体')
