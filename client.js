@@ -1073,13 +1073,20 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       }
 
       /**
-       * 「检查更新」—— ⭐ 查的是**我们自己的仓库**（`jojoman2024/dsh-bili-scroll`），
-       * 判据是 **commit sha**（不是版本号：fork 之后 version 一直没动，比不出来）。
+       * 「检查更新」—— ⭐ **2026-10-18 起比的是 npm 上的版本号**（走国内镜像）。
        *
-       * 🔴 `direction` 的语义（后端实测确认，别凭直觉改）：
-       *    `ahead`     = 仓库 main 领先本地 ⇒ **有新版**
-       *    `behind`    = main 落后本地     ⇒ 本地更超前，不用升
-       *    `identical` = 一样             ⇒ 最新
+       * ── 为什么换（实测数据）────────────────────────────────
+       *   同一台国内机器：npmmirror 55ms / npm 官方 1860ms → 镜像快 30 倍。
+       *   而且 GitHub 那条路有硬伤：**本地 commit 必须已推到远端**，
+       *   否则 `compare` 直接 404（本机实测：领先 fork/main 16 个提交时必然 404）。
+       *
+       * ⚠️ 旧注释写的是「判据是 commit sha（不是版本号：fork 之后 version 一直没动）」——
+       *    那句话**当时对、现在不对了**：现在每个版本都改了 `package.json` 的 version。
+       *
+       * 🔴 `direction` 的语义（**现在指版本号**，不再是 commit）：
+       *    `ahead`     = npm 上的版本更新 ⇒ **有新版**
+       *    `behind`    = 本地版本更新     ⇒ 改过还没发版（`localAhead: true`）
+       *    `identical` = 版本号一样       ⇒ 最新
        */
       const onCheckUpdate = async () => {
         setBusy('update')
@@ -1087,48 +1094,46 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
           const r = await jget('/update')
           /**
            * 🔴 **别再一律说"可能网络不通"**（2026-10-18 修）。
-           * 后端现在会区分三类错误（`errorKind`）：
-           *   network / rate-limit / http —— 各自给一句能指导下一步的话。
+           * 后端会区分 `errorKind`（network / rate-limit / http），各给一句能指导下一步的话。
            * 旧代码那句「可能网络不通」把一个 HTTP 404（本地没推上去）说成了网络故障。
            */
           if (!r || !r.ok) {
             const kind = r && r.errorKind
             const prefix = kind === 'rate-limit' ? '查不了（限流）：'
-              : kind === 'http' ? '查不了（GitHub 拒绝了请求）：'
+              : kind === 'http' ? '查不了（registry 拒绝了请求）：'
                 : '查不了（网络问题）：'
             say(prefix + ((r && r.error) || '未知原因'), 'warn')
             return
           }
-          const mine = r.currentSha ? '（你这版 ' + r.currentSha + '）' : ''
           /**
            * ⚠️ **每次检查结果都要重置 `newVer`**（2026-10-18 补）。
            * 原来只有 `setNewVer(...)` 没有清空 ⇒ 一旦发现过新版，
-           * 即使后来远端收敛了（或本地变得超前），**「升级到 xxx」按钮会一直挂着**。
-           * ⇒ 先清空，只有真的 `hasNew` 时才重新设置。
+           * 即使后来收敛了（或本地变得超前），**「升级到 xxx」按钮会一直挂着**。
            */
           setNewVer('')
+          /**
+           * ⭐ **2026-10-18 起，比对对象改成 npm 版本号**（走国内镜像）。
+           * 所以这段文案整个重写了 —— 不再有"领先你几个提交"（版本号说不出这个）。
+           * ⚠️ 要在提示里**带上版本号和来源**，否则看的人不知道自己在比什么。
+           */
+          const src = r.via === 'npm'
+            ? 'npm' + (r.registry ? `（${String(r.registry).replace('https://', '')}）` : '')
+            : 'GitHub'
           if (r.hasNew) {
             setNewVer(r.latest || '有新版')
-            say('仓库有新版' + (r.latest ? ' ' + r.latest : '') + (r.aheadBy ? '，领先你 ' + r.aheadBy + ' 个提交' : '')
+            say(`有新版本 ${r.latest}（现在 ${r.current}，比的是 ${src}）`
               + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
-          } else if (r.localUnpublished) {
+          } else if (r.localAhead) {
             /**
-             * ⭐ **本地提交还没推上去**（2026-10-18 新增）：
-             *   这时 `compare` 会 404（GitHub 不认识那个 sha），旧代码会误报成网络问题。
-             *   现在后端回退成"只查 main 最新"，并带 `localUnpublished: true`。
-             *   ⚠️ 不能说"有新版本"（比不了），也不能说"已是最新"（不知道）。
+             * ⭐ **本地版本号比 npm 上的还新** ⇒ 改过还没发版。
+             * 这时既不能说"有新版本"，也不能说"已是最新"（它明明更新）。
              */
-            say(r.note || '你本地有还没推到 GitHub 的提交，没法比新旧', 'warn')
-          } else if (!r.currentSha) {
-            // 没有本地 git（比如从 npm 装的）⇒ 只能说"仓库最新到哪儿"
-            say('你这版没带 git 信息，没法比新旧；仓库 main 最新是 ' + (r.latest || '?'), 'warn')
+            say(r.note || `你本地是 ${r.current}，npm 上最新是 ${r.latest} —— 你比它新，不用升级`, 'good')
           } else if (r.direction === 'identical') {
-            say('已经是最新版' + mine, 'good')
-          } else if (r.direction === 'behind') {
-            // main 落后本地（自己改过还没推）⇒ 别谎报"有新版本"
-            say('你这版比仓库 main 还超前' + (r.behindBy ? ' ' + r.behindBy + ' 个提交' : '') + ' —— 不用升级', 'good')
+            say(`已经是最新版 ${r.current}（比的是 ${src}）`, 'good')
           } else {
-            say('当前状态：' + (r.direction || '未知') + mine, 'good')
+            // ⚠️ 兜底：**别把它说成"有新版本"**，也别说"最新" —— 只说看到了什么
+            say(`当前 ${r.current}，${src} 上最新是 ${r.latest || '?'}`, 'good')
           }
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }

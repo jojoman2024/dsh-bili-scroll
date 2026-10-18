@@ -3041,7 +3041,16 @@ export function apply(ctx, config) {
     return out
   }
 
-  let updateCache = null            // { at, latest } —— 检查更新的结果缓存
+  /**
+   * 检查更新的**短缓存**（2026-10-16 加；2026-10-18 换成 npm 版本号后重新启用）。
+   *
+   * ⚠️ 为什么还要缓存：镜像虽然快（实测 55ms），但**连点按钮**没必要每次都发请求
+   *    （npm registry 也有速率限制）。
+   * ⚠️ 但**从 24 小时缩短到 10 分钟** —— 因为"有没有新版"变起来很快
+   *    （改完就能发版），24 小时会把新版本藏一整天。
+   *    原来那个 24h + sha 判据还有个坑：版本号没变但 sha 变了时会误判。
+   */
+  let updateCache = null            // { at, key, latest, hasNew, direction }
 
   const status = () => {
     const st = readJson(dutyStateFile, {})
@@ -3379,28 +3388,25 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/upgrade') return sendJson(res, 200, runUpgrade())
 
     /**
-     * ⭐ **「检查更新」查的是我们自己的仓库**（2026-10-16 改）。
+     * ⭐ **「检查更新」现在比的是 npm 上的版本号**（2026-10-18 改；走国内镜像）。
      *
-     * 🔴 为什么必须改：原来查 `registry.npmjs.org/dsh-bili-scroll` —— 那是**上游**的包。
-     *    而这个分支（`jojoman2024/dsh-bili-scroll`）跟上游**差的不是一点**：
-     *    前台会话、`bili_read/bili_write`、产物改成"每条一份笔记"、面板整块重排……
-     *    ⇒ 它**永远**提示"有新版 v0.1.5"，而那一个「一键升级」装下去
-     *      **会把我们这些改动整个覆盖掉**（而且是装到 `--profile web`，跟我们这份 link 装的还不是一处）。
-     *    ⚠️ **检查与升级是一对**：只改检查不改升级 ⇒ 更危险
-     *      （"说有新版"却去装上游）。所以 `runUpgrade()` 也一并改掉了。
+     * ── 历史（为什么要改两次）─────────────────────────────────
+     *   ① 最早查 `registry.npmjs.org/dsh-bili-scroll` —— 那是**上游**的包，
+     *      而这个分支跟上游差得远 ⇒ 永远提示"有新版"，一键升级还会把改动覆盖掉。
+     *   ② 2026-10-16 改成查**本仓的 commit sha**（因为当时 fork 后 version 一直没动，
+     *      版本号比不出新旧）。
+     *   ③ **2026-10-18 改成比 npm 版本号**（使用者要求，走国内镜像）——
+     *      因为现在每个版本都改 version 了，而且：
+     *        · 国内访问 npmmirror 实测 **55ms**，npm 官方 **1860ms**，快 30 倍；
+     *        · GitHub 那条路要求"本地 commit 已推到远端"，
+     *          没推就 compare 404（本机实测过，还曾被误报成"网络不通"）；
+     *        · 从 npm 装的人（没有 `.git`）也能查。
      *
-     * 📌 **判据用 commit sha，不用版本号**：
-     *    我们 fork 之后 `package.json` 的 version 一直没动（还是 0.1.3），
-     *    两边版本号可能相同而代码完全不同 ⇒ **版本号比不出新旧的**。
-     *    ⇒ 用 GitHub 的 `compare` 接口拿方向：
-     *      · `identical`     = 本地那份就是 main（最新）
-     *      · `behind`        = 本地落后 main ⇒ 有新版
-     *      · `ahead`/`diverged` = 本地不在 main 线上（自己改过 / 不在主干）
-     *    ⚠️ 本地 sha 从**插件目录自己的 git** 读（`.git/HEAD`）——
-     *      本插件通常是 `link:` 装的，`pluginDir` 就是一个真 git 仓；
-     *      读不到（比如从 npm 装的、没有 .git）⇒ **如实说"查不了"**，不要瞎报有新版。
+     * ⚠️ **检查与升级必须指向同一处**：现在两边都是 npm 包 `PKG_NAME` ⇒ 自洽了。
+     *    （②那个阶段是"比 GitHub、装 npm"，其实不配套。）
      *
-     * ⚠️ 只在点按钮时联网（不偷偷发请求）；结果缓存 24 小时。
+     * ⚠️ 代价：**版本号没升就报不出新版** —— 所以发版流程里"改完要升 version"比以前更重要。
+     * ⚠️ 只在点按钮时联网（不偷偷发请求）；缓存 10 分钟（见 `updateCache` 的注释）。
      */
     const GH_REPO = 'jojoman2024/dsh-bili-scroll'
 
@@ -3435,132 +3441,189 @@ export function apply(ctx, config) {
         latest: '',
         hasNew: false,
         page: 'https://github.com/' + GH_REPO,
-      }
-      try {
-        if (updateCache && updateCache.sha === localSha && Date.now() - updateCache.at < 24 * 3600 * 1000) {
-          out.latest = updateCache.latest
-          out.behindBy = updateCache.behindBy
-          out.direction = updateCache.direction
-        } else {
-          const get = async (url) => {
-            const ctrl = new AbortController()
-            const timer = setTimeout(() => ctrl.abort(), 8000)
-            try {
-              const r = await fetch(url, {
-                signal: ctrl.signal,
-                headers: { 'User-Agent': 'dsh-bili-scroll', Accept: 'application/vnd.github+json' },
-              })
-              if (!r.ok) {
-                /**
-                 * 🔴 **别把所有非 2xx 都当成"网络问题"**（2026-10-18 修，真机反馈）。
-                 *
-                 * 使用者点了「检查更新」，看到的是「查不到最新版（可能网络不通）」，
-                 * 而实际是 **HTTP 404** —— 本地 HEAD 那个 commit **还没推到远端**
-                 * （实测：`commits/c1cb192` 直接返回 422 "No commit found for SHA"）。
-                 * 网络好好的（同一台机器 `api.github.com` 735ms 返回 200）。
-                 *
-                 * ⇒ 抛一个**带状态码**的错误，让上层能分开处理：
-                 *    · 404 / 422 ⇒ 本地这个 sha 远端不认识（多半是还没推）
-                 *    · 403 / 429 ⇒ 触发限流（未登录的 API 每小时 60 次）
-                 *    · 其它      ⇒ 才是真的网络/服务问题
-                 */
-                const err = new Error('HTTP ' + r.status)
-                err.httpStatus = r.status
-                throw err
-              }
-              return await r.json()
-            } finally { clearTimeout(timer) }
-          }
-          if (!localSha) {
-            // 没有本地 git ⇒ 退回"只看 main 最新那个 commit"，方向判不了
-            const j = await get(`https://api.github.com/repos/${GH_REPO}/commits/main`)
-            out.latest = String(j.sha || '').slice(0, 7)
-            out.direction = 'unknown'
-          } else {
-            /**
-             * ⭐ **本地 HEAD 可能远端不认识**（2026-10-18 修）。
-             *
-             * `compare/<本地sha>...main` 的前提是**那个 sha 在远端存在**。
-             * 而使用者本地改了一堆**还没推**（本机实测：领先 fork/main 16 个提交）
-             * ⇒ GitHub 直接 **404**，而旧代码把它报成"可能网络不通" —— **完全误导**。
-             *
-             * ⇒ 现在两步走：
-             *   ① 先试 compare（正常情况：本地是远端历史里的某个点）；
-             *   ② 404/422 ⇒ **退回只查 main 最新**，并明确告诉使用者
-             *      「你本地有还没推的提交，所以没法比新旧」—— 这是**事实**，不是错误。
-             *      ⚠️ 这种情况不能说"有新版本"（比不了），也不能说"已是最新"（不知道）。
-             */
-            let j = null
-            let compareFailed = null
-            try {
-              j = await get(`https://api.github.com/repos/${GH_REPO}/compare/${localSha}...main`)
-            } catch (e) {
-              const st = e?.httpStatus
-              if (st !== 404 && st !== 422) throw e      // 其它错误照旧往上抛（会落到外层 catch）
-              compareFailed = st
-            }
-            if (j) {
-              out.latest = String(j.commits?.length ? j.commits[j.commits.length - 1].sha : localSha).slice(0, 7)
-              out.direction = String(j.status || '')
-              out.behindBy = Number(j.behind_by || 0)
-              out.aheadBy = Number(j.ahead_by || 0)
-            } else {
-              // ② 回退：只取 main 最新，方向未知
-              const m = await get(`https://api.github.com/repos/${GH_REPO}/commits/main`)
-              out.latest = String(m.sha || '').slice(0, 7)
-              out.direction = 'unknown'
-              out.localUnpublished = true
-              out.note = `你本地的提交（${localSha.slice(0, 7)}）还没推到 GitHub ⇒ `
-                + '没法比较新旧。这不代表出错 —— 推上去之后再点一次就能比了。'
-              log(`检查更新：compare 返回 ${compareFailed}（本地 ${localSha.slice(0, 7)} 远端不认识）⇒ 退回只查 main 最新`)
-            }
-          }
-          updateCache = {
-            at: Date.now(), sha: localSha, latest: out.latest,
-            direction: out.direction, behindBy: out.behindBy,
-          }
-        }
-      } catch (e) {
         /**
-         * 🔴 **错误要分清楚是哪一类**（2026-10-18 修）。
-         * 旧代码一律给 `error: 'HTTP 404'`，而面板把它渲染成
-         * 「查不到最新版（**可能网络不通**）」—— 把"本地没推上去"说成了网络故障。
-         *
-         * ⇒ 现在分成三类，各给一句**能指导下一步**的话：
-         *    · 403/429 ⇒ **限流**（GitHub 未登录 API 每小时 60 次），等一会儿或换个时间
-         *    · 其它状态码 ⇒ 服务端问题，把状态码原样给出
-         *    · 没有状态码（超时/断网/DNS）⇒ 这才是真·网络问题
+         * ⭐ **这次比对的是哪一路**（2026-10-18 加，使用者要求）：
+         *   · `npm`     = 比 npm 上的**版本号**（默认；可走国内镜像）
+         *   · `github`  = 比 GitHub 的 **commit sha**（旧做法，保留作可选）
+         * 面板把 `via` 显示出来，免得看的人不知道自己在比什么。
          */
-        const st = e?.httpStatus
-        out.ok = false
-        out.error = st === 403 || st === 429
-          ? `GitHub 限流了（HTTP ${st}）—— 未登录的 API 每小时只给 60 次，过一会儿再点`
-          : st
-            ? `GitHub 返回 HTTP ${st}（不是网络问题，是服务端拒绝了这个请求）`
-            : `连不上 GitHub（${String(e?.name === 'AbortError' ? '超时 8 秒' : (e?.message ?? e))}）—— 这才是网络问题`
-        out.errorKind = st === 403 || st === 429 ? 'rate-limit' : st ? 'http' : 'network'
-        log(`检查更新失败（${out.errorKind}）：${out.error}`)
-        return sendJson(res, 200, out)
+        via: '',
+        registry: '',
       }
       /**
-       * 🔴 **方向判据（2026-10-16 实测确认，别凭直觉改）**：
+       * ⭐⭐ **默认改成比 npm 版本号（走国内镜像）** —— 2026-10-18，使用者定。
        *
-       * `compare/<本地sha>...<main>` 返回的 `status` 描述的是 **head（第二个 ref）相对 base**：
-       *   · `ahead`     = main 领先本地 ⇒ **有新版** ← 这才是"该升级"
-       *   · `behind`    = main 落后本地 ⇒ 本地更超前，**不用升**
-       *   · `identical` = 一样 ⇒ 最新
-       *   · `diverged`  = 两边各有提交（分了叉）
-       * ⚠️ **第一版我写成了 `=== 'behind'`，正好写反了** —— 那会永远判不出有新版
-       *    （实测：本地落后的 sha 对比 main 得到的是 `ahead`）。
-       *    实测数据：
-       *      compare/OLD...main → status=ahead,  ahead_by=14, behind_by=0
-       *      compare/main...OLD → status=behind, ahead_by=0,  behind_by=14
-       *    ⇒ 记住：**status 说的是第二个 ref（head）相对第一个（base）**。
+       * ── 为什么要换（实测数据，不是感觉）──────────────────────
+       *   在**同一台国内机器**上量了三个源（都是查 `@jojoman2024/dsh-bili-scroll`）：
+       *     · `registry.npmmirror.com/…/latest`   **55 ms**  ✅ 200
+       *     · `registry.npmmirror.com/…`（全量）   162 ms  ✅ 200
+       *     · `registry.npmjs.org/…/latest`       1860 ms  ✅ 200
+       *   ⇒ 国内镜像快 **30 倍以上**，而且 GitHub 那条路还要求
+       *      "本地 commit 必须已经推到远端"（没推 ⇒ compare 404，见下面那段注释）。
+       *
+       * ── 换成版本号比对，顺带解决的几件事 ──────────────────
+       *   ① **不再依赖本地 git**：从 npm 装的人（没有 `.git`）也能查；
+       *   ② **不再受"本地提交没推"影响**：那只影响 sha 比对，版本号是另一回事；
+       *   ③ **判据更符合直觉**：使用者关心的是"有没有新版"，不是"差几个 commit"。
+       *
+       * ⚠️ 代价（必须知道）：
+       *   · **版本号没升就不会报新版** —— 哪怕仓库里已经改了很多。
+       *     所以发版流程里"改完要升 version"比以前更重要。
+       *   · 它只能告诉你"有没有新版"，**说不出多了哪些提交**。
+       *
+       * ⚠️ 只认 **`dist-tags.latest`**，**不扫全部 versions** ——
+       *   npm 上有个 `0.0.0-stage` 的空壳占位版本（staged publishing 产物），
+       *   若拿"所有版本里最大的"去比，会挑出奇怪的东西。实测 `latest` 是干净的。
        */
-      out.hasNew = out.direction === 'ahead'
-      return sendJson(res, 200, out)
+      const REGISTRY_MIRROR = 'https://registry.npmmirror.com'
+      const REGISTRY_OFFICIAL = 'https://registry.npmjs.org'
+      // ⚠️ 包名直接用文件顶部那个 `PKG_NAME`（L50）——
+      //    这里**不要**再声明一次，否则是"函数内遮蔽外层"的写法，改一处忘一处。
+
+      /**
+       * 把 `1.2.3-rc.1` 这种拆成可比的段。
+       * ⚠️ 语义要点（别写错）：
+       *   · **预发布版比同号正式版小**：`1.0.0-rc.1` < `1.0.0`
+       *   · 数字段按**数值**比（`10 > 9`，不能按字符串比）
+       * @returns {{ nums: number[], pre: string }}
+       */
+      const parseVer = (v) => {
+        const s = String(v || '').trim().replace(/^v/i, '')
+        const m = /^(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?/.exec(s)
+        if (!m) return null
+        return {
+          nums: m[1].split('.').map((x) => Number(x) || 0),
+          pre: m[2] || '',
+        }
+      }
+
+      /**
+       * 比版本：返回 1（a 更新）/ -1（b 更新）/ 0（相同）。
+       * ⚠️ 只做**够用**的那部分语义，不追求完整 semver：
+       *   本项目版本号形如 `0.1.4` / `0.1.5-rc.2`，够判断"谁更新"就行。
+       */
+      const cmpVer = (a, b) => {
+        const A = parseVer(a); const B = parseVer(b)
+        if (!A || !B) return 0
+        const n = Math.max(A.nums.length, B.nums.length)
+        for (let i = 0; i < n; i++) {
+          const x = A.nums[i] || 0; const y = B.nums[i] || 0
+          if (x !== y) return x > y ? 1 : -1
+        }
+        // 数字段一样 ⇒ 看预发布标记：**有预发布标记的更旧**
+        if (A.pre && !B.pre) return -1
+        if (!A.pre && B.pre) return 1
+        if (A.pre === B.pre) return 0
+        return A.pre > B.pre ? 1 : -1
+      }
+
+      /** 查一个 registry 的最新版本号（8 秒超时，与原来一致） */
+      const latestFrom = async (base) => {
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => ctrl.abort(), 8000)
+        try {
+          // ⚠️ scoped 包在 URL 里要 encode（`@a/b` → `@a%2Fb`），否则有的 registry 会 404
+          const url = `${base}/${encodeURIComponent(PKG_NAME)}/latest`
+          const r = await fetch(url, {
+            signal: ctrl.signal,
+            // ⚠️ npm registry 的全文响应有时挺大，但我们只要 `/latest` 这一小块
+            headers: { 'User-Agent': 'dsh-bili-scroll', Accept: 'application/json' },
+          })
+          if (!r.ok) {
+            const err = new Error('HTTP ' + r.status)
+            err.httpStatus = r.status
+            throw err
+          }
+          const j = await r.json()
+          return { version: String(j.version || '').trim(), url }
+        } finally { clearTimeout(timer) }
+      }
+
+      try {
+        /**
+         * ⭐ **先看缓存**（10 分钟内、且本地版本没变 ⇒ 直接回上一次结果）。
+         * ⚠️ key 必须带上**本地版本号**：改了 `package.json` 的 version 之后
+         *    缓存就该失效（否则"我刚升了版"还要等 10 分钟才认）。
+         */
+        const cacheKey = `${myVersion()}|npm`
+        if (updateCache && updateCache.key === cacheKey && Date.now() - updateCache.at < 10 * 60 * 1000) {
+          out.via = 'npm'
+          out.registry = updateCache.registry
+          out.latest = updateCache.latest
+          out.hasNew = updateCache.hasNew
+          out.direction = updateCache.direction
+          out.cached = true
+          return sendJson(res, 200, out)
+        }
+
+        /**
+         * 顺序：**先镜像、不通再官方**。
+         * ⚠️ 反过来（先官方）在国内会平白多等近 2 秒（实测 1860ms vs 55ms）。
+         * ⚠️ 两个都失败才报错，并且**说清都试过哪些**。
+         */
+        const tried = []
+        let got = null
+        for (const base of [REGISTRY_MIRROR, REGISTRY_OFFICIAL]) {
+          try {
+            got = await latestFrom(base)
+            got.base = base
+            break
+          } catch (e) {
+            tried.push({ base, error: e?.httpStatus ? 'HTTP ' + e.httpStatus : String(e?.name === 'AbortError' ? '超时 8 秒' : (e?.message ?? e)) })
+          }
+        }
+        if (!got) {
+          out.ok = false
+          out.errorKind = 'network'
+          out.tried = tried
+          out.error = '连不上 npm（镜像和官方都试过了）：'
+            + tried.map((t) => `${t.base.replace('https://', '')} ⇒ ${t.error}`).join('；')
+          log(`检查更新失败：${out.error}`)
+          return sendJson(res, 200, out)
+        }
+        out.via = 'npm'
+        out.registry = got.base
+        out.latest = got.version
+        const c = cmpVer(got.version, out.current)
+        out.hasNew = c > 0
+        // ⭐ 用文字说清方向（面板直接显示，不用再自己算）
+        out.direction = c > 0 ? 'ahead' : c < 0 ? 'behind' : 'identical'
+        if (c < 0) {
+          /**
+           * ⚠️ **本地版本号比 npm 上的还新** ⇒ 那是"本地改过、还没发版"。
+           * 这时**不能**谎报"有新版本"，也不能说"已是最新"（它明明比 npm 新）。
+           * 这正是使用者现在的状态（本地 0.1.4 + 一堆未发布改动）。
+           */
+          out.localAhead = true
+          out.note = `你本地是 ${out.current}，npm 上最新是 ${got.version} —— `
+            + '你比它新（大概是改过还没发版）。不算需要升级。'
+        }
+        // 只在**成功**时写缓存（失败别缓存，否则接下来 10 分钟都报同一个错）
+        updateCache = {
+          at: Date.now(), key: cacheKey, registry: got.base,
+          latest: out.latest, hasNew: out.hasNew, direction: out.direction,
+        }
+        return sendJson(res, 200, out)
+      } catch (e) {
+        /**
+         * 兜底：不该走到这里（上面的循环已经兜住网络错误），
+         * 但真走到了也要给一句**能指导下一步**的话，而不是裸 error.message。
+         */
+        out.ok = false
+        out.errorKind = 'unknown'
+        out.error = '检查更新时出错：' + String(e?.message ?? e)
+        log(out.error)
+        return sendJson(res, 200, out)
+      }
     }
 
+    /* ── 旧的「比对 GitHub commit」那条路已移除（2026-10-18）─────────────────
+     * 现在 `/update` 比的是 **npm 上的版本号**（走国内镜像，默认）。
+     * 旧实现留在这里会误导（`if (false && …)` 看着还像能用）⇒ 直接删掉。
+     * 真要恢复：git 历史里有（提交 1ebcb4b 那一版），但它有硬伤 ——
+     * 本地 commit 必须已经推到远端，否则 compare 直接 404
+     * （实测：领先 fork/main 16 个提交时必然 404）。
+     * ──────────────────────────────────────────────────────────────────── */
     // 「测一下」：真跑一次，回答"能不能用"
     if (req.method === 'POST' && path === '/api/bili-duty/check') {
       return sendJson(res, 200, await checkUp())
