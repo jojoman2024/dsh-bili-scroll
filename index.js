@@ -96,6 +96,20 @@ export const Config = !z ? undefined : z.object({
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
   mentionName: z.string().default('').extra('volatile', true),
+  /**
+   * ⭐⭐ **私信通知**（2026-10-18 加，使用者要求）。
+   *
+   * 「加发私信通知的功能吧，只需要一个开关，所用的设置与自动评论@一致，
+   *   就最多发几条，以及发给谁。」
+   *
+   * ⇒ **刻意复用** `commentPerRound`（最多发几条）与 `mentionName`（发给谁），
+   *   不新增字段 —— 使用者的原话就是"设置与自动评论一致"，
+   *   再多两个输入框只会让人不知道该填哪个。
+   *
+   * ⚠️ 但**开关是独立的**：私信和评论是两件事
+   *   （有人想只在视频下评论、不打扰对方；也有人只想私信、不发公开评论）。
+   */
+  dmNotify: z.boolean().default(false).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /**
@@ -335,6 +349,8 @@ export function apply(ctx, config) {
     freeformWatch: true, watchNote: '',
     commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     adminMode: false,
+    /** ⭐ 私信通知（2026-10-18）—— 复用 commentPerRound / mentionName，见 schema 里的注释 */
+    dmNotify: false,
     personaEnabled: true, personaMaxChars: 8000,
     llmProvider: '', llmModel: '', llmReasoningEffort: '',
   }
@@ -2281,6 +2297,33 @@ export function apply(ctx, config) {
         : '关着的（只写报告，别发评论）'}。`
       + `\n  ⚠️ **评论就是评论，保持简洁**（一两句、150 字内）—— `
       + `**别把上面那份笔记的内容搬进评论**：笔记是给人细读的，评论只是**叫他来看一眼**。\n`
+      /**
+       * ⭐⭐ **私信通知**（2026-10-18 加，使用者要求）。
+       *
+       * 「加发私信通知的功能吧，只需要一个开关，所用的设置与自动评论 @ 一致，
+       *   就最多发几条，以及发给谁。」
+       * ⇒ 条数用 `commentPerRound`、收件人用 `mentionName`，**不新增字段**。
+       *
+       * 🔴 **规范写在单独文档里，不硬注入**（使用者的要求：
+       *    「这个不用自动评论提示词，给个新的提示词文档，需要触发的时候，让AI去读私信的规范文档」）。
+       *
+       * ⇒ 与 `reply.md` 的做法**不同**（那个是整份塞进提示词）。这里只给：
+       *    · **条件**（开着 + 挑中了就发）
+       *    · **去哪读规范**（`<家>\dm.md`，用 `bilij_read`）
+       *   ⚠️ 为什么不硬注入：私信是**附加**功能，不是每轮都要做的事；
+       *      把几百字规矩塞进每轮提示词，会挤占真正重要的章程。
+       *   ⚠️ 但**必须给足触发条件**，否则模型不会想到去读它 —— 那就是白开开关。
+       */
+      + `私信通知是${cfg.dmNotify
+        ? '**开着**（每轮最多 '
+          + `${cfg.commentPerRound} 条，发给「${cfg.mentionName || '（还没填要 @ 谁）'}」）。`
+          + `\n  🔴 **这是命令**：只要挑中了至少一条，就**至少发一条**私信；`
+          + `唯一例外是本轮一条都没挑中。`
+          + `\n  📩 **发之前先读规矩**：用 \`bilij_read\` 读家目录的 \`dm.md\`（\`path\` 传 \`dm.md\`）—— `
+          + `里面写了怎么写（和评论不一样：私聊不 @ 他、必须带视频链接）、发几条、`
+          + `以及**怎么把昵称换成 uid**（发私信要数字，家目录 \`accounts.md\` 里有对照表）。`
+          + `\n  ⚠️ 别凭印象写私信 —— 那份文档里就是规矩，读完照着做。`
+        : '关着的（不发私信）'}。\n`
       // ⭐ 回复那段现在只留**一行开关 + 条数**（动态值），细则整份由 replyDoc 注入。
       //    ⚠️ 别把细则再抄回这里 —— 抄了就是两处维护，改一处忘一处。
       + (cfg.replyToComments
@@ -3765,7 +3808,7 @@ export function apply(ctx, config) {
         'commentPerRound', 'mentionName',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
-        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode',
+        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
