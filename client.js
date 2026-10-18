@@ -251,14 +251,20 @@ window.__ModuleLoader__.load({
  *   ⚠️ **display:none 不影响兄弟选择器**：它仍然按 DOM 相邻关系算，
  *   于是那条"第一个分节不画线"的规则**匹配不上**，线就露出来了。
  *
- * ⇒ 按 tab 点名去掉：这两个页**各自只有一个分节**，所以"第一个"就是"它自己"。
+ * ⇒ 按 tab 点名去掉：这几个页**各自只有一个分节**，所以"第一个"就是"它自己"。
  *    ⚠️ 同样**只去线、不动 padding**（理由见上一条注释）。
- *    ⚠️ 若以后这两页加了第二个分节，要把它改成"该 tab 的第一个分节"：
+ *    🔴 **2026-10-18 补上 lab（实验功能）** —— 加第四个 tab 时漏了这一页，
+ *       表现就是使用者说的"大标题上面多了 sub 上的一条灰线"。
+ *       ⇒ **新增 tab 时，只要它整页只有一个分节，就必须往这条规则里加一条**。
+ *       这类"漏一个 tab"原先没有守卫能查（工具只查"每个 tab 有没有切页规则"），
+ *       所以更容易漏 —— 现已补进 tools/check-client-css.mjs 的第四项检查。
+ *    ⚠️ 若以后这些页里加了第二个分节，要把它改成"该 tab 的第一个分节"：
  *       纯 CSS 表达不了"第一个可见的"（没有反向兄弟选择器），
  *       那时更稳的做法是渲染时给每个 tab 的首个分节打个标记属性。
  */
 [data-bd-page][data-bd-tab="prompt"] [data-bd-tabin="prompt"],
-[data-bd-page][data-bd-tab="env"] [data-bd-tabin="env"]{border-top:0;margin-top:0;padding-top:20px;}
+[data-bd-page][data-bd-tab="env"] [data-bd-tabin="env"],
+[data-bd-page][data-bd-tab="lab"] [data-bd-tabin="lab"]{border-top:0;margin-top:0;padding-top:20px;}
 
 /* ── 分节大标题 ──
    ⭐ **比正文大一号**（2026-10-16 使用者要求："所有大标题的字号都大一号"）。

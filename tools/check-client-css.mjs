@@ -118,6 +118,90 @@ if (tabsMatch) {
     process.exit(1)
   }
   console.log('  ✓ 切页规则覆盖了全部 ' + ids.length + ' 个 tab（' + ids.join(' / ') + '）')
+
+  /* ──────────────────────────────────────────────────────────────────────────
+   * 第四项检查：**每页的第一个分节都不能有上边线**
+   *
+   * 🔴 为什么需要它（2026-10-18 真机发现的）：
+   *   `[data-bd-sec]` 每个分节都画 border-top。而**页面里第一个分节**上面是顶栏
+   *   （顶栏自己已经有一条分隔线）⇒ 那个分节的上边线必须抵消掉。
+   *
+   *   加第四个 tab「实验功能」时**漏了 lab** ⇒ 使用者看到的就是
+   *   「大标题上面多了 sub 上的一条灰线」。⚠️ 这条**没有任何报错**，只能人眼看出来。
+   *
+   * 判据（2026-10-18 第二版，第一版是错的）：
+   *   ⚠️ **不能用"整页只有一个分节"当判据** —— `env` 页有 2 个分节
+   *      （「环境与账号」+ 后加的「后台跑要用哪个 dsh」），但它的**第一个**同样不能有上边线。
+   *   正确判据：对每个 tab，在 JSX 里找到**它自己的第一个分节**，
+   *   断言 CSS 里有一条"点它的名 + border-top:0"的规则。
+   *
+   * 怎么找"第一个"：按源码顺序扫 `'data-bd-tabin': '<id>'` 的出现位置，
+   *   每个 tab 取**最早那一处**所在的行号，再看那个分节声明里有没有更具体的标识
+   *   —— ⚠️ 这里有个现实约束：好几个分节长得一模一样（同样的标签），
+   *   纯文本没法可靠区分"哪一个是第一个"。
+   *   ⇒ 退化成一个**更保守、但足够准**的判据：
+   *      **每个 tab 都必须出现在那条"去首节上边线"的规则里**。
+   *      这条规则本来就该按 tab 全列一遍（现有 prompt/env/lab 三条），
+   *      多列一个不会有副作用 —— 因为被点名的那个 tab 里，只有"匹配到该选择器"的
+   *      元素才受影响，而选择器写的是 `[data-bd-tabin="<id>"]`（该页第一个分节用的正是这个名字）。
+   *      ⚠️ 但要排除 `settings`（它有多节，且首节由 `[data-bd-head]+[data-bd-sec]` 那条负责）。
+   * ────────────────────────────────────────────────────────────────────────── */
+  const jsx = lines.join('\n')
+  // 每页的标签名（按 TABS 顺序），settings 由顶栏相邻选择器负责，不在本条范围内
+  const needRule = ids.filter((id) => id !== 'settings')
+
+  /**
+   * 判断"某个 tab 有没有那条去上边线的规则"。
+   *
+   * 🔴 **这一段的正确性踩过三次，写清楚**：
+   *
+   *   这条规则是**多个选择器共用一块声明**：
+   *     [..tab="prompt"] [..tabin="prompt"],
+   *     [..tab="env"]    [..tabin="env"],
+   *     [..tab="lab"]    [..tabin="lab"]{border-top:0;...}
+   *
+   *   ❌ 第一版：`<选择器>[\s\S]{0,200}?\{border-top:0` —— 允许跨过任意内容找声明块
+   *      ⇒ 删掉 lab 时，prompt/env 仍能一路匹配到别的块，**假绿**。
+   *   ❌ 第二版：`<选择器>\s*(?:,[^{]*)?\{` —— `,[^{]*` 仍能跨过逗号 ⇒ 同样假绿。
+   *   ❌ 第三版：把整块按逗号拆开逐个比 —— **假红**：注释里也有 `[` `]`，
+   *      它们会被并进第一个选择器（`/* … [data-bd-head]+[data-bd-sec]`），
+   *      于是 `prompt` 那条永远比不中。
+   *
+   *   ✅ 现在：**先把注释整段剥掉**（`/* … *​/`），再切规则、按逗号拆、逐个精确比较。
+   *      注释剥掉之后，`[^{}]` 里的方括号就全是真选择器了。
+   */
+  const hasNoTopLine = (id) => {
+    const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const sel = `\\[data-bd-page\\]\\[data-bd-tab="${esc}"\\]\\s*\\[data-bd-tabin="${esc}"\\]`
+    /**
+     * ⚠️ **解析前先剥掉 CSS 注释** —— 注释里有 `[` `]`（例如提到某个属性选择器），
+     *    不剥的话它们会被并进相邻选择器，导致比较永远不中（第三版就栽在这里）。
+     */
+    const bare = cssBlock.replace(/\/\*[\s\S]*?\*\//g, ' ')
+    /**
+     * 找"一块以 `{...border-top:0...}` 结尾的规则"，把它的选择器部分取出来。
+     * `[^{}]*` 保证不会跨过一个块 —— 一处块只和它自己的选择器配对。
+     */
+    const ruleRe = /([^{}]+)\{([^{}]*)\}/g
+    let m
+    while ((m = ruleRe.exec(bare))) {
+      const [, selectors, decl] = m
+      if (!/border-top\s*:\s*0/.test(decl)) continue           // 不是"去上边线"的块
+      // 按逗号拆，逐个去空白后比较
+      const parts = selectors.split(',').map((s) => s.replace(/\s+/g, ' ').trim())
+      if (parts.some((p) => new RegExp('^' + sel + '$').test(p))) return true
+    }
+    return false
+  }
+
+  const noLineMissing = needRule.filter((id) => !hasNoTopLine(id))
+  if (noLineMissing.length) {
+    console.log('  ✗ 这些页没去掉「第一个分节」的上边线（大标题上方会多一条灰线）：' + noLineMissing.join(', '))
+    console.log('  ⇒ 修法：在「按 tab 点名去掉首节上边线」那条规则里补一条')
+    console.log('     [data-bd-page][data-bd-tab="<id>"] [data-bd-tabin="<id>"]')
+    process.exit(1)
+  }
+  console.log('  ✓ 各页首节灰线都已去掉（' + needRule.join(' / ') + '）')
 } else {
   console.log('  ⚠️ 没找到 `const TABS = [...]` —— 若面板结构变了，这项检查要跟着改')
 }
