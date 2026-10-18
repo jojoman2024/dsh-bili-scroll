@@ -105,12 +105,13 @@ export const Config = !z ? undefined : z.object({
    */
   keywordMode: z.string().default('llm').extra('volatile', true),
   /**
-   * ⭐⭐ **自由文本「关注什么」**（2026-10-18 加，实验功能开关控制）。
+   * ⭐⭐ **自由文本「关注什么」**（2026-10-18 加；**2026-10-18 晚改成默认开启**）。
    *
    * 使用者原话：「我希望能够有更大的自由度，用户就纯自然语言写一段话，
    *   也不需要考虑换行分隔，让模型自己去理解用户需要关注哪些东西，
    *   关注一件事还是多件事。另外，比如用户指定去关注某些账号的内容而不是主题的时候，
    *   模型也应该能够理解和区分。」
+   * 之后又定：「自由描述关注点的功能，应该是默认开启的。」
    *
    * ── 它与 `keywords` 的关系（**不是替代搜索，是换一种输入**）──────
    *   ⚠️ 这里最容易理解错：自由文本**不改变"怎么搜"** —— 仍然要靠模型自己组合出关键词
@@ -125,8 +126,15 @@ export const Config = !z ? undefined : z.object({
    *     · "大模型的论文，但不要入门教程那种"（带**排除条件**）
    *     · "最近在搞 RAG，相关的都看看"（带**背景**，模型能据此扩展）
    *   ⇒ 一段话能把这些都写进去，而一行一个只能写"搜索主题"。
+   *
+   * ── 为什么可以放心默认开启（兼容性）─────────────────────────
+   *   🔴 **老用户不会因此丢东西**：`kwLine` 里有一条兜底 ——
+   *      开关开着但 `watchNote` 为空时，**退回按旧 `keywords` 走**
+   *      （提示词原话："开了但还没写内容 ⇒ 先按他以前填的这些关注"）。
+   *   ⇒ 所以默认改成 true **只是"面板上默认展示哪种输入形态"**：
+   *      有自由文本就用它；没有就还是按老关键词。**行为不会突然变差。**
    */
-  freeformWatch: z.boolean().default(false).extra('volatile', true),
+  freeformWatch: z.boolean().default(true).extra('volatile', true),
   /**
    * ⭐ 自由文本正文（`freeformWatch` 开着时才生效）。
    *
@@ -318,7 +326,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
-    freeformWatch: false, watchNote: '',
+    freeformWatch: true, watchNote: '',
     commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     adminMode: false,
     personaEnabled: true, personaMaxChars: 8000,
