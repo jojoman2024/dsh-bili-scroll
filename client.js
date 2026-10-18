@@ -819,6 +819,65 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
+
+      /* ⭐⭐ **所有浮现式提示的统一入口 —— 一律会自己消失**（2026-10-18 修）。
+       *
+       * 🔴 修的是什么 bug（使用者截图报的）：
+       *   点「现在跑一轮」→ 前台跳过去 → 回到发起那一轮 ⇒
+       *   那条「已建前台会话（…），正在跳过去…」**一直挂在屏幕上不走**。
+       *
+       * 根因：提示有**两条互不相干的写入路径** ——
+       *   · `say(...)`        ⇒ 带 `setTimeout` 自动清掉（2.6s / 6s）；
+       *   · `setRunNote(...)` ⇒ **直接 set，没有任何定时器** ⇒ 永不消失。
+       *   而"正在跳过去…"和另外 9 处（目录选择、跳转失败…）走的都是后者。
+       *
+       * ⚠️ **修法不是"给那 10 处各补一个定时器"** —— 那样以后新加一处又忘。
+       *    ⇒ 把自动清理**收进唯一的写入函数**：`note()` 只管显示+计时，
+       *      `say()` 变成它的一层薄包装（保留原来的"量面板/量屏幕"定位）。
+       *      并且**把 `setRunNote` 从 render 作用域里"私有化"**：本文件其余地方
+       *      一律用 `note()` / `say()`；只有 `note` 自己碰 state。
+       *
+       * ⚠️ 计时器存进 ref，**新提示要清掉旧的** ——
+       *    否则连续保存两次时，第一条的定时器会把第二条提前收走。
+       */
+      const toastTimer = React.useRef(null)
+      const toastBox = React.useRef(null)
+
+      /**
+       * 显示一条提示，**到期自动消失**（这是唯一该被别处调用的入口之一）。
+       * @param {string} text  正文；传空 = 立刻清掉
+       * @param {string} tone  '' | 'good' | 'warn'（warn 留久一点，要看清）
+       * @param {object} [style] 定位样式（只有 say() 会传；不传就用 CSS 默认）
+       */
+      const note = (text, tone, style) => {
+        if (!text) { setRunNote(null); return }
+        // ⚠️ 每次覆盖前先清旧计时器（见上面那条注释）
+        if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null }
+        setRunNote({ t: String(text), tone: tone || '', style: style || null })
+        // 错误提示留久一点（要看清），成功提示 2.6s 够读
+        const ms = (tone === 'warn' ? 6000 : 2600)
+        toastTimer.current = setTimeout(() => { setRunNote(null); toastTimer.current = null }, ms)
+      }
+
+      const say = (text, tone) => {
+        if (!text) { note(''); return }
+        // ⭐ 横向量面板、纵量屏幕（两把尺子，见 say 上面那段长注释）
+        let style = null
+        try {
+          const el = toastBox.current?.closest('[data-bd-tabwrap]') || document.querySelector('[data-bd-tabwrap]')
+          const r = el?.getBoundingClientRect()
+          if (r && r.width > 0) {
+            style = {
+              left: Math.round(r.left + r.width / 2) + 'px',
+              // 距屏幕底部 1/3 屏高 ⇒ 屏幕从上往下 2/3 的位置
+              top: Math.round(window.innerHeight * (2 / 3)) + 'px',
+            }
+          }
+        } catch { /* 量不到就用 CSS 默认（视口居中偏下） */ }
+        note(text, tone, style)
+      }
+      // 组件卸载时清掉定时器（不清的话，卸载后 setState 会报警告）
+      React.useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
       // （旧的「报告展开态」已删 —— 日报不写了，见下面的产物清单）底下，看不见）
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
@@ -956,32 +1015,11 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
        *
        * ⚠️ 计时器存进 ref，**新提示要清掉旧的** ——
        *    否则连续保存两次时，第一条的定时器会把第二条提前收走。
+       *
+       * ⭐ **2026-10-18：这段逻辑已经搬到文件更上面的 `note()` / `say()`**
+       *    （因为原来有两条写入路径，而只有 `say` 带定时器 ⇒ 另一条会一直留在屏幕上）。
+       *    ⚠️ 这里只保留坐标说明；**不要**再在这里写一份实现。
        */
-      const toastTimer = React.useRef(null)
-      const toastBox = React.useRef(null)
-      const say = (text, tone) => {
-        if (!text) { setRunNote(null); return }
-        // ⭐ 横向量面板、纵向量屏幕（两把尺子，见上面的注释）
-        let style = null
-        try {
-          const el = toastBox.current?.closest('[data-bd-tabwrap]') || document.querySelector('[data-bd-tabwrap]')
-          const r = el?.getBoundingClientRect()
-          if (r && r.width > 0) {
-            style = {
-              left: Math.round(r.left + r.width / 2) + 'px',
-              // 距屏幕底部 1/3 屏高 ⇒ 屏幕从上往下 2/3 的位置
-              top: Math.round(window.innerHeight * (2 / 3)) + 'px',
-            }
-          }
-        } catch { /* 量不到就用 CSS 默认（视口居中偏下） */ }
-        setRunNote({ t: text, tone: tone || '', style })
-        if (toastTimer.current) { clearTimeout(toastTimer.current); toastTimer.current = null }
-        // 错误提示留久一点（要看清），成功提示 2.6s 够读
-        const ms = (tone === 'warn' ? 6000 : 2600)
-        toastTimer.current = setTimeout(() => { setRunNote(null); toastTimer.current = null }, ms)
-      }
-      // 组件卸载时清掉定时器（不清的话，卸载后 setState 会报警告）
-      React.useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
 
       const patch = async (p, what) => {
         setBusy(JSON.stringify(p))
@@ -1117,18 +1155,18 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
             // ⚠️ 优先显示 `hint`（下一步做什么），而不是 `error`（一句话结论）——
             //    用户需要的是"我该点哪儿"，不是"它失败了"。
             const why = r?.hint || r?.error || '没起来，看日志'
-            setRunNote({ tone: 'warn', t: why })
+            note(why, 'warn')
             return
           }
           if (r.mode === 'front') {
             // ⭐ 前台：会话已经建好了。**直接跳过去**，你就能看着它跑
             //    （这正是前台模式的意义 —— 后台那轮你看不见）。
-            setRunNote({ tone: 'good', t: `已建前台会话（${r.sessionId || ''}），正在跳过去…` })
+            note(`已建前台会话（${r.sessionId || ''}），正在跳过去…`, 'good')
             const openSession = resolveOpenSession()   // 点击时才取服务
             if (openSession && r.sessionId) {
-              try { openSession(r.sessionId) } catch (e) { setRunNote({ tone: 'warn', t: `会话建好了，但跳转失败：${String(e?.message ?? e)}` }) }
+              try { openSession(r.sessionId) } catch (e) { note(`会话建好了，但跳转失败：${String(e?.message ?? e)}`, 'warn') }
             } else if (r.sessionId) {
-              setRunNote({ tone: 'warn', t: `会话建好了（${r.sessionId}），但这个环境拿不到跳转能力 —— 去左侧会话列表里找「刷B站 …」` })
+              note(`会话建好了（${r.sessionId}），但这个环境拿不到跳转能力 —— 去左侧会话列表里找「刷B站 …」`, 'warn')
             }
           } else {
             // ⚠️ 文案要说**真正的产物目录**（2026-10-16 修）。
@@ -1398,15 +1436,15 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                   h('button', {
                     'data-bd-btn': '', disabled: wsBusy,
                     onClick: async () => {
-                      if (!doPickDirectory) { setRunNote({ tone: 'warn', t: '这个环境拿不到目录选择器（缺 uiWorkspace 服务）' }); return }
+                      if (!doPickDirectory) { note('这个环境拿不到目录选择器（缺 uiWorkspace 服务）', 'warn'); return }
                       setWsBusy(true)
                       try {
                         const picked = await doPickDirectory()
                         if (picked === null) return              // 用户取消
                         await patch({ frontWorkspace: picked }, '会话目录')
                         setWsPath(picked)
-                        setRunNote({ tone: 'good', t: `会话目录已设为：${picked}` })
-                      } catch (e) { setRunNote({ tone: 'warn', t: String(e?.message ?? e) }) }
+                        note(`会话目录已设为：${picked}`, 'good')
+                      } catch (e) { note(String(e?.message ?? e), 'warn') }
                       finally { setWsBusy(false) }
                     },
                   }, wsBusy ? '正在选…' : (cfg.frontWorkspace ? '改目录' : '选择目录')),
@@ -1415,8 +1453,8 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                         'data-bd-btn': '', disabled: wsBusy,
                         onClick: async () => {
                           setWsBusy(true)
-                          try { await patch({ frontWorkspace: '' }, '会话目录'); setWsPath(''); setRunNote({ tone: 'good', t: '已改回默认目录' }) }
-                          catch (e) { setRunNote({ tone: 'warn', t: String(e?.message ?? e) }) }
+                          try { await patch({ frontWorkspace: '' }, '会话目录'); setWsPath(''); note('已改回默认目录', 'good') }
+                          catch (e) { note(String(e?.message ?? e), 'warn') }
                           finally { setWsBusy(false) }
                         },
                       }, '用默认')
@@ -1429,8 +1467,8 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                         'data-bd-btn': '',
                         onClick: () => {
                           const openSession = resolveOpenSession()
-                          if (!openSession) { setRunNote({ tone: 'warn', t: '这个环境拿不到跳转能力（缺 uiWorkspace 服务）' }); return }
-                          try { openSession(st.lastFrontSessionId) } catch (e) { setRunNote({ tone: 'warn', t: `跳转失败：${String(e?.message ?? e)}` }) }
+                          if (!openSession) { note('这个环境拿不到跳转能力（缺 uiWorkspace 服务）', 'warn'); return }
+                          try { openSession(st.lastFrontSessionId) } catch (e) { note(`跳转失败：${String(e?.message ?? e)}`, 'warn') }
                         },
                       }, '去到那个会话'))
                   : null)
