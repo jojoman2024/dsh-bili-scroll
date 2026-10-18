@@ -725,7 +725,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
           ? h(Field, {
             label: '关注什么（随便写，一段话就行）',
             note: '不用分行、不用列点。模型会自己读懂你要关注几件事、每件是什么。'
-              + '也能写「顺便看看闲人JOJO UP 主」「不要入门教程那种」「最近在搞 RAG」这类 —— '
+              + '也能写「顺便看看某位 UP 主」「不要入门教程那种」「最近在搞 RAG」这类 —— '
               + '账号和主题它会分开处理。',
             stack: true,
             children: h('textarea', {
