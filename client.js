@@ -703,13 +703,13 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
           ? h(Field, {
             label: '关注什么（随便写，一段话就行）',
             note: '不用分行、不用列点。模型会自己读懂你要关注几件事、每件是什么。'
-              + '也能写「顺便看看某某 UP 主」「不要入门教程那种」「最近在搞 RAG」这类 —— '
+              + '也能写「顺便看看闲人JOJO UP 主」「不要入门教程那种」「最近在搞 RAG」这类 —— '
               + '账号和主题它会分开处理。',
             stack: true,
             children: h('textarea', {
               'data-bd-input': '', rows: 6,
               placeholder: '例：\n最近在看大模型相关的论文解读和工程实践，特别是 RAG 和多智能体。\n'
-                + '顺便关注一下「某某」这个 UP 主的更新。\n入门教程那种就别给我了。',
+                + '顺便关注一下「闲人JOJO」这个 UP 主的更新。\n入门教程那种就别给我了。',
               value: ui.watchDraft ?? '',
               onChange: (e) => ui.setWatchDraft(e.target.value),
               onBlur: ui.onSaveWatch,
