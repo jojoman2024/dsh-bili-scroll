@@ -1823,23 +1823,6 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               }),
             })) : null,
 
-          h(ToggleRow, {
-            label: '回复评论（只回楼中楼）',
-            note: '只回「直接回复到你那条评论下面的人」，不参与讨论',
-            on: sw('replyToComments'),
-            onChange: (v) => patch({ replyToComments: v }, '回复评论'),
-          }),
-          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多回几条')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1,
-                value: replyPer ?? '',
-                onChange: (e) => setReplyPer(e.target.value),
-                onBlur: () => { const n = Math.max(1, Number(replyPer) || 1); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
-              }))) : null),
-
           /**
            * ⭐⭐ **私信通知**（2026-10-18 加，使用者要求）。
            *
@@ -1875,6 +1858,23 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
             on: sw('dmNotify'),
             onChange: (v) => patch({ dmNotify: v }, '私信通知'),
           }) : null,
+
+          h(ToggleRow, {
+            label: '回复评论（只回楼中楼）',
+            note: '只回「直接回复到你那条评论下面的人」，不参与讨论',
+            on: sw('replyToComments'),
+            onChange: (v) => patch({ replyToComments: v }, '回复评论'),
+          }),
+          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每轮最多回几条')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1,
+                value: replyPer ?? '',
+                onChange: (e) => setReplyPer(e.target.value),
+                onBlur: () => { const n = Math.max(1, Number(replyPer) || 1); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
+              }))) : null),
 
         /* ════════ 五、怎么读（本地转写 —— 从「说不说话」里搬出来：这是"读"的事）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
