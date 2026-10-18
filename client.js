@@ -1152,6 +1152,18 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 
       const onUpgrade = async () => {
         setBusy('upgrade')
+        /**
+         * ⭐⭐ **升级时把面板切到「环境与账号」页**（2026-10-18 使用者提，这里做双保险）。
+         *
+         * 为什么：升级是**异步**的，过程写进 `<家>\install.log`，
+         * 而那段日志就在「环境与账号」页。**不跳的话用户点完什么都看不见**
+         * ⇒ 以为按钮没反应。
+         *
+         * ⚠️ 弹窗里的「直接升级」已经会 `setTab('env')`；这里再切一次是因为
+         *   「环境与账号」页上也有一个「一键升级」按钮 —— 从那里点同样应该停在那一页。
+         *   （重复 `setTab('env')` 是幂等的，没有副作用。）
+         */
+        setTab('env')
         try {
           const r = await jpost('/upgrade', {})
           say((r && r.hint) || '正在升级', 'good')
@@ -1982,7 +1994,18 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                 }, showChangelog?.text ? '已显示在下面' : '查看更新内容'),
                 h('button', {
                   'data-bd-btn': '',
-                  onClick: () => { setShowUpdateDlg(false); setShowChangelog(null); onUpgrade() },
+                  /**
+                   * ⭐⭐ **点「直接升级」后要跳到「环境与账号」页**（2026-10-18 使用者提）。
+                   *
+                   * 为什么：升级是**异步**的，它把过程写进 `<家>\install.log`，
+                   * 而那段滚动的日志**就在「环境与账号」页**。
+                   * 不跳的话，用户点完只看到弹窗关了 -> **什么都看不见**
+                   * ⇒ 以为按钮没反应（这正是"好像也没升级"那类误解的来源之一）。
+                   *
+                   * ⚠️ 顺序：**先关弹窗 -> 切页 -> 再触发升级**。
+                   *    先切页后关弹窗的话，弹窗会盖在新页面上，看着像"没反应"。
+                   */
+                  onClick: () => { setShowUpdateDlg(false); setShowChangelog(null); setTab('env'); onUpgrade() },
                 }, '直接升级')))) : null,
         /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },

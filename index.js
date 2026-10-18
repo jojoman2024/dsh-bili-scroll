@@ -3663,8 +3663,21 @@ export function apply(ctx, config) {
       asrLog: asrLogFile,
       asrTail: (() => { try { return readFileSync(asrLogFile, 'utf8').slice(-1400) } catch { return '' } })(),
       installLog: installLogFile,
-      // ⭐ 让设置页能显示"装到哪了"（陌生人原来只看到一句"后台在装" ✗）
-      installTail: (() => { try { return readFileSync(installLogFile, 'utf8').slice(-1400) } catch { return '' } })(),
+      /**
+       * ⭐ 让设置页能显示"装到哪了"（陌生人原来只看到一句"后台在装" ✗）
+       *
+       * ⚠️ **升级时给更长的尾巴**（2026-10-18 加）。
+       *    为什么：pnpm 装一个包会打几十行（依赖树 + 进度），
+       *    1400 字符只够末尾一小段 ⇒ **"判断当前 profile：…"和"zip 的报错"这些关键行
+       *    会被冲掉**，使用者点完「直接升级」跳过去，只看到一堆 `+ xxx==1.2.3`。
+       *    ⇒ `upgrading` 期间放到 4000（那几十行也够了，又不会把面板撑爆）。
+       */
+      installTail: (() => {
+        try {
+          const all = readFileSync(installLogFile, 'utf8')
+          return all.slice(-(upgrading ? 4000 : 1400))
+        } catch { return '' }
+      })(),
       report: join(outDir, `${today}.md`),
       log: logFile,
       // 判重表条数（设置页要显示"已经记了多少个视频"）
