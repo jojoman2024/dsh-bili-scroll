@@ -3302,6 +3302,43 @@ export function apply(ctx, config) {
       return A.pre > B.pre ? 1 : -1
     }
 
+    /**
+     * 查一个 registry 的最新版本号（8 秒超时，与原来一致）。
+     *
+     * 🔴 **2026-10-18 补一层：`/latest` 这个缓存键会比包本身慢很多**（实测踩到）。
+     *    发完 0.1.6 之后：
+     *      · `registry.npmjs.org/…/latest`      ⇒ **0.1.6** ✓
+     *      · `r.cnpmjs.org/…`（镜像个源站）      ⇒ **0.1.6** ✓
+     *      · `registry.npmmirror.com/…/0.1.6`   ⇒ **200，包在** ✓
+     *      · `registry.npmmirror.com/…/latest`  ⇒ **仍是 0.1.5**（CDN 缓存）✗
+     *    ⇒ 用户走「检查更新 / 一键升级」（都读 `/latest`）就**查不到新版**，
+     *      而且这种"卡住"能持续几十分钟。
+     *
+     *    ⇒ 所以：`/latest` 报出来的版本**不比自己新**时，再拉一次**全量 metadata**
+     *      看 `versions` 里有没有比本地更大的 —— 有就说明"正式发了、只是 latest 缓存没跟上"。
+     *
+     * ⚠️ 代价：那条请求大一些（实测该包全量约 35KB）。所以**只在"看起来没新版"时**才发，
+     *    有新版时完全不走这条路（大多数情况省掉）。
+     * ⚠️ 全量也失败 ⇒ **静默回退到 `/latest` 的结论**（别让补强本身变成新的失败点）。
+     */
+    const versionsFrom = async (base) => {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 8000)
+      try {
+        const url = `${base}/${encodeURIComponent(PKG_NAME)}`
+        const r = await fetch(url, {
+          signal: ctrl.signal,
+          headers: { 'User-Agent': 'dsh-bili-scroll', Accept: 'application/json' },
+        })
+        if (!r.ok) return null
+        const j = await r.json()
+        const list = Object.keys(j?.versions || {})
+        return list.length ? { versions: list, url, tags: j['dist-tags'] || {} } : null
+      } catch {
+        return null
+      } finally { clearTimeout(timer) }
+    }
+
     /** 查一个 registry 的最新版本号（8 秒超时，与原来一致） */
     const latestFrom = async (base) => {
       const ctrl = new AbortController()
@@ -3369,7 +3406,29 @@ export function apply(ctx, config) {
       out.via = 'npm'
       out.registry = got.base
       out.latest = got.version
-      const c = cmpVer(got.version, out.current)
+      let c = cmpVer(got.version, out.current)
+
+      /**
+       * 🔴 **`/latest` 的缓存可能落后于实际发布的版本**（2026-10-18 实测）。
+       *    只在"看起来没有新版"时才补查**全量 metadata** 的 `versions` 列表；
+       *    有新版时完全不走这条路（省掉那条 35KB 的请求）。
+       *    ⚠️ 补查失败就**静默保留原结论** —— 补强不能变成新的失败点。
+       */
+      if (c <= 0) {
+        const full = await versionsFrom(got.base)
+        if (full) {
+          // 从 versions 里挑**比本地新**的最大者（不能用 dist-tag，它也是缓存的）
+          let best = ''
+          for (const v of full.versions) if (cmpVer(v, out.current) > 0 && (!best || cmpVer(v, best) > 0)) best = v
+          if (best && cmpVer(best, got.version) > 0) {
+            out.latest = best
+            out.latestTagStale = got.version   // ← 让面板/日志能说清"latest 标签是旧的"
+            c = cmpVer(best, out.current)
+            log(`npm 的 latest 标签还是 ${got.version}，但 versions 里已经有 ${best} ⇒ 按 ${best} 算（镜像缓存未刷新）`)
+          }
+        }
+      }
+
       out.hasNew = c > 0
       // ⭐ 用文字说清方向（面板直接显示，不用再自己算）
       out.direction = c > 0 ? 'ahead' : c < 0 ? 'behind' : 'identical'
