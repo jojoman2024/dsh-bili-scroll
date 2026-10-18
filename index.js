@@ -2603,6 +2603,44 @@ export function apply(ctx, config) {
     const lines = []
 
     /**
+     * 🔴🔴 **0. 放行凭证服务**（2026-10-19 加，对应上游 `2e3d66f` / 0.1.8）。
+     *
+     * ── 症状（使用者实测，桌面版）──────────────────────────
+     *   `dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route
+     *    "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service
+     *    (the web Models page writes it), or export DEEPSEEK_API_KEY in the launching
+     *    environment`
+     *   ⇒ 后台那轮**用不了账号模型**，直接失败。
+     *
+     * ── 根因（读 dsh 自己的 patch 确认，不是猜）──────────────
+     *   桌面版里 `@deepseek-ai/dsh-headless@0.2.1-rc.2` 的 `cordis.patch.yml` 明确写着：
+     *     ```
+     *     # One-shot jobs use launch-time credentials instead of the interactive store.
+     *     - id: credentials
+     *       disabled: true
+     *     - id: authorization
+     *       disabled: true
+     *     - id: deepseek-account
+     *       disabled: true
+     *     ```
+     *   它的设计意图是「一次性任务用**启动时**的凭证（环境变量）」——
+     *   而使用者的 key 存在**凭证库**里（Models 页写的）⇒ **读不到**。
+     *   ⚠️ 0.2.0 时代没有这三条禁用 ⇒ 以前不炸；升到 0.2.1-rc.2 才开始炸。
+     *
+     * ── 为什么在 overlay 里放行是对的 ──────────────────────
+     *   overlay 是**最后**叠加的一层（bundle → profile → `--patch`）
+     *   ⇒ 在这里 `disabled: false` 能盖住 headless bundle 里那条 `disabled: true`。
+     *   ⭐ 用户**什么都不用配**（不用去设 DEEPSEEK_API_KEY 环境变量）。
+     *
+     * ⚠️ 老版本 DSH 没有这些 id 时，会把未知条目当无事发生，**不会因此起不来**
+     *    —— 所以这三条**无条件写**，不用判版本。
+     * ⚠️ 这是上游的修法，我照抄了思路（并核过它那段 patch 的原文）。
+     */
+    for (const id of ['credentials', 'authorization', 'deepseek-account']) {
+      lines.push(`- id: ${id}`, '  disabled: false', '')
+    }
+
+    /**
      * ① B站 MCP（受 overlayMcp 开关控制）
      *
      * 🔴 **2026-10-18 改：环境没装好就【不写】这一段**。
@@ -3085,7 +3123,31 @@ export function apply(ctx, config) {
      *    （只留最后 2000 字符 —— 够看清 traceback 的末尾，又不会把日志撑爆。）
      */
     let stderrTail = ''
-    const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
+    /**
+     * 🔴🔴 **写日志失败绝不能杀掉宿主**（2026-10-19 修，对应上游 `5485360` 的 issue #1）。
+     *
+     * 症状（上游用户实测）：Windows 上 `duty.log` 被占用时
+     * （日志被别的程序打开、杀软扫描、或上一次的句柄没释放）⇒ `appendFileSync` 抛 `EBUSY`
+     * ⇒ 这个异常发生在 **`data` 事件回调里**，没有任何 try/catch 接得住
+     * ⇒ **整个 dsh 宿主进程直接崩掉**（不只是这一轮失败，是整个应用没了）。
+     *
+     * ⭐ 修法：把写日志包成"尽力而为"。
+     *   ⚠️ 这里**必须 catch 住并吞掉** —— 日志写不进去是可惜，但
+     *      "因为写不进日志而把宿主搞崩"是完全不能接受的失败方式。
+     *   ⚠️ 顺带统计一下丢了多远：`logDropped` 会写进状态，面板/日志能看出"这段时间没记上"。
+     */
+    let logDropped = 0
+    const pick = (buf) => {
+      try {
+        appendFileSync(logFile, String(buf), 'utf8')
+      } catch {
+        /**
+         * ⚠️ **不要在 catch 里再写日志**（那可能同样失败，形成循环）。
+         *    只累加计数，让调用方在安全的地方（退出时）说一句。
+         */
+        logDropped++
+      }
+    }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', (buf) => {
       pick(buf)
@@ -3131,6 +3193,17 @@ export function apply(ctx, config) {
         } else {
           log(`刷B站这一轮【失败】了（exit ${code}），但子进程没往 stderr 写任何东西 —— 这种情况通常是它被外部杀掉，或者 stdin 没喂进去`)
         }
+      }
+      /**
+       * ⭐ **有日志没写进去就单独说一句**（2026-10-19 加）。
+       *
+       * 为什么：`pick` 里把写日志的异常吞掉了（否则会崩宿主），
+       * 但"吞掉"不能等于"当没发生过" —— 否则这一轮的日志**看起来是完整的，其实缺了一截**，
+       * 下次排查时会被误导（"日志里没报错啊"）。
+       */
+      if (logDropped > 0) {
+        log(`⚠️ 这一轮有 ${logDropped} 次日志没能写进 ${logFile}（文件被占用/磁盘问题），`
+          + '所以下面的记录可能**缺了片段**。不影响这一轮本身的结果。')
       }
       activeHeadless = null
       // ⚠️ 只在**还是这一轮**的时候删文件 —— 免得把刚起的新一轮的记录误删
