@@ -898,6 +898,17 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
+      /**
+       * 🥚 **彩蛋用：记住「每条最多发几条」在**输入暗号之前**那个合法值**（2026-10-18）。
+       *
+       * 为什么不能用 `1` 兜底（第一版就是这么写的，被使用者指出来）：
+       *   5299 只是暗号，不该覆盖使用者原来的设置 ——
+       *   他原本填 3，输完暗号就该还是 3，而**不是**被我改成 1。
+       *
+       * ⚠️ 用 ref 而不是 state：它只是"记一下上次的值"，不参与渲染，
+       *    用 state 反而会多一次重渲染、也更容易和 5 秒轮询打架。
+       */
+      const perRoundBeforeEgg = React.useRef(null)
       const [replyPer, setReplyPer] = React.useState(null)
       // ⭐ dsh 启动器路径的草稿（2026-10-17 加）。
       //    ⚠️ 与其它输入框同理：**不能让 5 秒轮询直接绑 cfg**，否则你打字打到一半会被冲掉。
@@ -1775,16 +1786,28 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
                 onBlur: () => {
                   const raw = String(perRound ?? '').trim()
                   if (raw === '5299' && !cfg.dmUnlocked) {
+                    /**
+                     * ⭐ 还原成**输入暗号之前那个值**（不是写死 1）。
+                     *    使用者的原话：「输入完 5299 之后，commentPerRound
+                     *    应该回归输入之前的设定才对。」
+                     *    ⇒ 他原本填 3，输完暗号就该还是 3。
+                     *    ⚠️ 兜底顺序：ref 记的 → 盘上 cfg 的 → 最后才 1。
+                     *        （ref 可能是 null：比如页面刚开、还没离开过这个输入框。）
+                     */
+                    const prevRaw = perRoundBeforeEgg.current ?? cfg.commentPerRound
+                    const prev = Math.max(1, Number(prevRaw) || 1)
                     // ① 解锁（持久化在 config.json，换浏览器也在）
                     patch({ dmUnlocked: true }, '私信通知')
-                    // ② 把暗号从"条数"里清掉，别让它变成真的发送上限
-                    setPerRound('1')
-                    patch({ commentPerRound: 1 }, '每轮几条评论')
+                    // ② 把暗号从"条数"里清掉，还原成输入前的值
+                    setPerRound(String(prev))
+                    patch({ commentPerRound: prev }, '每轮几条评论')
                     note('已解锁「私信通知」—— 往下翻，在「说不说话」最下面', 'good')
                     return
                   }
                   const n = Math.max(1, Number(perRound) || 1)
                   setPerRound(String(n))
+                  // ⭐ 记下"这次合法值"，供暗号命中时还原
+                  perRoundBeforeEgg.current = n
                   patch({ commentPerRound: n }, '每轮几条评论')
                 },
               })),
@@ -1839,8 +1862,7 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
               + '⚠️ 和评论不一样：私信是「私聊」（只有你看到），正文里不会再 @ 你。'
               + '\n条数与收件人「沿用上面『自动评论并 @ 你』那两项」 —— '
               + '所以那个开关关着时，这里的「最多几条」和「发给谁」同样生效。'
-              + '\n⚠️ 默认关；开关是独立的（可以只私信、不发公开评论，反之亦然）。'
-              + '具体怎么写由家目录的 dm.md 规定，模型发之前会先读它。',
+              + '\n⚠️ 默认关；开关是独立的（可以只私信、不发公开评论，反之亦然）。',
             on: sw('dmNotify'),
             onChange: (v) => patch({ dmNotify: v }, '私信通知'),
           }) : null,
