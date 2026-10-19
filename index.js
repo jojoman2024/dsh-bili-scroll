@@ -1962,7 +1962,7 @@ export function apply(ctx, config) {
   // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add <我们的包>`
   //    ⚠️ 装完必须重启 dsh 才生效；⚠️ Windows 上"替换正在运行的插件"可能被文件占用挡住（我们踩过）
   let upgrading = false
-  const runUpgrade = () => {
+  const runUpgrade = (opts) => {
     if (upgrading) return { ok: true, busy: true, log: installLogFile, hint: '正在升级，别重复点' }
     upgrading = true
     // 🔴 **必须装我们自己的包**，不能是上游那个同名的 `dsh-bili-scroll`
@@ -1971,8 +1971,31 @@ export function apply(ctx, config) {
     //    · npm 走 registry（国内有 npmmirror 兜底），**不需要能连 GitHub** ——
     //      而 `github:` 那条路要 git 到 github.com:443，本机实测是**直连失败的**；
     //    · 与 `/update`（查 GitHub 上 jojoman2024/dsh-bili-scroll 的 commit）配套。
-    const SPEC = PKG_NAME
+    /**
+     * 🔴🔴 **必须带明确版本号**（2026-10-19 实测）。
+     *
+     * 只写包名时 pnpm 会输出 `Already up to date` —— 因为 profile 的
+     * `package.json` 里记的是**精确版本**（`"@jojoman2024/dsh-bili-scroll": "0.1.7"`），
+     * `pnpm add <包名>` 一看"这个名字已经在依赖里了"就跳过，**根本不看有没有新版**。
+     * ⇒ 用户点升级 → 显示成功 → 版本没变（这一版之前就是这个坑）。
+     *
+     * ⭐ 实测带上版本号才真升：
+     *     `add @jojoman2024/dsh-bili-scroll@0.1.8`
+     *       - @jojoman2024/dsh-bili-scroll 0.1.7
+     *       + @jojoman2024/dsh-bili-scroll 0.1.8
+     *
+     * ⚠️ 版本从哪来：面板点升级时会把 `/update` 查到的 `latest` 传进来
+     *    （`opts.version`）。拿不到就**退回裸包名**（老行为，至少不会更差），
+     *    并在日志里说明"没拿到目标版本号，可能装不上新版"。
+     */
+    const wantVer = String((typeof opts === 'object' && opts && opts.version) || '').trim()
+    const SPEC = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(wantVer)
+      ? `${PKG_NAME}@${wantVer}`
+      : PKG_NAME
     appendInstall('\n=== ' + new Date().toISOString() + ' 开始升级（add ' + SPEC + '）===\n')
+    if (SPEC === PKG_NAME) {
+      appendInstall('⚠️ 没拿到目标版本号 ⇒ 只按包名装；pnpm 可能回 "Already up to date" 而什么都没换。\n')
+    }
     ;(async () => {
       try {
         const dsh = resolveDsh()
@@ -2045,9 +2068,74 @@ export function apply(ctx, config) {
         }
         const prof = detectProfile()
         appendInstall(`判断当前 profile：${prof.name}（来自${prof.via}）\n`)
+        /**
+         * 🔴🔴 **桌面版必须换一个入口，否则必失败**（2026-10-19，使用者实测）。
+         *
+         * ── 症状 ────────────────────────────────────────────
+         *   在桌面版点「一键升级」⇒
+         *     `error: profile "desktop" is managed exclusively by the Electron application`
+         *   ⇒ 而面板给的"手动重试"命令是 `dsh plugin --profile desktop add …`，
+         *     **那条同样会被拒**（就是同一个限制）⇒ 使用者被引到死路上。
+         *
+         * ── 根因（读 DSH 源码确认）────────────────────────────
+         *   `dsh/lib/bin.js` 里：
+         *     ```js
+         *     function rejectElectronProfile(program, profile) {
+         *       if (profile.toLowerCase() === 'desktop') program.error('… managed exclusively …')
+         *     }
+         *     …
+         *     if (!manageDesktopProfile) rejectElectronProfile(plugin, options.profile)
+         *     ```
+         *   ⇒ **只要 `manageDesktopProfile=true` 就完全跳过这个检查**。
+         *   而桌面版**自带**这样一个入口：
+         *     `<resources>\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js`
+         *   （`runtime\cli\bin\dsh.cmd` 调的就是它，传 `manageDesktopProfile: true`）。
+         *   ⭐ 它**不是 hack** —— 那是桌面版自己的插件管理通道，
+         *     应用内「安装第三方插件」跑的就是它（`.plugin-manager\logs\operation-*\pnpm.log`
+         *     里能看到它执行 `pnpm add @jojoman2024/dsh-bili-scroll` 的真实记录）。
+         *
+         * ── 怎么用 ──────────────────────────────────────────
+         *   · 仍然用 `plugin --profile <name> add …` 这套参数（它们最终都转给 pnpm）；
+         *   · 但入口换成 `dsh-desktop-host/lib/cli.js`。
+         *   ⚠️ 若那个入口不存在（老版本桌面版没有它）⇒ 退回原入口，
+         *      并把"桌面版需要在应用内插件页升级"写进日志（至少别让人瞎试）。
+         *   ⭐ 实测（2026-10-19，桌面版**运行中**）：这条命令**能**装成功，
+         *      不需要退出桌面版、也不需要先卸载 ——
+         *        - @jojoman2024/dsh-bili-scroll 0.1.7
+         *        + @jojoman2024/dsh-bili-scroll 0.1.8
+         *   ⚠️ 但**必须带明确的版本号**（见下面 SPEC 的注释），否则 pnpm 会说
+         *      "Already up to date"（因为 profile 里写的是精确版本）。
+         */
+        const wantDesktopEntry = prof.name.toLowerCase() === 'desktop'
+        const rp = String(process.resourcesPath || '').trim()
+        const desktopEntry = rp
+          ? join(rp, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
+          : ''
+        const canUseDesktopEntry = wantDesktopEntry && desktopEntry && okBin(desktopEntry)
+        if (wantDesktopEntry) {
+          appendInstall(canUseDesktopEntry
+            ? `桌面版：改用桌面版自带的 CLI 入口（它会放行 desktop profile）\n  ${desktopEntry}\n`
+            : '⚠️ 没找到桌面版自带的 CLI 入口（dsh-desktop-host/lib/cli.js）'
+              + ' —— 这个入口是唯一能管理 desktop profile 的正路，退回默认入口；'
+              + '若仍失败，请到应用内「插件」页升级\n')
+        }
         const args = [
           ...(dsh.electron ? ['--expose-internals'] : []),
-          ...dsh.args, 'plugin', '--profile', prof.name, 'add',
+          /**
+           * 🔴🔴 **入口只能用一份**（2026-10-19 修，我在这里写出过 bug）。
+           *
+           * `resolveDsh()` 返回的 `args` **就是 `[bin.js 路径]`**（`args: [c.p]`）。
+           * 我第一版写成 `...(canUseDesktopEntry ? [] : dsh.args), entry, …` ——
+           * 而 `entry` 在 Web 端就是 `dsh.args[0]` ⇒ **拼出两份 bin.js**：
+           *   `node bin.js bin.js plugin --profile web add …`
+           * ⇒ Web 端升级会失败（使用者实测反馈的正是这个）。
+           *
+           * ✅ 正确写法：**二选一**
+           *   · 桌面版且找到专用入口 ⇒ 只放 `[专用入口]`；
+           *   · 其它情况 ⇒ 只放 `...dsh.args`（它已经含 bin.js，且可能带额外参数）。
+           */
+          ...(canUseDesktopEntry ? [desktopEntry] : dsh.args),
+          'plugin', '--profile', prof.name, 'add',
           // ⚠️ 顺序要紧：`--registry` 必须在包名之前（见上面那段注释）
           '--registry', MIRROR,
           SPEC,
@@ -2089,12 +2177,77 @@ export function apply(ctx, config) {
             env: dsh.electron ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : null,
           })
         }
-        if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
-        // ⚠️ 手动命令里也要用**检测到的** profile（否则桌面版用户照着跑，升的还是 web）
-        else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile ' + prof.name + ' add --registry ' + MIRROR + ' ' + SPEC + ' ===\n')
+        /**
+         * ⭐⭐ **"怎么重启"必须分端说**（2026-10-19 使用者要求）。
+         *
+         * ── 为什么不能一律写「重启 dsh」──────────────────────
+         *   普通用户**只会点面板上的「一键升级」**，不会用命令行、也不会去应用内插件页。
+         *   而两端"重启"的动作完全不同：
+         *     · **Web 端**：dsh 是个后台进程 ⇒「重启 dsh」他能理解（关掉再起）；
+         *     · **桌面版**：他只有一个应用窗口，**没有"dsh 进程"这个东西** ⇒
+         *       跟他说"重启 dsh"他会去找一个不存在的东西。
+         *
+         * ── 实测确认：桌面版**装完必须重启**（2026-10-19）
+         *   · 装**能不能**成功：能（桌面版运行中就能 `pnpm add`，实测过）；
+         *   · 装完**要不要**重启：**要** —— `index.js` 是 `apply()` 时加载进内存的，
+         *     升级只替换磁盘文件，运行中的 Electron 主进程内存里还是旧代码。
+         *   ⇒ 所以这句话必须说，只是说法要按端换。
+         */
+        const restartHint = () => (dsh.electron
+          ? '完全退出桌面版（托盘图标也要退出）再重新打开，新版才生效'
+          : '重启一次 dsh 才生效')
+        if (code === 0) appendInstall(`=== 升级完成 —— ${restartHint()} ===\n`)
+        /**
+         * ⚠️ 失败时给的手动命令**必须能跑得通**（2026-10-19 修）。
+         *
+         * 原来不分版本地写 `dsh plugin --profile desktop add …` ——
+         * 但桌面版**恰恰会拒绝这条**（`managed exclusively by the Electron application`）
+         * ⇒ 等于把使用者引到死路上，他照抄只会得到同一个错。
+         *
+         * ⇒ 桌面版改给**那条真的能用**的命令（`runtime\cli\bin\dsh.cmd`，带 manageDesktopProfile），
+         *    并说清"要先完全退出桌面版"（profile 被占用时它也会拒绝）。
+         */
+        else {
+          if (wantDesktopEntry) {
+            const desktopCmd = String(process.env.DSH_DESKTOP_NODE_EXECUTABLE || '').trim()
+              ? join(String(rp || ''), 'runtime', 'cli', 'bin', 'dsh.cmd')
+              : ''
+            appendInstall('=== 升级没成功（exit ' + code + '）===\n')
+            appendInstall('⚠️ 桌面版的 profile 由应用自己管理，`dsh plugin` 那条命令会被直接拒绝'
+              + '（那不是我这条命令写错了，是 DSH 的硬限制）。\n')
+            appendInstall('两条正路：\n'
+              + '  ① 到应用内「设置 → 插件 → 安装第三方插件」里填 ' + SPEC + '；\n'
+              + (desktopCmd
+                ? '  ② 完全退出桌面版后，用桌面版自带的 CLI 跑：\n'
+                  + '     "' + desktopCmd + '" plugin --profile ' + prof.name
+                  + ' add --registry ' + MIRROR + ' ' + SPEC + '\n'
+                : '')
+              + '⚠️ 用②之前必须**完全退出**桌面版（托盘图标也要退），否则它拿不到 profile。\n')
+          } else {
+            appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile '
+              + prof.name + ' add --registry ' + MIRROR + ' ' + SPEC + ' ===\n')
+          }
+        }
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
     })()
-    return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
+    /**
+     * ⚠️ 这里的 `hint` 是用户点完按钮**立刻**在面板上看到的那句（`say(r.hint)`）。
+     * 同样要分端 —— 桌面版用户没有"dsh 进程"这个概念（见 `restartHint` 那段注释）。
+     *
+     * 🔴 **不能用 `electronAsNode()`**：它定义在本函数**之后**（L2200+），
+     *    而 `const` 有 TDZ ⇒ 在这里调会 `ReferenceError`（真会炸，不是理论问题）。
+     *    ⇒ 用 `process.versions.electron` 判断，等价且一定可用。
+     */
+    const isElectronNow = Boolean(process.versions && process.versions.electron)
+      || Boolean(String(process.env.DSH_DESKTOP_NODE_EXECUTABLE || '').trim())
+    return {
+      ok: true,
+      started: true,
+      log: installLogFile,
+      hint: isElectronNow
+        ? '正在升级 —— 装完要完全退出桌面版（托盘图标也退）再重新打开，新版才生效'
+        : '正在升级 —— 完成后重启一次 dsh 才生效',
+    }
   }
 
   /**
@@ -4085,6 +4238,16 @@ export function apply(ctx, config) {
       home: stateDir,
       config: cfg,
       windows: WINDOWS,
+      /**
+       * ⭐ **告诉面板"我们跑在桌面版里吗"**（2026-10-19 加）。
+       *
+       * 为什么必须给：升级完成后的提示要分端说 ——
+       *   桌面版用户**没有"dsh 进程"这个东西**，跟他讲"重启 dsh"他会去找一个不存在的目标。
+       *   而面板是另一份代码（`client.js`），它没法直接读宿主的 `process.versions.electron`，
+       *   只能靠 `/status` 带过来。
+       */
+      isDesktop: Boolean(process.versions && process.versions.electron)
+        || Boolean(String(process.env.DSH_DESKTOP_NODE_EXECUTABLE || '').trim()),
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,
       lastRunAt: st.lastRunAt || null,
@@ -4453,8 +4616,18 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: false, error: lastErr, dir })
     }
 
-    // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）
-    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/upgrade') return sendJson(res, 200, runUpgrade())
+    /**
+     * 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）。
+     *
+     * ⭐ **要带上目标版本号**（2026-10-19）：面板会从 `/update` 拿到的 `latest` 传进来，
+     *    后端拼成 `包名@版本`。不带的话 pnpm 会说 "Already up to date"
+     *    （profile 里写的是精确版本 ⇒ 只给包名它认为已经满足了）。
+     */
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/upgrade') {
+      let body = {}
+      try { body = JSON.parse((await readBody(req)) || '{}') } catch { /* 没 body 就按空对象 */ }
+      return sendJson(res, 200, runUpgrade({ version: body?.version }))
+    }
 
 
     /** 读本插件目录自己那一份 git 的当前 commit（读不到返回 ''）。 */

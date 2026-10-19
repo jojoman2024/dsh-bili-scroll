@@ -1213,6 +1213,29 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         } catch (e) { say(String(e?.message ?? e), 'warn') }
       }
 
+      /**
+       * ⭐⭐ **「怎么重启」要分端说**（2026-10-19，使用者要求）。
+       *
+       * 为什么：普通用户**只会点面板上的「一键升级」**，不会用命令行。
+       *   而两端"重启"的动作完全不同：
+       *     · **Web 端**：dsh 是个后台进程 ⇒「重启 dsh」他能照做；
+       *     · **桌面版**：他只有应用窗口，**没有"dsh 进程"这个东西** ⇒
+       *       跟他说"重启 dsh"，他会去找一个不存在的东西。
+       *
+       * ⚠️ 桌面版的说法是使用者自己定的：「**完全退出（含托盘图标）再重新打开**」。
+       * ⚠️ 判据来自 `/status` 的 `isDesktop`（面板没法直接读宿主的 `process.versions.electron`）；
+       *    `st` 还没到（首屏）就当作非桌面版 —— 文案最坏情况是"重启 dsh"，不会误导得更糟。
+       */
+      const isDesktop = Boolean(st && st.isDesktop)
+      /** 拼在句子里的说法，例如「装完{重启 dsh}」 */
+      const restartWord = () => (isDesktop
+        ? '要完全退出桌面版（托盘图标也要退出）再重新打开'
+        : '要重启一次 dsh')
+      /** 完整句子（用在不跟宾语的场合） */
+      const restartSentence = () => (isDesktop
+        ? '完全退出桌面版（托盘图标也要退出）再重新打开，新版才生效'
+        : '重启一次 dsh 才生效')
+
       const onUpgrade = async () => {
         setBusy('upgrade')
         /**
@@ -1228,7 +1251,18 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
          */
         setTab('env')
         try {
-          const r = await jpost('/upgrade', {})
+          /**
+           * ⭐⭐ **必须把目标版本号一起传过去**（2026-10-19 修）。
+           *
+           * 为什么：后端拼的是 `包名@版本`。只给包名的话，pnpm 看到
+           * profile 的 `package.json` 里已经有这个包（精确版本）就说
+           * `Already up to date` —— **看起来成功、版本却没变**。
+           *
+           * 版本从哪来：`/status` 里的 `update.latest`（就是「检测到有新版本」用的那个）；
+           * 拿不到就**不传**（后端会退回裸包名，老行为）。
+           */
+          const ver = String((st && st.update && st.update.latest) || newVer || '').trim()
+          const r = await jpost('/upgrade', ver ? { version: ver } : {})
           say((r && r.hint) || '正在升级', 'good')
           /**
            * ⭐ 说明**走的是国内镜像**（2026-10-18）。
@@ -1237,7 +1271,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
            * ⚠️ 这句必须与后端 `runUpgrade` 里那个 `MIRROR` 一致，否则是假信息。
            */
           say('正在从国内镜像（npmmirror）装 —— 日志在下面「主依赖的日志」里；'
-            + '镜像失败会自动改用官方源再试一次。装完记得重启 dsh（不重启还是旧版）', 'warn')
+            + '镜像失败会自动改用官方源再试一次。装完' + restartWord() + '（不重启还是旧版）', 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -1291,7 +1325,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           if (r.hasNew) {
             setNewVer(r.latest || '有新版')
             say(`有新版本 ${r.latest}（现在 ${r.current}，比的是 ${src}）`
-              + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
+              + ' —— 点右边的「一键升级」，装完' + restartWord(), 'warn')
             /**
              * ⭐ **顺手把顶栏那个「检测到有新版本」点亮**（2026-10-18）。
              * 为什么要写：`/status` 每 5 秒才轮询一次，而手动点完「检查更新」
@@ -2218,7 +2252,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('div', { 'data-bd-confirm-body': '' },
                 `新版 ${st.update.latest || '?'}（你现在 ${st.update.current || st.version || '?'}）。`,
                 h('br'),
-                '升级会从国内镜像（npmmirror）装新版，装完要重启一次 dsh 才生效。'),
+                '升级会从国内镜像（npmmirror）装新版，装完' + restartSentence() + '。'),
               /**
                * ⭐⭐ **更新内容直接在弹窗里显示**（2026-10-18 改）。
                *
