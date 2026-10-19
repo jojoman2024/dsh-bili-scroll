@@ -2029,7 +2029,17 @@ export function apply(ctx, config) {
          *      只给这一次操作指定源，不动使用者的全局 npm 配置
          *      （那是他自己的环境，我们没资格改）。
          */
-        const MIRROR = 'https://registry.npmmirror.com'
+        /**
+         * ⭐ **同样可以被环境变量覆盖**（2026-10-19），与上面 `checkUpdate` 里那两个保持一致。
+         *
+         * 🔴 **"查"和"装"必须指向同一个源**（否则这个按钮组合本身就是坏的：
+         *    检查说镜像上有 0.1.5 → 升级却去官方源装 → 官方还没同步 ⇒ 装了个旧的）。
+         *    ⇒ 本地测升级时，两个变量一起设，才不会出现"查到了、装不到"。
+         */
+        const MIRROR = (() => {
+          const v = String(process.env.BILI_DUTY_NPM_REGISTRY || '').trim().replace(/\/+$/, '')
+          return /^https?:\/\/\S+$/i.test(v) ? v : 'https://registry.npmmirror.com'
+        })()
         /**
          * 🔴🔴 **`--profile` 不能写死 `web`**（2026-10-18 使用者实测抓到的真 bug）。
          *
@@ -2111,7 +2121,19 @@ export function apply(ctx, config) {
         const desktopEntry = rp
           ? join(rp, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
           : ''
-        const canUseDesktopEntry = wantDesktopEntry && desktopEntry && okBin(desktopEntry)
+        /**
+         * 🔴 **不能在这里调 `okBin()`**（2026-10-19 真机崩了）。
+         *
+         * `okBin` 定义在 **L2343**，而这个函数（`runUpgrade`）在它**之前**
+         * ⇒ `const` 有 TDZ ⇒ 调用时抛
+         *   `ReferenceError: okBin is not defined`
+         * （桌面版点升级时真实报错，日志里能看到。）
+         *
+         * ⚠️ **同一个坑我当天已经踩过一次**（`electronAsNode` 那次）——
+         *    教训：**在 `runUpgrade` 里永远别调用文件后面才定义的 `const`**。
+         * ⇒ 这里改用**内联的 `existsSync` 判断**（那个是 import 进来的，随时可用）。
+         */
+        const canUseDesktopEntry = wantDesktopEntry && desktopEntry && existsSync(desktopEntry)
         if (wantDesktopEntry) {
           appendInstall(canUseDesktopEntry
             ? `桌面版：改用桌面版自带的 CLI 入口（它会放行 desktop profile）\n  ${desktopEntry}\n`
@@ -2119,6 +2141,36 @@ export function apply(ctx, config) {
               + ' —— 这个入口是唯一能管理 desktop profile 的正路，退回默认入口；'
               + '若仍失败，请到应用内「插件」页升级\n')
         }
+        /**
+         * 🔴🔴 **`--registry` 的写法必须分端**（2026-10-19 真机抓到）。
+         *
+         * ── 症状 ─────────────────────────────────────────────
+         *   桌面版点升级 ⇒
+         *     `[ERROR] Unknown option: 'registry'`
+         *   而 Web 端**同样的写法**能成功。
+         *
+         * ── 根因（读 DSH 源码确认，不是猜）────────────────────
+         *   `dsh/lib/plugin-*.js` 里：
+         *     ```js
+         *     const result = profile === 'desktop'
+         *       ? runProfilePnpm(context, args, options)   ← 桌面版走这条
+         *       : runPluginCommand(context, args, options)  ← Web 走这条
+         *     ```
+         *   而 `runProfilePnpm`（`dsh-plugin-manager/lib/index.js`）里有这么一行：
+         *     ```js
+         *     const registryFlags = args.filter((a) => a.startsWith('--registry='))
+         *     ```
+         *   ⇒ **它只认 `--registry=<url>` 这种等号形式**，
+         *      空格分隔的 `--registry <url>` 会被当成未知选项（它还顺手做了
+         *      "登记到 profile 的 npmrc" 之类的处理，所以必须让它认出来）。
+         *   而 `runPluginCommand` 只是把参数转给 pnpm ⇒ **pocket 两种都行**。
+         *
+         * ── 结论 ─────────────────────────────────────────────
+         *   · 桌面版：`--registry=<url>`（等号）
+         *   · Web 端：两种都行，**统一用等号**最省事
+         *   ⇒ 这里**一律用等号形式**，两端都过。
+         */
+        const REGISTRY_ARG = `--registry=${MIRROR}`
         const args = [
           ...(dsh.electron ? ['--expose-internals'] : []),
           /**
@@ -2137,7 +2189,8 @@ export function apply(ctx, config) {
           ...(canUseDesktopEntry ? [desktopEntry] : dsh.args),
           'plugin', '--profile', prof.name, 'add',
           // ⚠️ 顺序要紧：`--registry` 必须在包名之前（见上面那段注释）
-          '--registry', MIRROR,
+          // ⚠️ 写法也要紧：**等号形式**，否则桌面版会被 runProfilePnpm 拒掉
+          REGISTRY_ARG,
           SPEC,
         ]
         appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
@@ -2158,18 +2211,24 @@ export function apply(ctx, config) {
          */
         if (code !== 0) {
           /**
-           * 去掉 `--registry <url>` 这一对参数。
+           * 去掉镜像参数，退回官方源再试一次。
            *
-           * 🔴 **第一版写错成** `args.filter((a, i) => !(a === '--registry' || args[i-1] === '--registry'))` ——
-           *    `args[i-1]` 在 filter 里指的是**原数组的前一个元素**，而 filter 会给每个元素都跑 false，
-           *    结果是"`--registry` 前后两个元素都被删"（连 `add` 都会被吃掉）。
-           *    ⇒ 改成**按下标收集**，明确只删这两个位置。
+           * 🔴 **历史坑（都留档，别再犯）**：
+           *   ① 第一版写成 `args.filter((a, i) => !(a === '--registry' || args[i-1] === '--registry'))`
+           *      —— `filter` 会给每个元素都跑一遍，`args[i-1]` 指的是**原数组**的前一个，
+           *      结果"`--registry` 前后两个元素都被删"（连 `add` 都会被吃掉）。
+           *      ⇒ 改成**按下标收集**，明确只删该删的位置。
+           *   ② 2026-10-19：现在镜像参数是 **`--registry=<url>` 单个元素**（等号形式，
+           *      因为桌面版的 `runProfilePnpm` 只认这种），
+           *      所以删法要同时覆盖**一个元素**和**两个元素**两种形态。
            */
-          const drop = new Set()
+          const fallbackArgs = []
           for (let i = 0; i < args.length; i++) {
-            if (args[i] === '--registry') { drop.add(i); drop.add(i + 1) }
+            const a = args[i]
+            if (a === '--registry') { i++; continue }                 // 旧形态：`--registry <url>`
+            if (a.startsWith('--registry=')) continue                 // 新形态：`--registry=<url>`
+            fallbackArgs.push(a)
           }
-          const fallbackArgs = args.filter((_, i) => !drop.has(i))
           appendInstall(`\n=== 镜像源没装上（exit ${code}），改用官方源再试一次 ===\n`)
           appendInstall('$ ' + cmd + ' ' + fallbackArgs.join(' ') + '\n')
           code = await spawnTo(cmd, fallbackArgs, {
@@ -3890,8 +3949,34 @@ export function apply(ctx, config) {
      *   npm 上有个 `0.0.0-stage` 的空壳占位版本（staged publishing 产物），
      *   若拿"所有版本里最大的"去比，会挑出奇怪的东西。实测 `latest` 是干净的。
      */
-    const REGISTRY_MIRROR = 'https://registry.npmmirror.com'
-    const REGISTRY_OFFICIAL = 'https://registry.npmjs.org'
+    /**
+     * ⭐⭐ **registry 可以被环境变量覆盖**（2026-10-19 加，为了能本地测升级）。
+     *
+     * ── 为什么需要它 ─────────────────────────────────────
+     *   「检查更新 → 点升级」这条链路以前**只能靠发真版本来测**：
+     *   版本号写死在 npm 上，你要验"检测到新版 → 点击 → 装完"，
+     *   就必须真的升一次版本、发一次 npm、等镜像同步 —— 一轮十几分钟。
+     *
+     *   有了这两个变量，就能起一个**本地假 registry**（返回任何你想要的版本），
+     *   把整套 UI + 后端 + pnpm 装配跑通，**不用发版**。
+     *
+     * ── 怎么用（本地测升级）──────────────────────────────
+     *   ```
+     *   $env:BILI_DUTY_NPM_REGISTRY   = 'http://127.0.0.1:4873'   # 假源（也当镜像用）
+     *   $env:BILI_DUTY_NPM_REGISTRY_2 = 'http://127.0.0.1:4873'   # 官方源兜底也指它
+     *   ```
+     *   ⚠️ **生产环境不设这两个变量** ⇒ 行为与以前**完全一样**（常量默认值不变）。
+     *
+     * ⚠️ 顺序语义没变：先「镜像」后「官方」（国内镜像快，见下面那段注释）。
+     * ⚠️ 值要做**最小校验**（必须以 http 开头）：写错了就静默回退默认值，
+     *    绝不让一个脏环境变量把"检查更新"整个搞挂。
+     */
+    const envBase = (name, fallback) => {
+      const v = String(process.env[name] || '').trim().replace(/\/+$/, '')
+      return /^https?:\/\/\S+$/i.test(v) ? v : fallback
+    }
+    const REGISTRY_MIRROR = envBase('BILI_DUTY_NPM_REGISTRY', 'https://registry.npmmirror.com')
+    const REGISTRY_OFFICIAL = envBase('BILI_DUTY_NPM_REGISTRY_2', 'https://registry.npmjs.org')
     // ⚠️ 包名直接用文件顶部那个 `PKG_NAME`（L50）——
     //    这里**不要**再声明一次，否则是"函数内遮蔽外层"的写法，改一处忘一处。
 
@@ -4624,8 +4709,17 @@ export function apply(ctx, config) {
      *    （profile 里写的是精确版本 ⇒ 只给包名它认为已经满足了）。
      */
     if (req.method === 'POST' && path === '/api/bili-scroll-jojo/upgrade') {
-      let body = {}
-      try { body = JSON.parse((await readBody(req)) || '{}') } catch { /* 没 body 就按空对象 */ }
+      /**
+       * 🔴 **`readBody()` 返回的已经是对象**（它内部做了 `JSON.parse`）。
+       *
+       * 我第一版写成：
+       *   `let body = JSON.parse((await readBody(req)) || '{}')`
+       * ⇒ `JSON.parse(对象)` 会抛 → 被 catch 吞掉 → `body = {}`
+       * ⇒ **version 永远是 undefined**，日志一直报「没拿到目标版本号」，
+       *   升级退回裸包名 ⇒ pnpm `Already up to date` ⇒ **假装成功**。
+       *   （2026-10-19 在 3107 测试实例上实测抓到的。）
+       */
+      const body = await readBody(req)
       return sendJson(res, 200, runUpgrade({ version: body?.version }))
     }
 
