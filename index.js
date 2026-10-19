@@ -2255,7 +2255,73 @@ export function apply(ctx, config) {
         const restartHint = () => (dsh.electron
           ? '完全退出桌面版（托盘图标也要退出）再重新打开，新版才生效'
           : '重启一次 dsh 才生效')
-        if (code === 0) appendInstall(`=== 升级完成 —— ${restartHint()} ===\n`)
+        /**
+         * 🔴🔴 **`exit 0` 不等于"真的换掉了"**（2026-10-19 真机抓到）。
+         *
+         * ── 症状 ─────────────────────────────────────────────
+         *   桌面版点升级 ⇒ pnpm 退出码 **0**、日志写「升级完成」，
+         *   但 `node_modules\@jojoman2024\dsh-bili-scroll` **还是旧的**：
+         *     · `package.json` 声明 = 0.1.99 ✓
+         *     · `pnpm-lock.yaml`       = 0.1.99 ✓
+         *     · **实际目录**            = 仍然是指向旧版的 Junction ✗
+         *     · pnpm 输出里有 `added 0`（一个文件都没换）
+         *
+         * ── 根因 ──────────────────────────────────────────────
+         *   **桌面版运行时占着那个目录**（Electron 主进程已加载它）⇒
+         *   Windows 上无法替换正在使用的目录/junction ⇒
+         *   pnpm 只能改声明和 lock，**换不掉实体**，但仍然返回 0。
+         *
+         * ── 为什么必须校验 ────────────────────────────────────
+         *   "显示升级成功、其实没升"是最糟的失败方式 ——
+         *   用户以为好了、重启还是旧版，然后怀疑是插件坏了。
+         *   ⇒ **以磁盘实际版本为准**，不一致就**如实报失败**，并给出可执行的下一步。
+         *
+         * ⚠️ 判据要宽容：只比"目标版本是否真的到位"，不追求别的指标
+         *    （不同 pnpm 版本、link 装法的表现不一样，别把正常升级误判成失败）。
+         */
+        /**
+         * ⚠️ **要找的是「被升级的那个 profile 的 node_modules」**，不是插件家目录。
+         *
+         * profile 目录怎么来：`DSH_HOME/profiles/<prof.name>`。
+         * `DSH_HOME` 由宿主的 `dshHomePath()` 给（`stateDir` 是插件的家，不是它）。
+         */
+        const profileNodeModules = () => {
+          let home = ''
+          try {
+            const p = ctx.get('dshHomePath')
+            if (typeof p === 'function') home = String(p() || '')
+          } catch { /* 拿不到就走下面的兜底 */ }
+          if (!home) home = join(stateDir, '..', '..')   // `<home>/bili-scroll-jojo` 往上两级
+          return join(home, 'profiles', prof.name, 'node_modules', ...PKG_NAME.split('/'))
+        }
+        const installedVersion = () => {
+          try {
+            const pj = join(profileNodeModules(), 'package.json')
+            return String(JSON.parse(readFileSync(pj, 'utf8')).version || '').trim()
+          } catch { return '' }
+        }
+        /** 跑一次校验：目标版本是否真的落到磁盘上 */
+        const verifyInstalled = () => {
+          if (!wantVer) return { ok: true, skipped: true }   // 没目标版本号就没法比
+          const got = installedVersion()
+          if (!got) return { ok: false, got: '(读不到)' }
+          return { ok: got === wantVer, got }
+        }
+        const verified = code === 0 ? verifyInstalled() : { ok: false, skipped: true }
+        if (code === 0 && !verified.ok && !verified.skipped) {
+          appendInstall(`\n⚠️ pnpm 说装好了（exit 0），但**磁盘上的版本没变**：`
+            + `期望 ${wantVer}，实际 ${verified.got}\n`)
+          appendInstall(wantDesktopEntry
+            ? '原因：桌面版**正在运行**，插件目录被占用，替换不进去（Windows 会拒绝）。\n'
+              + '👉 解决办法：完全退出桌面版（托盘图标也要退出），再打开面板点一次「一键升级」。\n'
+              + '   （退出后目录不再被占用，那一次才会真的换掉。）\n'
+            : '原因：目录被占用或权限不足。\n'
+              + '👉 解决办法：重启一次 dsh 后再点「一键升级」。\n')
+          appendInstall('=== 升级**没有**完成（虽然 pnpm 返回 0）===\n')
+        } else if (code === 0) {
+          appendInstall(`=== 升级完成（已确认磁盘上是 ${verified.skipped ? '新版本' : verified.got}）`
+            + ` —— ${restartHint()} ===\n`)
+        }
         /**
          * ⚠️ 失败时给的手动命令**必须能跑得通**（2026-10-19 修）。
          *
