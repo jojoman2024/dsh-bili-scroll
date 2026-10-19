@@ -11,3 +11,5 @@ log/
 
 # 给你本机双击用的脚本（里面有本机绝对路径），不进仓库
 *.cmd
+# 本地测升级时假 registry 的缓存（几百 KB 的 tgz，不进仓库）
+.test-registry/
