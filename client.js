@@ -2006,11 +2006,30 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             on: sw('autoComment'),
             onChange: (v) => patch({ autoComment: v }, '自动评论'),
           }),
-          sw('autoComment') ? h('div', { 'data-bd-sub': '' },
+          /**
+           * ⭐⭐ **「每轮最多发几条」+「要 @ 谁」的展开条件**（2026-10-19 扩）。
+           *
+           * 原来只在「自动评论」开着时展开。使用者提：
+           *   「私信通知开关开启时，不管自动评论开关是否开启，截图中的这两项，也需要展开的。」
+           *
+           * 为什么合理：**这两项私信也要用** ——
+           *   · `commentPerRound` 是"每轮最多发几条评论"；
+           *   · `mentionName` 是"发给/ @ 谁"，私信也发给他（`dm.md` 的规矩就是发这个人的）。
+           * 只开私信、不开评论时，用户同样需要填这两项 ⇒ 不给展开他就没地方填。
+           *
+           * ⚠️ 判据是 `sw('dmNotify')`（私信开关当前是否打开），
+           *    不是 `cfg.dmUnlocked`（那个只管"彩蛋有没有解锁、要不要显示私信开关本身"）。
+           */
+          (sw('autoComment') || sw('dmNotify')) ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '每轮最多发几条'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人')),
+                /**
+                 * ⚠️ 这一项现在在「只开私信」时也会显示（2026-10-19）⇒ 说明要讲清它管什么。
+                 * 🔴 但**别写"私信也按这个数"** —— 私信的条数**没有代码硬闸**
+                 *    （只在 `dm.md` 的提示词里约束），那样写是假承诺。
+                 */
+                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人；私信也读这两项')),
               h('input', {
                 'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 20,
                 value: perRound ?? '',
@@ -2063,11 +2082,19 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               })),
             h(Field, {
               label: '要 @ 谁（B站 昵称）',
-              note: '留空就不发评论了 —— 评论存在的意义就是 @ 那一下。⚠️ 要跟 B站 昵称逐字一致。',
+              /**
+               * ⭐ 文案要覆盖**两种用途**（2026-10-19 改）。
+               *
+               * 原来只写「留空就不发评论了」—— 那是**只想着评论**的说法。
+               * 现在这一项在「只开私信、不开评论」时也会显示，而私信**也发给这个人**
+               * （`prompts/dm.md` 的规矩就是发给 `mentionName`）⇒
+               * 只说评论会让人以为"不开评论就不用填"，于是私信发不出去。
+               */
+              note: '评论里 @ 的是这个人，私信也发给他。⚠️ 要跟 B站 昵称逐字一致；留空 = 评论和私信都发不出去。',
               stack: true,
               children: h('input', {
                 'data-bd-input': '', value: mention ?? '',
-                placeholder: '填 B站 昵称；留空 = 不发评论',
+                placeholder: '填 B站 昵称；留空 = 评论和私信都不发',
                 onChange: (e) => setMention(e.target.value),
                 onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
               }),
