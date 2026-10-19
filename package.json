@@ -1,6 +1,6 @@
 {
   "name": "@jojoman2024/dsh-bili-scroll",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、每条写一份笔记，值得的就 @ 你",
   "keywords": [
     "dsh",
