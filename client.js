@@ -511,7 +511,11 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
   background:rgba(0,0,0,.38);}
 [data-bd-confirm-box]{width:min(86vw,320px);border-radius:var(--dsw-radius-md,12px);
   background:var(--dsw-alias-bg-base,#fff);padding:16px;
-  box-shadow:0 8px 28px rgba(0,0,0,.22);display:flex;flex-direction:column;gap:10px;}
+  box-shadow:0 8px 28px rgba(0,0,0,.22);display:flex;flex-direction:column;gap:10px;
+  /* ⭐ 升级浮窗里会塞日志（可能几十行）⇒ 限高 + 内部滚动，
+     否则弹窗会长到屏幕外面去（2026-10-20 加）。 */
+  max-height:86vh;overflow:auto;}
+  
 [data-bd-confirm-title]{font-size:var(--dsw-font-s-14-font-size,14px);font-weight:600;
   line-height:22px;color:var(--dsw-alias-label-primary,#0f1115);}
 [data-bd-confirm-body]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
@@ -663,6 +667,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
    ⚠️ white-space:pre-wrap 由 [data-bd-pre] 那份给了 —— 这里**不要**重复写，
       也**不要**改成 nowrap：正文的换行就是 readability 的一部分。 */
 [data-bd-pre][data-bd-clog]{max-height:46vh;font-size:12px;line-height:18px;word-break:normal;}
+/* ⭐ 升级失败那条 pnpm 错误行（2026-10-20 加）：
+   它是**一整行很长的英文**（如 [ERR_PNPM_UNEXPECTED_VIRTUAL_STORE] …），
+   而上面那条 word-break:normal 会让它**横向溢出弹窗**（弹窗只有 320px 宽）。
+   ⇒ 这一条单独放开断词，宁可断在单词中间，也别让人看不全。 */
+[data-bd-pre][data-bd-clog][data-bd-wrap]{word-break:break-all;max-height:120px;}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -1479,6 +1488,46 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         ? '完全退出桌面版（托盘图标也要退出）再重新打开，新版才生效'
         : '重启一次 dsh 才生效')
 
+      /**
+       * ⭐⭐ **升级结果的兜底通知**（2026-10-20 加）。
+       *
+       * 详见 `onUpgrade` 里调用处那段注释：升级会替换插件文件，
+       * 面板树可能被 DSH 重建 ⇒ 浮窗跟着消失 ⇒ 使用者拿不到结论。
+       * 这个观察者**自己轮询 `/status`**，装完就 `say()` 一声，
+       * 不依赖浮窗还在不在。
+       *
+       * ⚠️ 用 `ref` 防重入（连点两次升级不会起两个观察者）。
+       * ⚠️ 最多盯 4 分钟 —— 再久就当它失败，别无限跑定时器。
+       */
+      const upgradeWatch = React.useRef(false)
+      const watchUpgradeDone = () => {
+        if (upgradeWatch.current) return
+        upgradeWatch.current = true
+        const t0 = Date.now()
+        const tick = async () => {
+          try {
+            const d = await jget('/status')
+            const res = d && d.upgradeResult
+            const stillRunning = Boolean(d && d.upgrading) || Boolean(res && res.running)
+            if (!stillRunning && res) {
+              upgradeWatch.current = false
+              if (res.ok) {
+                const v = res.got || res.target || '新版'
+                say(`升级完成（${v}）。` + (res.isDesktop
+                  ? '完全退出桌面版（含托盘图标）再重新打开才生效。'
+                  : '重启一次 dsh 才生效。'), 'good')
+              } else {
+                say('升级没成功：' + (res.detail || res.reason || '看日志'), 'warn')
+              }
+              return
+            }
+            if (Date.now() - t0 > 4 * 60 * 1000) { upgradeWatch.current = false; return }
+            setTimeout(tick, 2000)
+          } catch { upgradeWatch.current = false }
+        }
+        setTimeout(tick, 2000)
+      }
+
       const onUpgrade = async () => {
         setBusy('upgrade')
         /**
@@ -1507,6 +1556,19 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           const ver = String((st && st.update && st.update.latest) || newVer || '').trim()
           const r = await jpost('/upgrade', ver ? { version: ver } : {})
           say((r && r.hint) || '正在升级', 'good')
+          /**
+           * ⭐⭐ **兜底：自己盯着结果，装完用 toast 说一声**（2026-10-20 加）。
+           *
+           * 为什需要它（真机踩到）：
+           *   浮窗是**面板里的一个 React 节点**，而升级会**替换插件文件**——
+           *   DSH 一旦感知到插件变了就可能把这棵树重建，
+           *   ⇒ 浮窗跟着消失，使用者只看到"面板被关掉了"，**什么结论都没拿到**。
+           *   toast（`say`）是挂在面板根上的，重建后还能再弹，比浮窗更抗打。
+           *
+           * ⚠️ 它只是**兜底**，浮窗仍然是主界面（有详细日志与下一步）。
+           * ⚠️ 用 ref 防重入：连点两次升级不会起两个观察者。
+           */
+          watchUpgradeDone()
           /**
            * ⭐ 说明**走的是国内镜像**（2026-10-18）。
            * 为什么要说：升级要下载包，使用者看着日志长时间没动静时，
@@ -2663,8 +2725,17 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
          *    所以比对 `result.at`（时间戳），**同一个结果只弹一次**。
          */
         (() => {
-          const res = st.upgradeResult
-          const running = Boolean(st.upgrading) || Boolean(res && res.running)
+          /**
+           * 🔴 **整段包 try/catch**（2026-10-20 加）。
+           *
+           * 为什么：浮窗是渲染树里的一个节点，**它抛异常会把整个面板打空**
+           * （React 渲染期异常 = 这棵树没了 ⇒ 使用者看到"面板关掉了"）。
+           * 而它只是"锦上添花"的通知，**绝不能有拖垮面板的权力**。
+           */
+          try {
+          /** ⚠️ `st` 首屏是 null ⇒ 必须判空，否则 `st.upgradeResult` 直接抛 */
+          const res = (st && st.upgradeResult) || null
+          const running = Boolean(st && st.upgrading) || Boolean(res && res.running)
           // 没有在跑、也没有结果 ⇒ 什么都不画
           if (!running && !res) return null
           // 结果已经关掉过（按时间戳判，重启也认）⇒ 不再弹
@@ -2677,6 +2748,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             : '重启一次 dsh 才生效。'
 
           /** 失败时按 kind 给不同的下一步 */
+          /**
+           * ⭐ **失败原因**（2026-10-20 改：带上 pnpm 的真实错误行）。
+           *
+           * 原来只显示「pnpm 退出码 1」—— 等于没说，用户和我都得再去翻日志。
+           * 现在后端会把 `ERR_PNPM_*` 那种关键行抓进 `detail`，这里直接铺出来。
+           * ⚠️ `detail` 可能很长（一行最多 300 字符）⇒ 用 `pre` 且自动换行，
+           *    别让它把弹窗撑出屏幕。
+           */
           const failWhy = (r) => {
             if (!r) return '不知道哪里出错了 —— 看下面的日志。'
             if (r.kind === 'not-replaced') {
@@ -2685,9 +2764,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   ? '多半是「桌面版正在运行、目录被占用」：完全退出桌面版（托盘图标也退）后再点一次升级。'
                   : '多半是目录被占用：重启一次 dsh 后再点一次升级。')
             }
-            if (r.kind === 'failed') return `pnpm 没装成（${r.reason || '退出码非 0'}）—— 看下面的日志找原因。`
+            if (r.kind === 'failed') {
+              return `pnpm 没装成（${r.reason || '退出码非 0'}）。`
+                + (r.detail ? '' : '—— 看下面的日志找原因。')
+            }
             return r.reason || '未知原因 —— 看下面的日志。'
           }
+          /** pnpm 的真实错误行（后端抓的；没有就不画那一段） */
+          const failDetail = res && res.ok === false ? String(res.detail || '') : ''
 
           /** 日志尾巴：只取最后几行（浮窗别撑太大） */
           const tail = String(st.installTail || '').trim().split(/\r?\n/).slice(-6).join('\n')
@@ -2713,7 +2797,26 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     : h('div', null,
                       h('b', null, '为什么失败：'),
                       h('br'),
-                      failWhy(res)),
+                      failWhy(res),
+                      /* ⭐ pnpm 的真实错误行（后端从 install.log 抓的）
+                         ⚠️ 用 pre + 自动换行：那行可能很长，别撑破弹窗 */
+                      failDetail
+                        ? h('pre', { 'data-bd-pre': '', 'data-bd-clog': '', 'data-bd-wrap': '' }, failDetail)
+                        : null,
+                      /**
+                       * ⭐⭐ **失败时把日志尾巴也放进浮窗**（2026-10-20 加）。
+                       *
+                       * 为什么：浮窗是**全屏遮罩**（`position:fixed;inset:0`）⇒
+                       * 它开着的时候，「环境与账号」页那个日志块**整个被挡住**。
+                       * 而失败时用户最想看的就是那段日志 ——
+                       * 原来必须"先点知道了 → 再翻到那一页"，多一步且很反直觉。
+                       * ⇒ 直接把尾巴铺在浮窗里，看完再关。
+                       */
+                      !running && res && res.ok === false && tail
+                        ? h('div', null,
+                          h('div', { 'data-bd-note': '' }, '安装日志（末尾）：'),
+                          h('pre', { 'data-bd-pre': '', 'data-bd-clog': '' }, tail))
+                        : null),
 
                 /* 实时日志尾巴（只在升级中显示，成功/失败后看完整日志更合适） */
                 running && tail
@@ -2727,6 +2830,10 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     'data-bd-btn': '', 'data-primary': '',
                     onClick: () => dismissUpgrade(res?.at || ''),
                   }, '知道了'))))
+          } catch (e) {
+            // ⚠️ 浮窗坏了也不能影响面板（它只是通知）；静默跳过
+            return null
+          }
         })(),
         /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },

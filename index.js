@@ -2417,14 +2417,53 @@ export function apply(ctx, config) {
         /**
          * ⭐ **把结论落盘**（浮窗要靠它说"成功了该干什么 / 失败了为什么"）。
          * ⚠️ 三个分支都要写 —— 漏一个就会出现"浮窗永远转圈"。
+         *
+         * ⭐⭐ **失败时还要把 pnpm 的真实错误行带出来**（2026-10-20）。
+         *
+         * 起因：实测失败时浮窗只显示「pnpm 没装成（pnpm 退出码 1）」——
+         *   而 `install.log` 里真正的原因是这个：
+         *   ```
+         *   [ERR_PNPM_UNEXPECTED_VIRTUAL_STORE] Unexpected virtual store location
+         *   ```
+         *   ⇒ 光给"退出码 1"等于没说，用户和我都得再去翻日志。
+         *
+         * 做法：从 `install.log` **末尾**抓第一行像错误的关键行（`ERR_PNPM_*` /
+         * `Error:` / `404` / `ENOTFOUND` 之类），塞进 `detail` 字段。
+         * ⚠️ 抓不到就不放这个字段（**别写"未知错误"占位**，那比没有更误导）。
          */
-        const _done = (obj) => writeUpgradeResult({
-          at: new Date().toISOString(),
-          target: wantVer || '',
-          from: myVersion(),
-          isDesktop: Boolean(dsh.electron),
-          ...obj,
-        })
+        const _grabPnpmError = () => {
+          try {
+            const all = readFileSync(installLogFile, 'utf8')
+            // 只看最后 120 行 —— 错误总是出现在收尾处
+            const lines = all.split(/\r?\n/).slice(-120)
+            // 优先级：ERR_PNPM_* > Error: > 常见网络错
+            const pats = [
+              /\[ERR_PNPM_[A-Z_]+\]/,
+              /ERR_PNPM_[A-Z_]+/,
+              /^\s*Error:/i,
+              /\b(E404|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EACCES|EPERM)\b/,
+            ]
+            for (const re of pats) {
+              for (let i = lines.length - 1; i >= 0; i--) {
+                const L = String(lines[i] || '').trim()
+                if (!L || L.startsWith('$ ') || L.startsWith('---')) continue
+                if (re.test(L)) return L.slice(0, 300)   // 一行就够，别把浮窗撑爆
+              }
+            }
+          } catch { /* 读不到就算了 */ }
+          return ''
+        }
+        const _done = (obj) => {
+          const detail = obj && obj.ok === false ? _grabPnpmError() : ''
+          writeUpgradeResult({
+            at: new Date().toISOString(),
+            target: wantVer || '',
+            from: myVersion(),
+            isDesktop: Boolean(dsh.electron),
+            ...obj,
+            ...(detail ? { detail } : {}),
+          })
+        }
         if (code === 0 && !verified.ok && !verified.skipped) {
           _done({ ok: false, kind: 'not-replaced', got: verified.got || '', reason: '装上了但磁盘上的版本没变' })
           appendInstall(`\n⚠️ pnpm 说装好了（exit 0），但**磁盘上的版本没变**：`
