@@ -2037,6 +2037,33 @@ export function apply(ctx, config) {
   // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add <我们的包>`
   //    ⚠️ 装完必须重启 dsh 才生效；⚠️ Windows 上"替换正在运行的插件"可能被文件占用挡住（我们踩过）
   let upgrading = false
+  /** 当前这次升级的目标版本（浮窗标题用；只在内存里，重启后靠下面的 result 文件） */
+  let lastUpgradeTarget = ''
+
+  /**
+   * ⭐⭐ **升级结果账本**（`.upgrade-result.json`，2026-10-20 加，配合浮窗）。
+   *
+   * 为什么要落盘：
+   *   升级要**重启**才生效，而重启会清掉内存 ⇒ 用户重启回来，
+   *   面板得能说清"上一轮到底成没成、该干什么"。
+   *   光靠 `say()` 那行提示是"说完就没"的。
+   *
+   * 结构：`{ at, target, from, ok, verified, got, kind, reason }`
+   *   · `ok: true`  —— 真装上了（`got === target`）
+   *   · `ok: false` —— `kind` 说明原因：`'not-replaced'`（pnpm 说好但目录没换）
+   *                    / `'failed'`（pnpm 非 0）/ `'unknown'`
+   */
+  const upgradeResultFile = () => join(stateDir, '.upgrade-result.json')
+  const readUpgradeResult = () => {
+    try {
+      const j = JSON.parse(readFileSync(upgradeResultFile(), 'utf8'))
+      return j && typeof j === 'object' ? j : null
+    } catch { return null }
+  }
+  const writeUpgradeResult = (obj) => {
+    try { writeFileSync(upgradeResultFile(), JSON.stringify(obj, null, 2), 'utf8') } catch { /* 写不进不影响主流程 */ }
+  }
+
   const runUpgrade = (opts) => {
     if (upgrading) return { ok: true, busy: true, log: installLogFile, hint: '正在升级，别重复点' }
     upgrading = true
@@ -2064,6 +2091,10 @@ export function apply(ctx, config) {
      *    并在日志里说明"没拿到目标版本号，可能装不上新版"。
      */
     const wantVer = String((typeof opts === 'object' && opts && opts.version) || '').trim()
+    // ⭐ 记下目标版本（浮窗标题要用）；开始时**先把旧结果清掉**，
+    //    否则用户会看到"上一次的结论"混在这一轮里。
+    lastUpgradeTarget = wantVer
+    writeUpgradeResult({ at: new Date().toISOString(), target: wantVer, from: myVersion(), running: true })
     const SPEC = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(wantVer)
       ? `${PKG_NAME}@${wantVer}`
       : PKG_NAME
@@ -2383,7 +2414,19 @@ export function apply(ctx, config) {
           return { ok: got === wantVer, got }
         }
         const verified = code === 0 ? verifyInstalled() : { ok: false, skipped: true }
+        /**
+         * ⭐ **把结论落盘**（浮窗要靠它说"成功了该干什么 / 失败了为什么"）。
+         * ⚠️ 三个分支都要写 —— 漏一个就会出现"浮窗永远转圈"。
+         */
+        const _done = (obj) => writeUpgradeResult({
+          at: new Date().toISOString(),
+          target: wantVer || '',
+          from: myVersion(),
+          isDesktop: Boolean(dsh.electron),
+          ...obj,
+        })
         if (code === 0 && !verified.ok && !verified.skipped) {
+          _done({ ok: false, kind: 'not-replaced', got: verified.got || '', reason: '装上了但磁盘上的版本没变' })
           appendInstall(`\n⚠️ pnpm 说装好了（exit 0），但**磁盘上的版本没变**：`
             + `期望 ${wantVer}，实际 ${verified.got}\n`)
           appendInstall(wantDesktopEntry
@@ -2394,6 +2437,7 @@ export function apply(ctx, config) {
               + '👉 解决办法：重启一次 dsh 后再点「一键升级」。\n')
           appendInstall('=== 升级**没有**完成（虽然 pnpm 返回 0）===\n')
         } else if (code === 0) {
+          _done({ ok: true, got: verified.skipped ? '' : verified.got })
           appendInstall(`=== 升级完成（已确认磁盘上是 ${verified.skipped ? '新版本' : verified.got}）`
             + ` —— ${restartHint()} ===\n`)
         }
@@ -2408,6 +2452,8 @@ export function apply(ctx, config) {
          *    并说清"要先完全退出桌面版"（profile 被占用时它也会拒绝）。
          */
         else {
+          // ⭐ 失败也要落盘（浮窗靠它说"失败了、为什么、下一步做什么"）
+          _done({ ok: false, kind: 'failed', got: '', reason: `pnpm 退出码 ${code}` })
           if (wantDesktopEntry) {
             const desktopCmd = String(process.env.DSH_DESKTOP_NODE_EXECUTABLE || '').trim()
               ? join(String(rp || ''), 'runtime', 'cli', 'bin', 'dsh.cmd')
@@ -4544,6 +4590,8 @@ export function apply(ctx, config) {
    *      混在一起会把"失败"当成"拿到了结果"。
    */
   let lastUpdateFailAt = 0
+  /** 上次失败的原因（给面板如实显示用；见 `status()` 里 `update.failed` 那段注释） */
+  let lastUpdateFailReason = ''
   const warmUpdate = () => {
     if (warming) return
     // 冷却期内不重复查（`updateCache` 由 `checkUpdate` 维护，共用同一份）
@@ -4555,9 +4603,18 @@ export function apply(ctx, config) {
     checkUpdate()
       .then((r) => {
         // ✅ 成功 ⇒ 清掉失败标记（下次真出问题能立刻再报）
-        lastUpdateFailAt = (r && r.ok !== false) ? 0 : Date.now()
+        if (r && r.ok !== false) {
+          lastUpdateFailAt = 0
+          lastUpdateFailReason = ''
+        } else {
+          lastUpdateFailAt = Date.now()
+          lastUpdateFailReason = String((r && r.error) || '连不上 npm')
+        }
       })
-      .catch(() => { lastUpdateFailAt = Date.now() })   // 静默：预热失败不惊动任何人
+      .catch((e) => {
+        lastUpdateFailAt = Date.now()
+        lastUpdateFailReason = String(e?.message ?? e)
+      })   // 静默：预热失败不惊动任何人
       .finally(() => { warming = false })
   }
 
@@ -4612,6 +4669,24 @@ export function apply(ctx, config) {
           return all.slice(-(upgrading ? 4000 : 1400))
         } catch { return '' }
       })(),
+      /**
+       * ⭐⭐ **升级过程的状态**（2026-10-20 加，配合浮窗）。
+       *
+       * 使用者原话：「升级的这个过程能有一个浮窗去显示升级的进程。
+       *   然后升级成功以后，提示用户应该怎么做。或者升级失败也有提示。」
+       *
+       * 面板靠这三个字段画浮窗：
+       *   · `upgrading`     —— 正在装（转圈）
+       *   · `upgradeTarget` —— 目标版本号（标题用）
+       *   · `upgradeResult` —— 装完的结论（成功/失败 + 怎么重启）
+       *
+       * ⚠️ `upgradeResult` 必须**落盘**（`.upgrade-result.json`）而不是放内存：
+       *    因为升级完要**重启**才生效，重启会清掉内存 ⇒
+       *    用户重启回来还得能看到"上一轮到底成没成"。
+       */
+      upgrading: Boolean(upgrading),
+      upgradeTarget: lastUpgradeTarget || '',
+      upgradeResult: readUpgradeResult(),
       report: join(outDir, `${today}.md`),
       log: logFile,
       // 判重表条数（设置页要显示"已经记了多少个视频"）
@@ -4641,15 +4716,56 @@ export function apply(ctx, config) {
        *
        * `null` = 还没查过 ⇒ 面板**什么都不显示**（不要显示"正在检查"，那会闪）。
        */
+      /**
+       * 🔴🔴 **检查更新失败时，必须让面板知道**（2026-10-20 修，真机踩到）。
+       *
+       * ── 症状（很严重）────────────────────────────────────────
+       *   使用者的 registry 配错 / 那个源连不上 ⇒ 检查更新**永远失败** ⇒
+       *   `updateCache` 一直是 null ⇒ 面板拿到 `update: null` ⇒
+       *   **什么都不显示**，看起来跟"已是最新"一模一样。
+       *   ⇒ **那个用户永远升不了级，而且没有任何提示。**
+       *
+       * ── 根因 ────────────────────────────────────────────────
+       *   这里原来只搬"成功结果"（`updateCache`），失败信息**根本没往外传**：
+       *   ```js
+       *   update: (() => { if (!updateCache) return null; ... })()
+       *   ```
+       *   `null` 的本意是"还没查过"，但它同时承担了"查失败了"的语义 ⇒
+       *   面板分不清这两件事，只能都不显示。
+       *
+       * ── 改法 ────────────────────────────────────────────────
+       *   `update` 里带一个 `failed` 字段，并把**它试过哪些源、各报什么错**带出去
+       *   （`checkUpdate()` 已经把 `tried` 攒好了）⇒ 面板能如实说
+       *   「检查更新失败：连不上 npm（…）」，而不是装成"已是最新"。
+       *
+       * ⭐ 判据：**"没有数据"和"取数失败"必须分成两个信号**。
+       *    合成一个 `null` 是最容易让用户误解的做法 ——
+       *    他看到的"什么都没有"和"一切正常"长得一模一样。
+       */
       update: (() => {
-        if (!updateCache) return null
-        return {
-          hasNew: Boolean(updateCache.hasNew),
-          latest: updateCache.latest || '',
-          current: myVersion(),
-          // ⚠️ 面板要拿它拼「查看更新内容」的链接 —— 只给版本号不够
-          page: 'https://github.com/' + GH_REPO + '/releases',
+        // ① 有成功结果 ⇒ 照旧
+        if (updateCache) {
+          return {
+            hasNew: Boolean(updateCache.hasNew),
+            latest: updateCache.latest || '',
+            current: myVersion(),
+            page: 'https://github.com/' + GH_REPO + '/releases',
+          }
         }
+        // ② 没结果、但**知道失败过** ⇒ 明确说失败（别装成"已是最新"）
+        if (lastUpdateFailAt) {
+          return {
+            failed: true,
+            hasNew: false,
+            latest: '',
+            current: myVersion(),
+            page: 'https://github.com/' + GH_REPO + '/releases',
+            // 把"试过哪些源、各报什么错"带出去 —— 使用者才可能自己修
+            reason: lastUpdateFailReason || '连不上 npm',
+          }
+        }
+        // ③ 真的还没查过
+        return null
       })(),
       /**
        * ⭐⭐ **后台跑要用哪个 dsh —— 自动探测的结果**（2026-10-18 加）。

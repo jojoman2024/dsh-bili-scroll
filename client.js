@@ -517,6 +517,15 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-confirm-body]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
   color:var(--dsw-alias-label-secondary,#61666b);}
 [data-bd-confirm-foot]{display:flex;justify-content:flex-end;gap:8px;}
+/* ⭐ 升级浮窗里的"安装中"提示（2026-10-20 加）：
+   前面转一个小圈，让人一眼看出"它在动、不是在等"。
+   ⚠️ 只用 CSS 动效，不加图片/图标 —— 面板里没有图标资源。 */
+[data-bd-spin]{display:flex;align-items:center;gap:6px;}
+[data-bd-spin]::before{content:'';width:12px;height:12px;flex:0 0 auto;
+  border:2px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));
+  border-top-color:var(--dsw-alias-label-primary,#0f1115);
+  border-radius:50%;animation:bd-spin .8s linear infinite;}
+@keyframes bd-spin{to{transform:rotate(360deg);}}
 /* ⚠️ 危险动作：用官方那个"警示"色（琥珀），别写死红色 —— 主题换色时红色会很突兀 */
 [data-bd-btn][data-danger]{border-color:var(--dsw-alias-state-warn-primary,#f0a020);
   color:var(--dsw-alias-state-warn-primary,#f0a020);}
@@ -1094,6 +1103,22 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
+      /**
+       * ⭐ **升级结果浮窗：记下"已经关掉过哪个结果"**（2026-10-20 加）。
+       *
+       * 为什么用 `result.at`（时间戳）而不是布尔：
+       *   升级完要**重启**，重启会把内存 state 全部复位 ⇒
+       *   光用 `useState(false)` 的话，重启回来浮窗又弹一次，没完没了。
+       *   ⇒ 记下"关掉的那份结果的时间戳"，只有**新的一份结果**才再弹。
+       * ⚠️ 存 localStorage（跨重启）而不是 useState（重启即丢）。
+       */
+      const [dismissedUpgrade, setDismissedUpgrade] = React.useState(() => {
+        try { return String(localStorage.getItem('bili-scroll-jojo/upgrade-dismissed') || '') } catch { return '' }
+      })
+      const dismissUpgrade = (at) => {
+        setDismissedUpgrade(at)
+        try { localStorage.setItem('bili-scroll-jojo/upgrade-dismissed', at) } catch { /* 存不了就只在本次生效 */ }
+      }
       /**
        * 🥚 **彩蛋用：记住「每条最多发几条」在**输入暗号之前**那个合法值**（2026-10-18）。
        *
@@ -2611,6 +2636,98 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                    */
                   onClick: () => { setShowUpdateDlg(false); setShowChangelog(null); setTab('env'); onUpgrade() },
                 }, '直接升级')))) : null,
+
+        /* ════════ ⭐⭐ 升级过程浮窗（2026-10-20 加）════════
+         *
+         * 使用者原话：「升级的这个过程能有一个浮窗去显示升级的进程。
+         *   然后升级成功以后，提示用户应该怎么做。或者升级失败也有提示。」
+         *
+         * ── 为什么需要它 ────────────────────────────────────
+         *   原来点完「一键升级」只有**一句话**（`say()`），几秒就没了；
+         *   真正的过程写进 `install.log`，而那份要**翻到「环境与账号」页**才看得到。
+         *   ⇒ 用户点完一片安静 ⇒ 以为没反应 ⇒ 再点一次（撞上"正在升级"的互斥）。
+         *
+         * ── 三态（全部来自 `/status`）──────────────────────
+         *   ① `upgrading === true`            ⇒ 转圈 + 实时日志尾巴
+         *   ② `upgradeResult.ok === true`     ⇒ 成功：告诉他**该怎么重启**
+         *   ③ `upgradeResult.ok === false`    ⇒ 失败：说清原因 + 下一步
+         *   ⚠️ ②③ 是**落盘**的（`.upgrade-result.json`）⇒ 重启回来还看得到，
+         *      因为"装完要重启"这件事本身就会让内存丢失。
+         *
+         * ── 什么时候出现 ────────────────────────────────────
+         *   · 正在升级 ⇒ 一直显示（关不掉，避免误以为完成）
+         *   · 有结果   ⇒ 显示，**可以关**（`dismissedUpgrade`）；关掉后不再弹
+         *   · 都没有   ⇒ 不显示
+         *
+         * ⚠️ 关掉后要能"再也不弹"：只靠一个内存 state 不够（重启就复位）——
+         *    所以比对 `result.at`（时间戳），**同一个结果只弹一次**。
+         */
+        (() => {
+          const res = st.upgradeResult
+          const running = Boolean(st.upgrading) || Boolean(res && res.running)
+          // 没有在跑、也没有结果 ⇒ 什么都不画
+          if (!running && !res) return null
+          // 结果已经关掉过（按时间戳判，重启也认）⇒ 不再弹
+          if (!running && res && dismissedUpgrade === res.at) return null
+
+          /** 成功时的"该怎么办"按端分（桌面版没有"dsh 进程"这个概念） */
+          const isDesk = res?.isDesktop ?? isDesktop
+          const howTo = isDesk
+            ? '完全退出桌面版（托盘图标也要退出）再重新打开，新版才生效。'
+            : '重启一次 dsh 才生效。'
+
+          /** 失败时按 kind 给不同的下一步 */
+          const failWhy = (r) => {
+            if (!r) return '不知道哪里出错了 —— 看下面的日志。'
+            if (r.kind === 'not-replaced') {
+              return `pnpm 说装好了，但磁盘上还是 ${r.got || '旧版本'}。`
+                + (isDesk
+                  ? '多半是「桌面版正在运行、目录被占用」：完全退出桌面版（托盘图标也退）后再点一次升级。'
+                  : '多半是目录被占用：重启一次 dsh 后再点一次升级。')
+            }
+            if (r.kind === 'failed') return `pnpm 没装成（${r.reason || '退出码非 0'}）—— 看下面的日志找原因。`
+            return r.reason || '未知原因 —— 看下面的日志。'
+          }
+
+          /** 日志尾巴：只取最后几行（浮窗别撑太大） */
+          const tail = String(st.installTail || '').trim().split(/\r?\n/).slice(-6).join('\n')
+
+          return h('div', { 'data-bd-confirm': '' },
+            h('div', { 'data-bd-confirm-box': '' },
+              h('div', { 'data-bd-confirm-title': '' },
+                running ? `正在升级${st.upgradeTarget ? ` 到 ${st.upgradeTarget}` : ''}…`
+                  : res?.ok ? '✅ 升级完成' : '⚠️ 升级没成功'),
+
+              h('div', { 'data-bd-confirm-body': '' },
+                running
+                  ? h('div', null,
+                    h('div', { 'data-bd-spin': '' }, '安装中，请稍候（通常十几秒）。'),
+                    '⚠️ 装的过程中「别关面板」，装完会在这里告诉你下一步。')
+                  : res?.ok
+                    ? h('div', null,
+                      `已经从 ${res.from || '旧版'} 装到「${res.got || res.target || '新版'}」。`,
+                      h('br'),
+                      h('b', null, '你现在要做的：'),
+                      h('br'),
+                      howTo)
+                    : h('div', null,
+                      h('b', null, '为什么失败：'),
+                      h('br'),
+                      failWhy(res)),
+
+                /* 实时日志尾巴（只在升级中显示，成功/失败后看完整日志更合适） */
+                running && tail
+                  ? h('pre', { 'data-bd-pre': '', 'data-bd-clog': '' }, tail)
+                  : null),
+
+              h('div', { 'data-bd-confirm-foot': '' },
+                running
+                  ? null
+                  : h('button', {
+                    'data-bd-btn': '', 'data-primary': '',
+                    onClick: () => dismissUpgrade(res?.at || ''),
+                  }, '知道了'))))
+        })(),
         /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
           h('div', { 'data-bd-h': '' }, '环境与账号'),
