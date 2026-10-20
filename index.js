@@ -1586,7 +1586,37 @@ export function apply(ctx, config) {
       //    这里管的是"要不要再发一条评论"，只有**真评论过**才算重复。
       const seen = readSeen().get(bvid)
       const alreadyCommented = Boolean(seen) && (seen.kind === '评论' || String(seen.rpid || '') !== '')
-      if (alreadyCommented && !repeat) {
+      /**
+       * ⭐ **这一下是"回别人的楼中楼"还是"发新评论"？**（判据在原有注释里，见下）
+       *
+       * ⚠️ **必须定义在判重闸之前** —— 下面那个 `if (alreadyCommented && !repeat && !isReply)`
+       *    要读它。`const` 有 TDZ ⇒ 定义在它后面会直接
+       *    `ReferenceError: Cannot access 'isReply' before initialization`（真会炸）。
+       *    （2026-10-19：我第一版就把它留在了原位，是探针的 TDZ 检查抓出来的。）
+       */
+      const isReply = (Number(args.rpid) || 0) !== 0 || String(args.replyTo ?? '').trim() !== ''
+      /**
+       * 🔴🔴 **判重闸不能拦「回楼中楼」**（2026-10-19 修，用户反馈）。
+       *
+       * ── 症状 ──────────────────────────────────────────────
+       *   在某个视频下发过一条评论之后，**再回复别人的楼中楼会被当成"重复评论"拦掉**。
+       *
+       * ── 根因 ──────────────────────────────────────────────
+       *   这两种发言共用了同一个判重键（BV 号）：
+       *     · 发新评论  = 在 `bvid` 下发一条公开评论；
+       *     · 回楼中楼  = 回某个人（`replyTo` / `rpid`），**与"这个视频评论过没有"无关**。
+       *   语义完全不同：一个视频下可以被很多人回复，**每一条都是新的对话**；
+       *   而"这个视频我评论过"并不能推出"这个人我回过了"。
+       *
+       * ⭐ 更关键的是：**回复的去重本来就有自己的账本**（`replies.json` 的
+       *   `replies[source_id].repliedAt`），`bilij_replies` 靠它把已回过的摘掉。
+       *   ⇒ 判重闸这里**再拦一次是重复的、而且是错的**。
+       *
+       * ── 旁证（作者本意也是区分的）──
+       *   额度已经分开了：`markRoundUse(isReply ? 'replies' : 'comments', …)`
+       *   ⇒ 只有 `seen.md` 这一处漏了区分。
+       */
+      if (alreadyCommented && !repeat && !isReply) {
         return {
           ok: false,
           blocked: true,
@@ -1615,7 +1645,7 @@ export function apply(ctx, config) {
        *    ⇒ **不做判断、放行**（宁可放行，也不要因为读不到 id 就把功能锁死）。
        * ⚠️ **前台专属**：后台那轮用的是 MCP 原始工具，根本不经过这里。
        */
-      const isReply = (Number(args.rpid) || 0) !== 0 || String(args.replyTo ?? '').trim() !== ''
+      // ⚠️ `isReply` 已在上面（判重闸之前）定义 —— 这里**不要**再声明一次。
       const quota = roundUsage(isReply ? 'replies' : 'comments')
       /**
        * ⭐ **`force: true` 也能越过额度闸**（2026-10-17 加）——
@@ -1679,11 +1709,28 @@ export function apply(ctx, config) {
         ? true
         : (typeof rec === 'object' ? rec.success !== false && rec.ok !== false : true)
       if (okNow) {
-        await markSeen(bvid, {
-          kind: '评论',
-          rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '',
-          note: String(args.text ?? '').slice(0, 40),
-        })
+        /**
+         * 🔴 **回楼中楼时不要写 `seen.md`**（2026-10-19 修，用户反馈）。
+         *
+         * `seen.md` 的语义是「**这个 BV 号占过使用者注意力**」——
+         * 它既用于搜索阶段跳过、也用于"这个视频评论过没有"。
+         *
+         * 而「回某人的楼中楼」**不产生"我在这视频下评论过"这个事实**：
+         *   · 它是跟**某个人**的对话，不是对这个视频的公开表态；
+         *   · 一个视频下可以被很多人回复，每一条都是新的；
+         *   · 更重要的：写进去之后 `seen.rpid` 会是**他那条回复的 id**，
+         *     于是 `alreadyCommented` 变真 ⇒ **挡住之后发新评论**（就是用户报的那个问题）。
+         *
+         * ⭐ 回复的去重**已经有自己的账本**：下面那个 `replies[source_id].repliedAt`
+         *   （`bilij_replies` 靠它把已回过的摘掉）⇒ 这里不需要再记一次。
+         */
+        if (!isReply) {
+          await markSeen(bvid, {
+            kind: '评论',
+            rpid: (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || '',
+            note: String(args.text ?? '').slice(0, 40),
+          })
+        }
         // ⭐ **记本轮的额度用量**（两种都记，但记在各自的格子里）——
         //    ⚠️ 必须在**真发成功之后**：先记后发的话，发失败也占掉额度。
         //    ⚠️ 索引键：**回复**用 source_id（`replyTo`，没有就退回 rpid），**新评论**用 BV。
