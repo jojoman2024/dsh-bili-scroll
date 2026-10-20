@@ -520,20 +520,6 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
   line-height:22px;color:var(--dsw-alias-label-primary,#0f1115);}
 [data-bd-confirm-body]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
   color:var(--dsw-alias-label-secondary,#61666b);}
-/* ⭐⭐ **升级浮窗用固定尺寸**（2026-10-21 使用者要求）。
-   为什么要：日志是**一段段追加**的，原来弹窗跟着内容长高/缩短，
-   面板宽度也跟着变 ⇒ 看着像"界面在抖"，眼睛很累。
-   ⇒ 给它一个**固定高度**，日志区域自己滚。
-   ⚠️ 只作用于带 data-bd-fixed 的那个（升级浮窗）；其它确认框仍按内容自适应。 */
-[data-bd-confirm-box][data-bd-fixed]{width:min(92vw,540px);height:min(72vh,460px);
-  max-height:72vh;overflow:hidden;}
-/* body 变成纵向 flex：上面是文字/说明，下面那块日志吃掉剩余高度 */
-[data-bd-confirm-box][data-bd-fixed] [data-bd-confirm-body]{display:flex;flex-direction:column;
-  gap:8px;flex:1 1 auto;min-height:0;overflow:hidden;}
-/* 日志块：自己滚，别撑破弹窗 */
-[data-bd-confirm-box][data-bd-fixed] [data-bd-pre]{max-height:none;}
-[data-bd-confirm-box][data-bd-fixed] [data-bd-pre][data-bd-clog]{flex:1 1 auto;min-height:56px;
-  max-height:none;overflow:auto;}
 [data-bd-confirm-foot]{display:flex;justify-content:flex-end;gap:8px;}
 /* ⭐ 升级浮窗里的"安装中"提示（2026-10-20 加）：
    前面转一个小圈，让人一眼看出"它在动、不是在等"。
@@ -2825,26 +2811,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           /** 日志尾巴：只取最后几行（浮窗别撑太大） */
           const tail = String(st.installTail || '').trim().split(/\r?\n/).slice(-6).join('\n')
 
-          /**
-           * ⭐⭐ **日志窗口自动滚到底部**（2026-10-21 使用者要求）。
-           *
-           * 为什么用 **ref 回调**而不是 hook：
-           *   这段是 IIFE，不是组件 ⇒ **不能调 hook**（调了就是"hook 顺序"错误）。
-           *   而 ref 回调在**每次渲染后都会跑** ⇒ 正好用来跟住新增的日志行。
-           *
-           * ⚠️ **已经往上翻看的人不要被拽回来**：
-           *   只有"本来就在底部附近"（48px 内）时才跟着滚。
-           *   否则用户想翻前面的报错，每 5 秒被弹回底部，很难受。
-           */
-          const autoScrollToBottom = (el) => {
-            if (!el) return
-            const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-            if (nearBottom) el.scrollTop = el.scrollHeight
-          }
-
           return h('div', { 'data-bd-confirm': '' },
-            /* ⚠️ `data-bd-fixed` = **固定尺寸**（别让弹窗随日志长高/缩短，见 CSS 那段注释） */
-            h('div', { 'data-bd-confirm-box': '', 'data-bd-fixed': '' },
+            h('div', { 'data-bd-confirm-box': '' },
               h('div', { 'data-bd-confirm-title': '' },
                 running ? `正在升级${st.upgradeTarget ? ` 到 ${st.upgradeTarget}` : ''}…`
                   : res?.ok ? '✅ 升级完成' : '⚠️ 升级没成功'),
@@ -2882,12 +2850,12 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       !running && res && res.ok === false && tail
                         ? h('div', null,
                           h('div', { 'data-bd-note': '' }, '安装日志（末尾）：'),
-                          h('pre', { 'data-bd-pre': '', 'data-bd-clog': '', ref: autoScrollToBottom }, tail))
+                          h('pre', { 'data-bd-pre': '', 'data-bd-clog': '' }, tail))
                         : null),
 
                 /* 实时日志尾巴（只在升级中显示，成功/失败后看完整日志更合适） */
                 running && tail
-                  ? h('pre', { 'data-bd-pre': '', 'data-bd-clog': '', ref: autoScrollToBottom }, tail)
+                  ? h('pre', { 'data-bd-pre': '', 'data-bd-clog': '' }, tail)
                   : null),
 
               h('div', { 'data-bd-confirm-foot': '' },
