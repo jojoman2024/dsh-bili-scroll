@@ -317,14 +317,46 @@ window.__ModuleLoader__.load({
    ⚠️ 这里**不要再写 padding/margin** —— 那正是上一版"间隔不统一"的病根。 */
 [data-bd-row]{display:flex;align-items:center;gap:8px;}
 /* ⭐ 输入框 + 开关并排（「要通知谁」那一行，2026-10-19 加）：
-   输入框吃掉剩余宽度，开关按内容宽度贴着它。
-   ⚠️ 与 [data-bd-row] 的区别：那条要求"右侧控件右边缘全对齐"，
-      而这里开关紧跟在输入框右边**不是**贴右 —— 所以单独一个标记，别混用。 */
+   输入框吃掉剩余宽度；开关那一组宽度由内容决定，被挤到最右。
+   🔴 **必须自己撑满 [data-bd-ctl]**（2026-10-19 截图修正）：
+      Field 的 stack 模式结构是
+        [data-bd-field]（竖排）> [data-bd-ctl]（**横排 flex**）> 我们的 inline
+      而 [data-bd-ctl] 没有给子元素 flex:1（它默认是"控件有多大就多宽"）
+      ⇒ 不写 width:100% / flex:1 时，这一行只占**内容宽度**，
+        输入框铺不满、开关也到不了行右边界（实测就是这个症状）。
+      ⚠️ 用 width:100% 而不是 flex:1：ctl 可能还有别的子元素，
+        它们不该被我们这一条连带改动。 */
+[data-bd-ctl]>[data-bd-inline]{flex:1 1 auto;width:100%;min-width:0;}
 [data-bd-inline]{display:flex;align-items:center;gap:8px;}
 /* ⚠️ 顺序要紧：先让所有子项不伸缩，**再**把输入框单独放开**
-   （反过来写会被 >* 那条盖掉 —— 同权重、后者胜）。 */
+   （反过来写会被 >* 那条盖掉 —— 同权重、后者胜）。
+   🔴 inline 里的输入框还要 **width:auto**（2026-10-19 截图修正）：
+      上面那条 [data-bd-field] [data-bd-input]{width:100%} 权重更高（0,2,0），
+      会让输入框抢满整行、把右边的开关挤出去。
+      这里补 width:auto 之后，宽度完全由 flex:1 1 0% 分配。
+   ⚠️ 选择器**必须写全 [data-bd-field] [data-bd-inline]>[data-bd-input]**（0,3,0）
+      才压得过那条；只写两段会打平、然后按顺序赌，不可靠。 */
 [data-bd-inline]>*{flex:0 0 auto;}
-[data-bd-inline]>[data-bd-input]{flex:1 1 0%;min-width:0;}
+[data-bd-field] [data-bd-inline]>[data-bd-input]{flex:1 1 0%;min-width:0;width:auto;}
+/* ⭐ 「名字 + 开关」的一小组，**横排、同一水平线**（2026-10-19 使用者要求）：
+   「开关要跟面板里其他开关右边缘对齐；开关的名字肯定要和开关在一条水平线上」
+   · 横排：名字在左、开关在右（**不要竖排**）；
+   · align-items:center ⇒ 名字与开关**垂直居中对齐**（同一水平线）；
+   · flex:0 0 auto ⇒ 不伸缩，宽度由内容决定 ⇒ 右边自然就是行右边界。
+   ⚠️ **不要加 margin-left:auto**：
+      输入框已经是 flex:1 1 0%（吃掉全部剩余空间）⇒ 剩余空间为 0，
+      auto 外边距没有东西可推；真推起来反而会把 gap 挤掉、
+      让「输入框 ↔ 开关组」的间隔从 8px 变成不确定值。
+      靠「输入框撑满」这一条就够了 —— 开关组被挤到最右是它的结果，不是另一条规则。
+   ⭐ **为什么右边缘能跟别的开关对齐**：
+      [data-bd-sec] 有 padding:20px 16px 0（左右各 16px），
+      而 [data-bd-sub] 是它的子元素、padding:0（不额外缩进）
+      ⇒ **sub 里的元素与 sec 直属元素的左右内边界完全相同**
+      ⇒ 都顶到右边界时，右边缘自然一致。
+   ⚠️ 不要用 ToggleRow：它自带 [data-bd-row]+grow+label+note，塞进 inline 行会撑歪。 */
+[data-bd-switchgroup]{display:flex;align-items:center;gap:8px;flex:0 0 auto;}
+/* ⚠️ 不要 white-space:nowrap —— 右侧栏窄，「评论时 @ 他」六个字会顶出去。 */
+[data-bd-swlabel]{min-width:0;}
 [data-bd-row2]{display:flex;gap:20px;}
 [data-bd-row2]>*{flex:1;min-width:0;}
 /* ⭐ 三等分一行（模型那三个下拉用）：provider / 模型 / 思考档位 各占 1/3。
@@ -678,6 +710,73 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       return h('div', { 'data-bd-row': '' }, text, children)
     }
 
+    /* ════════ 面板界面状态：跨会话共享（2026-10-20 加）════════
+     *
+     * 🔴 **为什么要做**（使用者的原话）：
+     *    「右侧栏是跟会话的。可能会导致不同页面面板的设置显示不一样，
+     *      搞得用户也弄不清楚到底设置的是啥。应该要保持统一，不跟会话。」
+     *
+     * ── 根因（DSH 的架构，不是我们的 bug）──────────────
+     *   右侧栏的停靠面是**按会话存的**（`bySession[sessionId]`）：
+     *     · 没开过右栏的会话是空的；
+     *     · **同一个面板在不同会话是各自实例**；
+     *     · 切到新会话时面板是**新建**的 ⇒ 内存里的 state 回到默认值。
+     *    ⇒ 看起来就像「设置跟着会话变」。
+     *
+     * ── 但"看起来一份"做得到（不改内核）──────────────
+     *    ⭐ **真正的配置本来就只有一份**（`config.json`）：
+     *      面板每 5 秒轮询 `/status`，所以**配置值**其实会在 5 秒内自动对齐。
+     *    ⚠️ 真正"不一样"的是**纯界面状态**：
+     *       · 当前在第几个标签页（`tab`）；
+     *       · 输入框里的**本地草稿**（`mention` / `kws` 那些，还没提交的）。
+     *
+     * ── 做法（照 memj 插件验证过的那套）──────────────────
+     *    · **localStorage 存一份共享**（新面板启动时"收养"它）；
+     *    · **BroadcastChannel 广播**（别的面板改了 ⇒ 这边立刻跟上）；
+     *    · ⚠️ **应用"来自别处"的状态期间要置标志、不广播** ——
+     *      否则 A→B→A 来回弹（memj 那条知识里明写的坑）。
+     *
+     * ⚠️ 只共享**界面**状态，**不共享服务端配置**（那个本来就只有一份，
+     *   再存一份到 localStorage 反而会跟轮询打架）。
+     */
+    const UI_SHARE_KEY = 'bili-scroll-jojo/ui-state'
+    const UI_SHARE_CH = 'bili-scroll-jojo/ui'
+
+    /** 读共享状态（读不到/坏了都返回 {}，绝不抛） */
+    const readSharedUI = () => {
+      try {
+        const raw = localStorage.getItem(UI_SHARE_KEY)
+        if (!raw) return {}
+        const o = JSON.parse(raw)
+        return o && typeof o === 'object' ? o : {}
+      } catch { return {} }
+    }
+
+    /**
+     * 写共享状态 + 广播。
+     * @param patch 要合并进去的字段（只写这几个，别整份替换 —— 多面板并发时整份会互相踩）
+     */
+    const writeSharedUI = (patch) => {
+      try {
+        const next = { ...readSharedUI(), ...patch, at: Date.now() }
+        localStorage.setItem(UI_SHARE_KEY, JSON.stringify(next))
+        // ⚠️ 广播失败不能影响界面（某些环境没有 BroadcastChannel）
+        try { uiChannel?.postMessage(next) } catch { /* 忽略 */ }
+      } catch { /* 存储不可用（隐私模式/配额满）也不能崩 */ }
+    }
+
+    /**
+     * 共享通道。**模块级单例** —— 每个面板实例都在同一个 document 里，
+     * 但各会话的面板是独立 React 树；用 BroadcastChannel 让它们互相同步。
+     * ⚠️ 没有 BroadcastChannel 的环境下退化成"只有 localStorage"（切过去才生效）。
+     */
+    let uiChannel = null
+    try {
+      if (typeof BroadcastChannel === 'function') {
+        uiChannel = new BroadcastChannel(UI_SHARE_CH)
+      }
+    } catch { uiChannel = null }
+
     /**
      * ⭐ **「后台跑要用哪个 dsh」那一块** —— 抽成纯函数（2026-10-18）。
      *
@@ -924,7 +1023,22 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        * ⚠️ 只存在**内存**里，不落盘 —— 面板重开回到第一页。这是有意的：
        *    它是"分类浏览"而非"用户偏好"，记住反而让人找不到东西。
        */
-      const [tab, setTab] = React.useState('settings')
+      /**
+       * ⭐⭐ **当前标签页改成"跨会话共享"**（2026-10-20 使用者要求：
+       *    「不同页面面板的设置显示不一样，用户也弄不清楚到底设置的是啥，应该保持统一」）。
+       *
+       * 原来注释写的是"只存在内存里、面板重开回到第一页，这是有意的"——
+       * **那个决定现在被推翻了**：右侧栏是**按会话一份**的（DSH 架构），
+       * 切会话就新建面板 ⇒ 每份都回到第一页 ⇒ 用户以为"设置变了"。
+       *
+       * ⇒ 初始值从 `localStorage` 的共享状态里"收养"，变了再写回去 + 广播。
+       * ⚠️ 真正的**配置值**不用共享（`config.json` 本来就一份，5 秒轮询会对齐）；
+       *    这里只共享"界面在哪一页"这种纯 UI 状态。
+       */
+      const [tab, setTab] = React.useState(() => {
+        const v = readSharedUI().tab
+        return v === 'settings' || v === 'prompt' || v === 'env' || v === 'lab' ? v : 'settings'
+      })
 
       const [kws, setKws] = React.useState(null)
       // ⭐ 搜索相关的四个新设置（2026-10-16 加）：草稿存在本地 state，
@@ -1037,6 +1151,73 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       }
       // 组件卸载时清掉定时器（不清的话，卸载后 setState 会报警告）
       React.useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
+
+      /* ════════ 面板界面状态：跨会话共享 —— 双向同步（2026-10-20）════════
+       *
+       * 三条规矩（照 memj 插件验证过的那套）：
+       *  ① **本面板自己的变化 ⇒ 写盘 + 广播**；
+       *  ② **别的面板广播过来 ⇒ 应用，但期间置标志、不再广播回去**
+       *     （否则 A→B→A 来回弹，memj 那条知识里明写就是这个坑）；
+       *  ③ 卸载时**断开通道**（每会话一份面板，会话切多了会堆一堆监听）。
+       *
+       * ⚠️ `applying` 用 `useRef` 而不是 state —— 它只在回调里同步判断，
+       *    进 state 会多一次无意义的重渲染，而且读到的是旧值。
+       */
+      const applyingRemote = React.useRef(false)
+
+      /* ① **挂载时主动对齐一次**（= 每次切会话就对齐一次）
+       *
+       * 使用者明确要求：「不要 5 秒内自动对齐，而是**每次切换会话的时候做一次主动对齐**」。
+       *
+       * ⭐ 为什么"挂载"正好等于"切会话"：
+       *    右侧栏面板是**按会话一份**的（DSH 架构）⇒
+       *    切到一个新会话时，这一份面板是**新建**的 ⇒ 这个 effect 就会跑一次。
+       *    ⇒ 不需要定时器、不需要轮询，天然"每次切换都对齐"。
+       *
+       * ⭐ 对齐什么：
+       *    · **本地界面状态**（`tab` 等）—— 从 `localStorage` 那份共享里读回来；
+       *    · **服务端配置**（`cfg`）—— `useStatus()` 在挂载时已经 `tick()` 过一次了
+       *      （见它的实现：`tick(); setInterval(...)`），所以配置本身就是"当场拉一次"。
+       *    ⇒ 这里只补前者，不重复拉后者。
+       */
+      React.useEffect(() => {
+        const shared = readSharedUI()
+        if (shared.tab && shared.tab !== tab) {
+          applyingRemote.current = true
+          setTab(shared.tab)
+        }
+        // ⚠️ 依赖故意留空：**只在挂载时**对齐一次。
+        //    若把 tab 放进依赖，每次本地切页都会再对齐一次 ⇒ 跟自己打架。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [])
+
+      // ② 本地 tab 变了 ⇒ 推给别的面板（让它们立刻跟上，不用等切会话）
+      React.useEffect(() => {
+        if (applyingRemote.current) { applyingRemote.current = false; return }
+        writeSharedUI({ tab })
+      }, [tab])
+
+      // ③ 收到别的面板的广播 ⇒ 跟上（只认它管的字段）
+      React.useEffect(() => {
+        if (!uiChannel) return undefined
+        const onMsg = (ev) => {
+          const d = ev?.data
+          if (!d || typeof d !== 'object') return
+          if (d.tab && d.tab !== tab) {
+            applyingRemote.current = true
+            setTab(d.tab)
+          }
+        }
+        uiChannel.addEventListener('message', onMsg)
+        return () => uiChannel.removeEventListener('message', onMsg)
+      }, [tab])
+
+      // ④ 卸载时把这一份的监听摘干净
+      React.useEffect(() => () => {
+        try { uiChannel?.close?.() } catch { /* 忽略 */ }
+        uiChannel = null
+      }, [])
+
       // （旧的「报告展开态」已删 —— 日报不写了，见下面的产物清单）底下，看不见）
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
@@ -2103,7 +2284,13 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                *    因为它现在管**两件事**（评论 @ 谁 / 私信发给谁），
                *    而"@ 谁"这个叫法只描述得了前一半。
                */
-              note: '评论里 @ 的、私信发的，都是这个人。⚠️ 要跟 B站 昵称逐字一致；留空 = 评论和私信都发不出去。',
+              /**
+               * ⭐ 说明并进这一行（使用者要求「描述放到小节描述里」）：
+               * 原来「评论时 @ 他」那个开关自带一行 note，把行撑歪 ⇒
+               * 现在它的意思合到这里，开关本身**不再带说明文字**。
+               */
+              note: '评论里 @ 的、私信发的，都是这个人。⚠️ 要跟 B站 昵称逐字一致；留空 = 评论和私信都发不出去。'
+                + '\n右边那个开关只影响「评论里要不要 @ 他」——关掉后评论照发、私信照发。',
               stack: true,
               children: h('div', { 'data-bd-inline': '' },
                 h('input', {
@@ -2124,12 +2311,39 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                  * ⚠️ **默认开** —— 老用户升级过来不会发现评论突然不 @ 了。
                  * ⚠️ 关掉**不影响私信**（私信照发给他）。
                  */
-                h(ToggleRow, {
-                  label: '评论时 @ 他',
-                  note: '关掉 = 评论照发，但正文里不 @ 人（私信照发）',
-                  on: cfg.mentionInComment !== false,
-                  onChange: (v) => patch({ mentionInComment: v }, '评论时 @ 人'),
-                })),
+                /**
+                 * ⭐⭐ **「评论时 @ 人」开关**（2026-10-19 加，使用者要求）。
+                 *
+                 * 起因：一个字段管两件事（评论 @ 谁 / 私信发给谁）⇒
+                 * 「开评论 + 开私信 + 评论不 @ 人」这个组合**表达不了**：
+                 *   · 填名字 ⇒ 评论会 @ 他；
+                 *   · 不填名字 ⇒ 评论被准入闸拦住。
+                 * ⇒ 拆出这个开关：**收件人不变，只是评论正文里不去 @ 他。**
+                 *
+                 * ⚠️ **默认开** —— 老用户升级过来不会发现评论突然不 @ 了。
+                 * ⚠️ 关掉**不影响私信**（私信照发给他）。
+                 *
+                 * 🔴 **不能用 ToggleRow**（2026-10-19 使用者三次纠正后定稿）：
+                 *    「你不觉的丑吗？开关靠右对齐啊」
+                 *    「我就是要这个开关和要通知谁的输入框在一行。并排」
+                 *    「开关要跟面板里其他开关右边缘对齐；开关的名字肯定要和开关
+                 *      在一条水平线上，不是说他俩右对齐」
+                 *    `ToggleRow` 自带 `[data-bd-row]` + grow + label + note，
+                 *    塞进这个 inline 行里会把输入框挤歪、开关也不靠右。
+                 * ⇒ 用**名字 + 光开关**的一小组（`[data-bd-switchgroup]`）：
+                 *    · **横排**（`align-items:center`）⇒ 名字与开关同一水平线；
+                 *    · 宽度由内容决定（`flex:0 0 auto`）⇒ 被输入框挤到最右；
+                 *    · 这里**不加 `margin-left:auto`** —— 输入框已吃满剩余空间，
+                 *      再加 auto 会把 gap 挤掉、间隔变得不确定。
+                 * ⚠️ 说明文字已并进上面 `note`（使用者要求"描述放到小节描述里"）⇒
+                 *    这里**不给 note**。
+                 */
+                h('div', { 'data-bd-switchgroup': '' },
+                  h('div', { 'data-bd-swlabel': '' }, '评论时 @ 他'),
+                  h(Switch, {
+                    on: cfg.mentionInComment !== false,
+                    onChange: (v) => patch({ mentionInComment: v }, '评论时 @ 人'),
+                  }))),
             })) : null,
 
           /**
