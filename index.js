@@ -4523,14 +4523,41 @@ export function apply(ctx, config) {
    *    真正的错误会在**点「检查更新」**时如实报出来。
    */
   let warming = false
+  /**
+   * 🔴 **上次"检查更新失败"的时间**（2026-10-20 加，日志被刷爆过）。
+   *
+   * ── 症状 ────────────────────────────────────────────────
+   *   registry 配错 / 连不上时，`duty.log` **每 5 秒多一条**：
+   *   ```
+   *   检查更新失败：连不上 npm（镜像和官方都试过了）：http://127.0.0.1:4873 ⇒ fetch failed
+   *   ```
+   *   一天几千条，把真正有用的日志冲掉，还白耗资源。
+   *
+   * ── 根因 ────────────────────────────────────────────────
+   *   `checkUpdate()` **只在成功时写 `updateCache`**（"失败别缓存"那个考虑是对的），
+   *   而下面的冷却判断**只认 `updateCache`** ⇒ 一旦失败冷却**永不生效**；
+   *   面板每 5 秒轮询 `/status`，每次都调 `warmUpdate()` ⇒ 每 5 秒重查一次。
+   *
+   * ── 修法 ────────────────────────────────────────────────
+   *   单独记"上次失败时间"，**失败后也冷却 10 分钟**。
+   *   ⚠️ 不与 `updateCache` 合并 —— 那个是"成功结果的缓存"；
+   *      混在一起会把"失败"当成"拿到了结果"。
+   */
+  let lastUpdateFailAt = 0
   const warmUpdate = () => {
     if (warming) return
     // 冷却期内不重复查（`updateCache` 由 `checkUpdate` 维护，共用同一份）
     if (updateCache && Date.now() - updateCache.at < 10 * 60 * 1000) return
+    // ⭐ 失败后也冷却 —— 否则每 5 秒刷一条错误日志（见上面那段注释）
+    if (lastUpdateFailAt && Date.now() - lastUpdateFailAt < 10 * 60 * 1000) return
     warming = true
     // ⚠️ **不 await**：这是"预热"，绝不能拖慢 `/status`
     checkUpdate()
-      .catch(() => { /* 静默：预热失败不需要惊动任何人 */ })
+      .then((r) => {
+        // ✅ 成功 ⇒ 清掉失败标记（下次真出问题能立刻再报）
+        lastUpdateFailAt = (r && r.ok !== false) ? 0 : Date.now()
+      })
+      .catch(() => { lastUpdateFailAt = Date.now() })   // 静默：预热失败不惊动任何人
       .finally(() => { warming = false })
   }
 
