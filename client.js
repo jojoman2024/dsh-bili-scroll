@@ -994,17 +994,52 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         if (typeof onRunLog === 'function') return onRunLog(msg, tone)
         return undefined
       }
+      /**
+       * ⭐⭐ **「装好了但还没重启」绿标**（2026-10-21 加，使用者要求）。
+       *
+       * 使用者原话：「当升级成功以后，那个徽章部分的检测到有升级的按钮，
+       *   应该变成提示：请重启 DSH，可以使用那个后台任务进行中的提示的样式，就那个绿色的」
+       *
+       * ⚠️ 必须先于「检测到有新版本」判断：升级完成后 `update.hasNew` **仍然是 true**
+       *   （npm 上最新是 0.1.99，而内存里跑的版本号还是 0.1.10）⇒
+       *   不优先判它，就会一直显示"有新版本"，用户会以为没升成功。
+       *
+       * ⭐ 判据（**自我清除**，不需要额外状态）：
+       *   `upgradeResult.ok === true` 且 **当前运行的版本还不是装好的那个**
+       *   ⇒ 磁盘上已是新版、跑在内存里的还是旧代码 ⇒ 该重启了。
+       *   一旦重启，`st.version` 就等于 `got` ⇒ 这个标自己消失。
+       */
+      const res = st.upgradeResult
+      const gotVer = res && res.ok === true ? String(res.got || res.target || '').trim() : ''
+      const needRestart = Boolean(gotVer) && String(st.version || '').trim() !== gotVer
       return h(React.Fragment, null,
         h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
         h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
         h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
         /**
+         * ⭐⭐ **「请重启 DSH」绿标** —— 复用「正在后台运行…」那套
+         *   （`data-bd-run`：绿字 + 绿点，样式见 CSS 里那段注释）。
+         *   它是可点的：点一下说清**怎么重启**（两端动作不同）。
+         */
+        needRestart
+          ? h('button', {
+            'data-bd-badge': '', 'data-bd-run': '', type: 'button',
+            title: '新版已装好，重启后才生效',
+            onClick: () => showRun(
+              `新版（${gotVer}）已经装好，但你现在用的还是 v${st.version || '?'} —— 要重启才换过去。`
+              + (st.isDesktop
+                ? '桌面版：完全退出（托盘图标也要退）再重新打开。'
+                : 'Web 端：重启一次 dsh。'), 'good'),
+          }, '请重启 DSH')
+          : null,
+        /**
          * ⭐⭐ **「检测到有新版本」黑底白字胶囊**（2026-10-18 加，使用者要求）。
          *   · 位置：**紧跟版本号**（它是"版本相关"的提示）
          *   · `st.update` 为 null（还没查过）⇒ 什么都不显示，**不要闪"检查中"**
          *   · 只在真有新版时出现（不常驻"已是最新"）
+         *   · ⚠️ 已经装好还没重启时**让位给上面那个绿标**（见那段注释）
          */
-        st.update?.hasNew
+        !needRestart && st.update?.hasNew
           ? h('button', {
             'data-bd-badge': '', 'data-bd-new': '', type: 'button',
             title: '有新版本，点一下看怎么升',
