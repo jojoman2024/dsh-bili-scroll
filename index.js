@@ -126,8 +126,23 @@ export const Config = !z ? undefined : z.object({
   asrModel: z.string().default('small').extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
   commentPerRound: z.natural().default(1).extra('volatile', true),
-  /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
+  /** ⭐ 要通知谁（B站 昵称）—— 评论里 @ 的是这个人，私信也发给他；**留空 = 评论和私信都发不出去** */
   mentionName: z.string().default('').extra('volatile', true),
+  /**
+   * ⭐⭐ **发评论时要不要在正文里 @ 那个人**（2026-10-19 加，使用者要求）。
+   *
+   * 起因：`mentionName` 一个字段管了两件事（评论里 @ 谁、私信发给谁），
+   * 于是「开着评论 + 开着私信 + 评论里不 @ 人」这个组合**根本表达不了**：
+   *   · 填名字 ⇒ 评论会 @ 他；
+   *   · 不填名字 ⇒ 评论被 `bilij_reply` 的准入闸拦住（要 @ 谁为空就不让发）。
+   *
+   * ⇒ 拆出一个独立开关（而不是拆成两个字段），因为使用者的场景刚好被它覆盖：
+   *   **收件人还是同一个人，只是评论正文里不去 @ 他。**
+   *
+   * ⚠️ **默认 true** —— 保持老行为（老用户升级过来不会发现评论突然不 @ 了）。
+   * ⚠️ 关掉它**不影响**私信：私信照样发给 `mentionName` 那个人。
+   */
+  mentionInComment: z.boolean().default(true),
   /**
    * ⭐⭐ **私信通知**（2026-10-18 加，使用者要求）。
    *
@@ -422,7 +437,7 @@ export function apply(ctx, config) {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
     freeformWatch: true, watchNote: '',
-    commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     adminMode: false,
     /** ⭐ 私信通知（2026-10-18）—— 复用 commentPerRound / mentionName，见 schema 里的注释 */
     dmNotify: false,
@@ -1203,7 +1218,7 @@ export function apply(ctx, config) {
     name: 'bilij_send_dm',
     description: '给 B站用户**发一条私信**。\n'
       + '⭐ 给 `name`（昵称）会**自动解析 uid**（先查家目录 `accounts.md`，查不到再搜用户）。\n'
-      + '🔴 **发给谁 / 发几条由设置决定**（「要 @ 谁」+「每轮最多发几条」）；'
+      + '🔴 **发给谁 / 发几条由设置决定**（「要通知谁」+「每轮最多发几条」）；'
       + '怎么写见家目录的 `dm.md`（用 `bilij_read` 读）。\n'
       + '⚠️ 私信是**私聊**：正文里不要再 @ 对方，但要带视频链接。',
     parameters: {
@@ -1553,15 +1568,28 @@ export function apply(ctx, config) {
           + '要豁免得让使用者在面板「实验功能」里打开那个开关。'
         : ''
 
-      if ((!cfg.autoComment || !cfg.mentionName) && !force) {
+      /**
+       * 🔴 **准入闸要跟着 `mentionInComment` 走**（2026-10-19 改）。
+       *
+       * 原来无条件要求 `mentionName` 非空 —— 因为那时「发评论」和「@ 人」绑死。
+       * 现在有了「评论里不 @ 人」这个开关 ⇒ 关掉它时**正文不需要名字**，
+       * 所以只在**真的要 @** 时才要求填。
+       *
+       * ⚠️ 但**私信仍然需要它**（私信用 `mentionName` 当收件人）——
+       *    那个要求放在 `bilij_send_dm` 自己的闸里，不在这里替它把关。
+       */
+      const needsMention = cfg.mentionInComment !== false   // 老配置没这个字段 ⇒ 按 true（要 @）
+      if ((!cfg.autoComment || (needsMention && !cfg.mentionName)) && !force) {
         return {
           ok: false,
           blocked: true,
           overridden: (!admin && (wantForce || wantRepeat)) || undefined,
-          hint: '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。'
-            + (admin
-              ? '或者使用者本人当场让你发时传 force: true。'
-              : '⚠️「管理员权限」关着 ⇒ `force` 不起作用，先把设置补齐。')
+          hint: needsMention
+            ? '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要通知谁」。'
+            : '要发评论得先开着「自动评论并 @ 你」（当前「评论里 @ 人」是关的，所以不用填名字）。'
+              + (admin
+                ? '或者使用者本人当场让你发时传 force: true。'
+                : '⚠️「管理员权限」关着 ⇒ `force` 不起作用，先把设置补齐。')
             + (authorityNote ? '\n' + authorityNote : ''),
         }
       }
@@ -2797,8 +2825,28 @@ export function apply(ctx, config) {
        *    ② 只有在"本轮一条都没挑中"时才可以不发。
        *    （否则别的理由 —— 想看报告、`reportLevel=off`、留着他开口 —— **都不算**。）
        */
-      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${cfg.autoComment && cfg.mentionName
-        ? `**开着**（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）。`
+      /**
+       * ⭐ **「评论里 @ 人」是独立开关**（2026-10-19 加）。
+       *
+       * 使用者要能「开着评论、开着私信，但评论正文里不去 @ 任何人」。
+       * ⇒ 这段要按 `mentionInComment` 分两种说法注入，**不能让模型自己猜**：
+       *    · 开（默认）⇒ 每条评论正文里**必须**纯文本 @ 那个人；
+       *    · 关 ⇒ **绝对不要**在正文里出现 @ 或他的名字 —— 但**收件人不变**
+       *      （私信照发给他，那件事在 `dm.md` 里由 `mentionName` 管）。
+       *
+       * ⚠️ 判据用 `!== false`：老配置里没有这个字段 ⇒ 按"要 @"处理（保持老行为）。
+       */
+      const mentionOn = cfg.mentionInComment !== false
+      + `自动评论${mentionOn ? `并 @ ${cfg.mentionName || '（还没填要通知谁）'}` : '（不 @ 人）'} 是${cfg.autoComment && (!mentionOn || cfg.mentionName)
+        ? `**开着**（每轮最多 ${cfg.commentPerRound} 条评论，150 字内`
+          + `${mentionOn
+            ? `，每条在正文里纯文本 @ ${cfg.mentionName}）`
+            : `，**正文里不要出现 @ 和任何人的名字**）`}。`
+          + `\n  ${mentionOn
+            ? `⭐ 这轮**你要 @ 的人是 ${cfg.mentionName}**（他同时也是私信的收件人）。`
+            : '⭐ **评论里不要 @ 任何人**（使用者关掉了那个开关）—— '
+              + '正文自然写就行，**不要**为了凑格式去加 @、也不要写他的名字。'
+              + (cfg.dmNotify ? `\n  （私信照样发给 ${cfg.mentionName || '（还没填要通知谁）'}，那是另一件事，别混。）` : '')}`
           + `\n  🔴 **这是命令，不是建议**：开着就**必须**在本轮发出去 —— `
           + `只要你挑中了至少一条，就**至少发一条**评论。`
           + `\n  ⚠️ **唯一可以不发的情况：本轮一条都没挑中**（那时照实说就行）。`
@@ -2844,7 +2892,7 @@ export function apply(ctx, config) {
        */
       + `私信通知是${cfg.dmNotify
         ? '**开着**（每轮最多 '
-          + `${cfg.commentPerRound} 条，发给「${cfg.mentionName || '（还没填要 @ 谁）'}」）。`
+          + `${cfg.commentPerRound} 条，发给「${cfg.mentionName || '（还没填要通知谁）'}」）。`
           + `\n  🔴 **这是命令**：只要挑中了至少一条，就**至少发一条**私信；`
           + `唯一例外是本轮一条都没挑中。`
           + `\n  📩 **发之前先读规矩**：用 \`bilij_read\` 读家目录的 \`dm.md\`（\`path\` 传 \`dm.md\`）—— `
@@ -4562,7 +4610,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName',
+        'commentPerRound', 'mentionName', 'mentionInComment',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
         'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',

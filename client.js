@@ -316,6 +316,15 @@ window.__ModuleLoader__.load({
 /* 行 / 并排组 / 竖排项：只负责**内部排布**，间距一律由上面那条「唯一规则」给。
    ⚠️ 这里**不要再写 padding/margin** —— 那正是上一版"间隔不统一"的病根。 */
 [data-bd-row]{display:flex;align-items:center;gap:8px;}
+/* ⭐ 输入框 + 开关并排（「要通知谁」那一行，2026-10-19 加）：
+   输入框吃掉剩余宽度，开关按内容宽度贴着它。
+   ⚠️ 与 [data-bd-row] 的区别：那条要求"右侧控件右边缘全对齐"，
+      而这里开关紧跟在输入框右边**不是**贴右 —— 所以单独一个标记，别混用。 */
+[data-bd-inline]{display:flex;align-items:center;gap:8px;}
+/* ⚠️ 顺序要紧：先让所有子项不伸缩，**再**把输入框单独放开**
+   （反过来写会被 >* 那条盖掉 —— 同权重、后者胜）。 */
+[data-bd-inline]>*{flex:0 0 auto;}
+[data-bd-inline]>[data-bd-input]{flex:1 1 0%;min-width:0;}
 [data-bd-row2]{display:flex;gap:20px;}
 [data-bd-row2]>*{flex:1;min-width:0;}
 /* ⭐ 三等分一行（模型那三个下拉用）：provider / 模型 / 思考档位 各占 1/3。
@@ -2081,7 +2090,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 },
               })),
             h(Field, {
-              label: '要 @ 谁（B站 昵称）',
+              label: '要通知谁（B站 昵称）',
               /**
                * ⭐ 文案要覆盖**两种用途**（2026-10-19 改）。
                *
@@ -2089,15 +2098,38 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                * 现在这一项在「只开私信、不开评论」时也会显示，而私信**也发给这个人**
                * （`prompts/dm.md` 的规矩就是发给 `mentionName`）⇒
                * 只说评论会让人以为"不开评论就不用填"，于是私信发不出去。
+               *
+               * ⭐ 2026-10-19 再改：字段名从「要 @ 谁」改成「**要通知谁**」——
+               *    因为它现在管**两件事**（评论 @ 谁 / 私信发给谁），
+               *    而"@ 谁"这个叫法只描述得了前一半。
                */
-              note: '评论里 @ 的是这个人，私信也发给他。⚠️ 要跟 B站 昵称逐字一致；留空 = 评论和私信都发不出去。',
+              note: '评论里 @ 的、私信发的，都是这个人。⚠️ 要跟 B站 昵称逐字一致；留空 = 评论和私信都发不出去。',
               stack: true,
-              children: h('input', {
-                'data-bd-input': '', value: mention ?? '',
-                placeholder: '填 B站 昵称；留空 = 评论和私信都不发',
-                onChange: (e) => setMention(e.target.value),
-                onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
-              }),
+              children: h('div', { 'data-bd-inline': '' },
+                h('input', {
+                  'data-bd-input': '', value: mention ?? '',
+                  placeholder: '填 B站 昵称；留空 = 评论和私信都不发',
+                  onChange: (e) => setMention(e.target.value),
+                  onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要通知谁') },
+                }),
+                /**
+                 * ⭐⭐ **「评论时 @ 人」开关**（2026-10-19 加，使用者要求）。
+                 *
+                 * 起因：一个字段管两件事（评论 @ 谁 / 私信发给谁）⇒
+                 * 「开评论 + 开私信 + 评论不 @ 人」这个组合**表达不了**：
+                 *   · 填名字 ⇒ 评论会 @ 他；
+                 *   · 不填名字 ⇒ 评论被准入闸拦住。
+                 * ⇒ 拆出这个开关：**收件人不变，只是评论正文里不去 @ 他。**
+                 *
+                 * ⚠️ **默认开** —— 老用户升级过来不会发现评论突然不 @ 了。
+                 * ⚠️ 关掉**不影响私信**（私信照发给他）。
+                 */
+                h(ToggleRow, {
+                  label: '评论时 @ 他',
+                  note: '关掉 = 评论照发，但正文里不 @ 人（私信照发）',
+                  on: cfg.mentionInComment !== false,
+                  onChange: (v) => patch({ mentionInComment: v }, '评论时 @ 人'),
+                })),
             })) : null,
 
           /**
