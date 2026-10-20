@@ -41,12 +41,49 @@ function packText() {
   //    不加 shell 会 `ENOENT`（**而且是静默的** —— `status: null` + `error.code='ENOENT'`，
   //    stdout/stderr 全空 ⇒ 又落回"5 张图都不在包里"那个假报告）。
   //    shell 模式在 POSIX 上也正常，所以这一条**两平台通用**。
-  const r = spawnSync('npm', ['pack', '--dry-run'], { encoding: 'utf8', shell: true })
+  // 🔴 **必须加 timeout，而且必须禁止 npm 联网**（2026-10-20 CI 真卡住过）。
+  //
+  // 事故：v0.1.10 的 CI 在「本地预检」这一步**卡了 7 分钟没动**，
+  //   `run_started_at` 之后再没 updated ⇒ 整个发布流程停在原地。
+  //   根因就是这一行：`spawnSync('npm', ['pack', '--dry-run'])` **没有 timeout**，
+  //   而 npm 在这种环境里会去做网络检查（更新通知 / registry 探测）⇒ 挂住不返回。
+  //   ⚠️ 本地跑 `node selfcheck.mjs` 也会同样卡住（同一个函数）。
+  //
+  // ⇒ 三件事一起做：
+  //   ① `timeout` —— 卡住就杀掉，别让整条发布流程陪着等；
+  //   ② `npm_config_update_notifier=false` + `npm_config_offline=true` —— 让它**不联网**；
+  //   ③ 超时/非 0 退出都**明确报出来**，别静默当成"图不在包里"。
+  //
+  // ⭐ 判据：**任何 `spawnSync` 调外部命令都必须带 timeout** ——
+  //   最糟的表现不是报错，而是**无声地挂住**（这一步是发布流水线的一部分）。
+  const r = spawnSync('npm', ['pack', '--dry-run'], {
+    encoding: 'utf8',
+    shell: true,
+    timeout: 120000,                  // 2 分钟足够 —— 纯本地列文件，不该更久
+    killSignal: 'SIGKILL',
+    env: {
+      ...process.env,
+      npm_config_update_notifier: 'false',
+      npm_config_offline: 'true',     // ★ 不联网
+      npm_config_audit: 'false',
+      npm_config_fund: 'false',
+    },
+  })
   if (r?.error) {
     // ⚠️ **绝不静默**：拿不到清单时必须说"我拿不到清单"，而不是"图都不在包里"
     console.error(`  ✗ 跑不起来 \`npm pack --dry-run\`：${r.error.code ?? ''} ${r.error.message ?? r.error}`)
     console.error('    ⇒ 请确认 npm 在 PATH 里；或先自己跑一次并把输出文件当参数传进来：')
     console.error('       npm pack --dry-run > pack.txt 2>&1  &&  node tools/check-readme-images.mjs pack.txt')
+    process.exit(1)
+  }
+  /**
+   * ⚠️ **超时被杀**时 `spawnSync` 不设 `error`，而是 `signal` 有值、`status` 为 null
+   *    （库里那条「`spawnSync` 的 timeout 会杀掉子进程，但 status 是 null」讲的就是这个）。
+   * ⇒ 不显式判它，就会拿着半份 stdout 去匹配 ⇒ 又是一次"图不在包里"的假失败。
+   */
+  if (r?.signal || (r?.status !== 0 && r?.status !== null)) {
+    console.error(`  ✗ \`npm pack --dry-run\` 没正常结束（signal=${r?.signal} status=${r?.status}）`)
+    console.error('    ⇒ 可能是超时（2 分钟）或被中断。先手工跑一次，再把输出文件当参数传进来。')
     process.exit(1)
   }
   // 两路都拼上（顺序无所谓，后面只做子串匹配）

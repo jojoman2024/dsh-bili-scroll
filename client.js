@@ -769,11 +769,31 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
      * 共享通道。**模块级单例** —— 每个面板实例都在同一个 document 里，
      * 但各会话的面板是独立 React 树；用 BroadcastChannel 让它们互相同步。
      * ⚠️ 没有 BroadcastChannel 的环境下退化成"只有 localStorage"（切过去才生效）。
+     *
+     * 🔴🔴 **必须 `unref()`**（2026-10-20 CI 真卡死，等了 20 分钟超时）。
+     *
+     * ── 症状 ──────────────────────────────────────────────
+     *   发布流水线停在「本地预检」那一步、`updated_at` 再也不动；
+     *   而日志里**已经打到最后一行**了（`（预检不碰真家目录…）`）。
+     *   ⇒ 说明 **selfcheck 跑完了、但 Node 进程不退出**。
+     *
+     * ── 根因 ──────────────────────────────────────────────
+     *   我在模块顶层 `new BroadcastChannel(...)`，而 **BroadcastChannel 会保持
+     *   事件循环活跃** ⇒ Node 进程**永不退出**（实测：`node -e "new BroadcastChannel('x')"`
+     *   打印完就一直挂着；加 `unref()` 才正常退）。
+     *   `selfcheck.mjs` 会 import 这个文件并执行 `apply()` ⇒ 被一起挂死。
+     *
+     * ⚠️ 只判断 `typeof BroadcastChannel === 'function'` 不够 —— **Node 22 也有它**，
+     *    所以"有就建"在服务端预检里也会命中。
+     * ✅ 正解：建完立刻 `unref()`（浏览器里是 no-op，不影响同步能力）。
      */
     let uiChannel = null
     try {
       if (typeof BroadcastChannel === 'function') {
         uiChannel = new BroadcastChannel(UI_SHARE_CH)
+        // ⚠️ 关键：让通道**不阻止进程退出**。
+        //    浏览器里没有 unref，用可选调用兜住；Node 里这是必需的。
+        try { uiChannel.unref?.() } catch { /* 浏览器里没有 unref，忽略 */ }
       }
     } catch { uiChannel = null }
 
@@ -1212,10 +1232,18 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         return () => uiChannel.removeEventListener('message', onMsg)
       }, [tab])
 
-      // ④ 卸载时把这一份的监听摘干净
+      /**
+       * ④ 卸载：**只摘监听，不要关通道**（2026-10-20 修）。
+       *
+       * 🔴 我第一版写的是 `uiChannel?.close(); uiChannel = null` —— 那是**错的**：
+       *    `uiChannel` 是**模块级单例**，多个会话的面板共用它；
+       *    任意一个面板卸载（切会话就会卸载）就把通道关了、还置空
+       *    ⇒ **剩下所有面板从此收不到广播**，而且再也没人重建它。
+       * ⇒ 只移除本面板的 message listener（上面那个 effect 的 cleanup 已经在做了），
+       *    通道本身留给进程/页面活到最后。
+       */
       React.useEffect(() => () => {
-        try { uiChannel?.close?.() } catch { /* 忽略 */ }
-        uiChannel = null
+        /* 通道是共享的，这里什么都不做 —— 见上面那段注释 */
       }, [])
 
       // （旧的「报告展开态」已删 —— 日报不写了，见下面的产物清单）底下，看不见）
