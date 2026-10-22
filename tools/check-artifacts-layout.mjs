@@ -205,6 +205,24 @@ if (!narrow) {
     else if (Number(alpha[4]) >= 1) problems.push('返回按钮的背景不透明（alpha=' + alpha[4] + '）')
     else if (Number(alpha[1]) > 200 && Number(alpha[2]) > 200 && Number(alpha[3]) > 200) {
       problems.push('返回按钮是"白色半透明" —— 它浮在详情栏的白色底上，看不出半透明（实测踩过）')
+    } else {
+      /* 🔴 **alpha 要按对比度卡**（2026-10-22 加）：
+       *    使用者说"透明度再低一点"时，很容易一路调小直到白字糊掉。
+       *    实测：0.38 → 2.68（连 AA 大字线 3.0 都不到）；0.45 → 3.35（刚够）。
+       *    ⇒ 断言"白字压在按钮上、按钮叠在白底上"的对比度 ≥ 3.0。
+       *    ⚠️ 这里只覆盖"叠白底"这一种情况（详情栏就是白底），够用。
+       */
+      const lum = (r, g, b) => {
+        const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+      }
+      const a2 = Number(alpha[4])
+      const L1 = lum(255, 255, 255)                       // 白字
+      const L2 = lum(255 * (1 - a2), 255 * (1 - a2), 255 * (1 - a2))  // 黑 a 叠白底
+      const cr = (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05)
+      if (cr < 3.0) {
+        problems.push(`返回按钮白字对比度只有 ${cr.toFixed(2)}（alpha=${a2}）—— 低于 AA 大字线 3.0，字会糊；要么调大 alpha、要么加大字号`)
+      }
     }
   }
 }
