@@ -715,6 +715,111 @@ export function apply(ctx, config) {
 
   const hasCredential = () => existsSync(join(stateDir, 'bili_credential.json'))
 
+  /* ─────────────── 取「对方回复的正文」（2026-10-23 加） ───────────────
+   *
+   * 🔴 **为什么必须加这个**：
+   *    B站 的回复通知里**不带对方正文**（通知项只有 target_id / source_id / title 这些）。
+   *    原来 `bilij_replies` 把 `d.title`（通知标题）当成"他说"返回给模型 ——
+   *    字段名叫「他说」、里面却是通知标题，**模型读错是必然的**（2026-10-23 真踩了：
+   *    把它当成"对方在复读我的话"，还据此写下了错误结论）。
+   *
+   * ✅ 现在：拿 `hisRpid` 直接请求 B站 评论详情，把**真正文**填进去。
+   *
+   * ⚠️ **为什么不走 MCP**：MCP 在 `vendor/bilibili-mcp`，**用户装插件时会被重铺**，
+   *    改它等于白改。而插件自己是 Node 环境（原生 fetch）+ 家目录里就有凭证
+   *    ⇒ 直接请求最省事，也不增加用户那一侧的依赖。
+   *
+   * ⚠️ **失败就给 null，绝不猜**：拿不到就说"看不到"，
+   *    让模型知道"没内容"而不是拿到一个假的 title。
+   */
+
+  /** bvid → aid（一轮内复用，别每个回复都查一遍） */
+  const aidCache = new Map()
+  const credCookie = () => {
+    const c = readJson(join(stateDir, 'bili_credential.json'), null)
+    if (!c || typeof c !== 'object') return null
+    const parts = []
+    if (c.sessdata) parts.push(`SESSDATA=${c.sessdata}`)
+    if (c.bili_jct) parts.push(`bili_jct=${c.bili_jct}`)
+    if (c.buvid3) parts.push(`buvid3=${c.buvid3}`)
+    if (c.dedeuserid) parts.push(`DedeUserID=${c.dedeuserid}`)
+    return parts.length ? parts.join('; ') : null
+  }
+
+  const BILI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+  const biliGet = async (url, cookie) => {
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), 8000)
+    try {
+      const r = await fetch(url, {
+        headers: {
+          Cookie: cookie,
+          'User-Agent': BILI_UA,
+          Referer: 'https://www.bilibili.com/',
+        },
+        signal: ctl.signal,
+      })
+      return await r.json()
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** bvid → aid；失败返回 null */
+  const bvidToAid = async (bvid, cookie) => {
+    if (!bvid) return null
+    if (aidCache.has(bvid)) return aidCache.get(bvid)
+    try {
+      const j = await biliGet(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, cookie)
+      const aid = j?.data?.aid
+      if (aid) { aidCache.set(bvid, aid); return aid }
+    } catch { /* 查不到就算了 */ }
+    return null
+  }
+
+  /**
+   * 取一条楼中楼的正文。
+   * @returns {Promise<{内容: string, 昵称: string, 时间: number}|null>}
+   *
+   * ⭐ 先试 `reply/detail`（单条，最准），失败再退 `reply/reply`（列表里挑 rpid）。
+   */
+  const fetchReplyDetail = async (bvid, rpid, cookie) => {
+    if (!rpid || !cookie) return null
+    const aid = await bvidToAid(bvid, cookie)
+    if (!aid) return null
+
+    // ① 单条详情
+    try {
+      const j = await biliGet(`https://api.bilibili.com/x/v2/reply/detail?type=1&oid=${aid}&root=${rpid}`, cookie)
+      const root = j?.data?.root
+      if (root?.content?.message) {
+        return {
+          内容: String(root.content.message),
+          昵称: root.member?.uname || '',
+          时间: Number(root.ctime) || 0,
+        }
+      }
+    } catch { /* 换下一种 */ }
+
+    // ② 楼中楼列表里找（detail 偶尔不给我们这类 id）
+    try {
+      const j = await biliGet(`https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${aid}&root=${rpid}&ps=20`, cookie)
+      const list = Array.isArray(j?.data?.replies) ? j.data.replies : []
+      const hit = list.find(x => String(x.rpid) === String(rpid))
+      if (hit?.content?.message) {
+        return {
+          内容: String(hit.content.message),
+          昵称: hit.member?.uname || '',
+          时间: Number(hit.ctime) || 0,
+        }
+      }
+    } catch { /* 落空 */ }
+
+    return null
+  }
+
+
   /* ─────────────── 判重表 seen.md（2026-10-16 加） ───────────────
    *
    * 🔴 为什么必须由**插件**来管、而不是写在章程里让模型自觉：
@@ -1817,10 +1922,15 @@ export function apply(ctx, config) {
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
-      rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）；回楼中楼时传 bilij_replies 给的 myRpid' },
-      root: { type: 'number', description: '楼层根评论 id（回楼中楼时传 bilij_replies 给的 hisRpid；不填就退回用 rpid，实测也能落对）' },
-      replyTo: { type: 'string', description: '⭐ 回楼中楼时**必传**：bilij_replies 给的 hisRpid（他新写那条的 id）—— 插件靠它记账、免得重复回复同一个人' },
+      // ⭐ 新名字（2026-10-23）：跟 bilij_replies 的返回结构一一对上，模型不用再自己映射
+      myRpid: { type: 'string', description: '⭐ 回楼中楼时用：`bilij_replies` 返回的 `我那条.id`（我那条评论的 id）' },
+      hisRpid: { type: 'string', description: '⭐ 回楼中楼时用：`bilij_replies` 返回的 `他这条.id`（对方那条回复的 id）—— 等价于同时填 root 和 replyTo' },
+      // 老名字保留（后台那轮 / 老提示词还在用）
+      rpid: { type: 'number', description: '【旧】要回复的评论 id（0/不填 = 发新评论）；建议改用 myRpid' },
+      root: { type: 'number', description: '【旧】楼层根评论 id；建议改用 hisRpid' },
+      replyTo: { type: 'string', description: '【旧】去重键；建议改用 hisRpid' },
       force: { type: 'boolean', description: '本人当场让你发的 ⇒ 传 true：同时越过「自动评论关着」与「本轮额度已满」两道闸（账照记）' },
+      repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
       repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
     },
     async execute(args) {
@@ -1895,6 +2005,22 @@ export function apply(ctx, config) {
       //    这里管的是"要不要再发一条评论"，只有**真评论过**才算重复。
       const seen = readSeen().get(bvid)
       const alreadyCommented = Boolean(seen) && (seen.kind === '评论' || String(seen.rpid || '') !== '')
+      /**
+       * ⭐ **参数名规整（2026-10-23）**
+       *
+       * 以前要让模型自己做映射：`rpid` 传 myRpid、`root`/`replyTo` 传 hisRpid ——
+       * 名字和含义对不上，是这次误读事故的一部分。
+       * 现在接受 `myRpid` / `hisRpid` 这两个**跟 `bilij_replies` 返回结构一一对应**的名字，
+       * 在这里规整到内部变量；老的 `rpid` / `root` / `replyTo` 照旧可用（后台那轮还在用）。
+       */
+      const _myRpid = String(args.myRpid ?? '').trim()
+      const _hisRpid = String(args.hisRpid ?? '').trim()
+      if (_myRpid) args.rpid = Number(_myRpid) || 0
+      if (_hisRpid) {
+        if (!Number(args.root)) args.root = Number(_hisRpid) || 0
+        if (!String(args.replyTo ?? '').trim()) args.replyTo = _hisRpid
+      }
+
       /**
        * ⭐ **这一下是"回别人的楼中楼"还是"发新评论"？**（判据在原有注释里，见下）
        *
@@ -2073,7 +2199,9 @@ export function apply(ctx, config) {
       + '🔴 **只返回"回插件那条评论"的**：回复**使用者本人**（人工发的评论）的**不会给你** ——\n'
       + '   那种一律不要回（这是硬过滤，不是让你自己判断）。\n'
       + '🔁 **已经回过的不会再返回**（去重账本 `replies.json`）。\n'
-      + '⭐ 回的时候：把返回里的 `myRpid` 当 `rpid`、`hisRpid` 当 `root`，传给 `bilij_reply`。\n'
+      + '⭐⭐ **它会把对方说的话也取回来**：看 `他.内容`（真去 B站 评论接口拿的正文，不是通知标题）。\n'
+      + '   ⚠️ 若 `他` 是 `null`，说明正文没取到（风控 / 评论已删）—— **那就别回**，别猜他说了什么。\n'
+      + '⭐ 回的时候：`rpid` 传 `我那条.id`，`root` 和 `replyTo` 都传 `他这条.id`。\n'
       + '⚠️ 这里**不含 @ 和点赞通知**（只看回复），那是两回事。',
     parameters: {
       all: { type: 'boolean', description: 'true = 连"已回过的"也列出来（默认只给还没回的）' },
@@ -2110,7 +2238,7 @@ export function apply(ctx, config) {
       }
 
       const led = readLedger()
-      const out = []
+      const collected = []
       let others = 0
       for (const it of items) {
         const d = it.item || {}
@@ -2119,32 +2247,66 @@ export function apply(ctx, config) {
         // 🔴 白名单过滤放在**这一层** —— 不满足的**根本不返回给模型**。
         //    理由：让它先看到再靠提示词"别回"，迟早会漏（自家注释里那条「别递再劝」的教训）。
         if (!mine.has(myRpid)) { others++; continue }
-        const key = String(d.source_id || it.id || '')
-        const rec = led.replies[key]
+        const hisRpid = String(d.source_id || it.id || '')
+        const rec = led.replies[hisRpid]
         const replied = Boolean(rec && rec.repliedAt)
         if (replied && !args.all) continue
         // 从 uri 里抠 BV 号（形如 https://www.bilibili.com/video/BV....）
         const bvid = (/(BV[0-9A-Za-z]{10})/.exec(String(d.uri || '')) || [])[1] || (/(BV[0-9A-Za-z]{10})/.exec(String(d.native_uri || '')) || [])[1] || ''
-        out.push({
-          hisRpid: key,                       // 他新写的那条（去重键 / 回楼中楼时的 root）
-          myRpid,                             // 他回的是我哪条（回复时传 rpid）
+        collected.push({
+          hisRpid,
+          myRpid,
           bvid,
           谁: it.user?.nickname || '',
           mid: it.user?.mid || 0,
-          他说: String(d.title || '').slice(0, 200),
           时间: d.reply_time || it.reply_time || 0,
           已回过: replied || undefined,
+        })
+      }
+
+      /* ⭐ **逐条补上对方正文**（2026-10-23 加）。
+       *
+       * 🔴 以前这里返回的是 `d.title`（B站 通知标题），字段名却叫「他说」 ——
+       *    模型读错是必然的。现在真的去把正文取回来。
+       *
+       * ⚠️ **串行 + 小间隔**：B站 评论接口有风控（实测约 100~180 次请求后出 `-352`，
+       *    要等 60~90 秒）。一轮也就几条，200ms 间隔足够，别为省时间把号搞进风控。
+       * ⚠️ **拿不到就是 null**：绝不拿 title 冒充。
+       */
+      const cookie = credCookie()
+      const out = []
+      for (let i = 0; i < collected.length; i++) {
+        const c = collected[i]
+        let detail = null
+        try {
+          detail = await fetchReplyDetail(c.bvid, c.hisRpid, cookie)
+        } catch { /* 单条失败不影响其它 */ }
+        if (i < collected.length - 1) await new Promise(res => setTimeout(res, 200))
+        out.push({
+          bvid: c.bvid,
+          // ⭐ 真内容放这儿 —— 拿不到就是 null，明明白白告诉模型"看不着"
+          他: detail
+            ? { 昵称: detail.昵称 || c.谁, 内容: detail.内容 }
+            : null,
+          // ⭐ 两个 id 分开写清楚，名字就叫它们的真实含义，模型不用再自己做映射
+          我那条: { id: c.myRpid },
+          他这条: { id: c.hisRpid },
+          mid: c.mid,
+          时间: c.时间,
+          已回过: c.已回过,
         })
       }
 
       // 顺手把这份快照记进账本（只记内容，不写 repliedAt —— 那要真回成功才写）
       let changed = false
       for (const o of out) {
-        if (!o.hisRpid) continue
-        if (!led.replies[o.hisRpid]) {
-          led.replies[o.hisRpid] = {
-            at: dayKey(), bvid: o.bvid, myRpid: o.myRpid,
-            user: o.谁, mid: o.mid, snippet: o.他说.slice(0, 60),
+        const k = o.他这条.id
+        if (!k) continue
+        if (!led.replies[k]) {
+          led.replies[k] = {
+            at: dayKey(), bvid: o.bvid, myRpid: o.我那条.id,
+            user: o.他?.昵称 || '', mid: o.mid,
+            snippet: (o.他?.内容 || '').slice(0, 60),
           }
           changed = true
         }
@@ -2159,6 +2321,8 @@ export function apply(ctx, config) {
       const q = roundUsage('replies')
       const cq = roundUsage('comments')
 
+      const noContent = out.filter(o => !o.他).length
+
       return {
         ok: true,
         count: out.length,
@@ -2168,10 +2332,15 @@ export function apply(ctx, config) {
         // ⭐ 额度（拿不到轮次 id 时 roundUsage 会给 known:false ⇒ 不显示）
         本轮回复额度: q.known ? `${q.used}/${q.limit}` : undefined,
         本轮评论额度: cq.known ? `${cq.used}/${cq.limit}` : undefined,
+        // ⭐ 有几条正文没取到（它们 `他: null`）—— 明说，别让模型以为"对方没说话"
+        正文未取到: noContent || undefined,
         hint: out.length
           ? `有 ${out.length} 条待回`
             + (q.known ? `（本轮回复额度 ${q.used}/${q.limit}${q.over ? '，**已用完 ⇒ 再回会被打回**' : ''}）` : '')
-            + '。回的时候把 hisRpid 同时传给 bilij_reply 的 root 和 replyTo。'
+            + '。**对方说了什么看 `他.内容`** —— 那是真去 B站 取回来的正文。'
+            + (noContent ? `\n⚠️ 其中 ${noContent} 条「他」是 null（正文没取到，可能风控或评论已删）`  :
+                '') 
+            + '\n回的时候：`rpid` 传 `我那条.id`，`root` 和 `replyTo` 都传 `他这条.id`。'
           : `没有待回的（另有 ${others} 条是回复使用者人工评论的，已按规矩忽略）。`,
       }
     },
