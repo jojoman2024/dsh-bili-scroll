@@ -286,7 +286,7 @@ export const Config = !z ? undefined : z.object({
   frontWorkspace: z.string().default('').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
-  /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
+  /** 怎么写：full=写笔记（现状）· off=不写报告（只发评论）—— ⚠️ 2026-10-21 去掉了 `brief`（薄版） */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** 回复评论：默认关。开了之后只回「直接回复到它那条评论下面的人」 */
   replyToComments: z.boolean().default(false).extra('volatile', true),
@@ -544,6 +544,48 @@ export function apply(ctx, config) {
     return capped
   }
 
+  /* ─────────────── 章程（duty）与报告书写规范（report） ───────────────
+   * ⭐ **2026-10-21：两者都改成「面板可编辑」**（与 `reply.md` / `dm.md` 同构）。
+   *
+   * 使用者原话：
+   *   「把现在去掉约束和边界的章程也放到提示词页供大家编辑吧，也跟评论细则一样的功能。」
+   *   「建立报告书写规范文档，需要写的时候，读文档。报告书写规范也需要能够在提示词页面进行修改。」
+   *
+   * ⚠️ **章程从 `overwrite: true` 改成 `false` 是有代价的**（见 `lib/state.mjs` 那段注释）：
+   *    出厂更新**不再自动同步**，要靠面板的「恢复默认」。
+   * ⚠️ 报告规范**只管"内容怎么写"**；「写在哪 / 文件名 / 用哪个工具」是每轮动态的，
+   *    仍由 `promptFor()` 给 —— 两边别重复。
+   */
+  const dutyFile = join(stateDir, 'duty.md')
+  const dutyDefaultFile = join(pluginDir, 'prompts', 'duty.md')
+  const readDuty = () => {
+    try { return readFileSync(dutyFile, 'utf8') } catch { return '' }
+  }
+  const readDutyDefault = () => {
+    try { return readFileSync(dutyDefaultFile, 'utf8') } catch { return '' }
+  }
+  const writeDuty = (text) => {
+    const s = String(text ?? '')
+    const capped = s.length > 200_000 ? s.slice(0, 200_000) : s
+    writeFileSync(dutyFile, capped, 'utf8')
+    return capped
+  }
+
+  const reportFile = join(stateDir, 'report.md')
+  const reportDefaultFile = join(pluginDir, 'prompts', 'report.md')
+  const readReport = () => {
+    try { return readFileSync(reportFile, 'utf8') } catch { return '' }
+  }
+  const readReportDefault = () => {
+    try { return readFileSync(reportDefaultFile, 'utf8') } catch { return '' }
+  }
+  const writeReport = (text) => {
+    const s = String(text ?? '')
+    const capped = s.length > 200_000 ? s.slice(0, 200_000) : s
+    writeFileSync(reportFile, capped, 'utf8')
+    return capped
+  }
+
   ensureHomeFiles(pluginDir, stateDir, log)
 
   /**
@@ -584,6 +626,16 @@ export function apply(ctx, config) {
     '红线（照旧适用）',
   ])
   stripLegacyRules(dmFile, ['失败了怎么办'])
+  /**
+   * ⚠️ 章程也要剥一次：它的 `overwrite` 在 2026-10-21 之前是 `true`
+   * （每次启动按内容同步）⇒ 早升级的人家里那份已经是新版、没有这几节；
+   * 但**跳过版本**的人可能还留着带约束的旧章程 ⇒ 这里补一刀（幂等，没有就什么都不做）。
+   */
+  stripLegacyRules(dutyFile, [
+    '先记住三条（省钱，也是纪律）',
+    '边界（这是别人的账号，这几条不能碰）',
+    '红线（不靠自觉，写死在这儿）',
+  ])
 
   /* ── 设置命名空间：让 DSH 自带的「插件设置」能编辑这份 Config ──
    *
@@ -2997,27 +3049,14 @@ export function apply(ctx, config) {
          */
         ? `这一轮**不要写任何报告文件**（⚠️ 这只影响**写文件**，**不影响发评论** —— `
           + `发不发评论由下面那句「自动评论」说了算，别混在一起）；真发了评论就一句话记下。`
-        : `**产物：挑中的每一条，各写一份独立的 md**（⛔ **不再写汇总日报**）。\n`
+        : `**产物：挑中的每一条，各写一份独立的 md**（⛔ **不写汇总日报**）。\n`
+          + `  🔴 **先读一遍《报告书写规范》**：\`${reportFile}\`\n`
+          + `     （前台用 \`bilij_read\`，后台用普通文件工具）—— `
+          + `结构模板、「讲了什么」要落到多细、只写视频里真有的、保底那一行，全在那份里。\n`
           + `  · 目录：\`${reportDirFor()}\`\n`
           + `  · 文件名：**\`<标题>-\` + \`YYMMDD\`**（例：\`OSDI-2026-最佳论文-预训练数据管线-261016.md\`）—— `
           + `标题在前、日期在后、日期无横杠；标题里的非法字符自己换成 \`-\`。\n`
-          + `  · 内容：⭐ **这是一篇「视频笔记」，不是一句推荐语** ——
-              目标是使用者**没看视频**、只读这份笔记就把重点**搞明白**。结构：\n`
-          + `      # <视频标题>\n`
-          + `      > 一两句说清「这条在讲什么」\n`
-          + `      - **UP** / **链接** / **播放量** / **时长**\n`
-          + `      ## 讲了什么     ← ⭐ **主体**，把核心内容**讲清楚**（别只给结论）\n`
-          + `      ## 关键点       ← 3~6 条（方法 / 数字 / 结论 / 反直觉之处）\n`
-          + `      ## 为什么值得看  ← 两三句（给谁看、能拿走什么）\n`
-          + `      ## 我的一句话   ← 你自己的判断（可以尖刻，按人设来）\n`
-          + `  · ⭐ **「讲了什么」要落到细节**：具体方法名 / 做法 / 关键数字 / 对比基线 / 结论的边界。`
-          + `**照字幕原文写，别只写标题级的概括**；这是笔记，**宁可长一点**。\n`
-          + `  · ⚠️ **只写视频里真有的**：字幕没讲的**别补、别脑补、别拿你已有的知识去填**；`
-          + `拿不准就写「视频里没细说」。\n`
           + `  · ⚠️ 评论**仍要简洁**（见下面「评论」那段）—— **别把笔记内容抄进评论**。\n`
-          + (cfg.reportLevel === 'brief'
-            ? `  · ⚠️ 现在是**薄版**：上面的结构保留，但「讲了什么」「关键点」各压到两三行为止。\n`
-            : '')
           + (cfg.runMode === 'front'
             // ⚠️ 前台**必须**用 bilij_write：它的 cwd 是工作区，沙箱不让它写家目录。
             //    （产物现在固定在家目录的 reports/ ⇒ 普通文件工具写不进去。）
@@ -4964,7 +5003,18 @@ export function apply(ctx, config) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
-      if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
+      /**
+       * ⭐ **「怎么写」只剩两档**（2026-10-21，使用者要求）：
+       *   原来有 `full` / `brief`（薄版）/ `off` 三档，现在只留 `full` / `off`。
+       *
+       * ⚠️ **`brief` 要走迁移，不能直接判非法值** ——
+       *   老配置里存着 `brief` 的人，如果这里直接回落成 `full` 也还行，
+       *   但更稳的做法是**显式映射**：`brief` ⇒ `full`（"要写"这一侧，不改变他的意图）。
+       */
+      if ('reportLevel' in patch) {
+        const v = String(patch.reportLevel)
+        patch.reportLevel = v === 'off' ? 'off' : 'full'
+      }
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('adminMode' in patch) patch.adminMode = Boolean(patch.adminMode)
       // ⭐ **两个"每轮几条"的额度：只保证 >= 1，不设上限**（2026-10-16 改）。
@@ -5104,6 +5154,68 @@ export function apply(ctx, config) {
       log(`回复细则已恢复出厂（${text.length} 字符）→ ${replyFile}`)
       // ⭐ 连 `defaultText` 一起回：面板要用它刷新「是否等于默认」的判据
       return sendJson(res, 200, { ok: true, file: replyFile, chars: text.length, text, defaultText: def })
+    }
+
+    // ⭐ **章程**（2026-10-21 加）：与 `/reply` / `/dm` 同构，面板可编辑
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/duty') {
+      const text = readDuty()
+      const def = readDutyDefault()
+      return sendJson(res, 200, {
+        ok: true, text, file: dutyFile,
+        defaultFile: dutyDefaultFile,
+        isDefault: Boolean(def) && text.trim() === def.trim(),
+        defaultText: def,
+        hasDefault: Boolean(def),
+        chars: text.length,
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/duty') {
+      const body = await readBody(req)
+      const text = writeDuty(body?.text)
+      log(`章程已更新（${text.length} 字符）→ ${dutyFile}`)
+      return sendJson(res, 200, { ok: true, file: dutyFile, chars: text.length })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/duty/reset') {
+      const def = readDutyDefault()
+      if (!def.trim()) {
+        return sendJson(res, 200, { ok: false, error: `出厂源读不到或为空：${dutyDefaultFile}` })
+      }
+      const text = writeDuty(def)
+      log(`章程已恢复出厂（${text.length} 字符）→ ${dutyFile}`)
+      return sendJson(res, 200, { ok: true, file: dutyFile, chars: text.length, text, defaultText: def })
+    }
+
+    // ⭐ **报告书写规范**（2026-10-21 加）：同上
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/report') {
+      const text = readReport()
+      const def = readReportDefault()
+      return sendJson(res, 200, {
+        ok: true, text, file: reportFile,
+        defaultFile: reportDefaultFile,
+        isDefault: Boolean(def) && text.trim() === def.trim(),
+        defaultText: def,
+        hasDefault: Boolean(def),
+        chars: text.length,
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/report') {
+      const body = await readBody(req)
+      const text = writeReport(body?.text)
+      log(`报告书写规范已更新（${text.length} 字符）→ ${reportFile}`)
+      return sendJson(res, 200, { ok: true, file: reportFile, chars: text.length })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/report/reset') {
+      const def = readReportDefault()
+      if (!def.trim()) {
+        return sendJson(res, 200, { ok: false, error: `出厂源读不到或为空：${reportDefaultFile}` })
+      }
+      const text = writeReport(def)
+      log(`报告书写规范已恢复出厂（${text.length} 字符）→ ${reportFile}`)
+      return sendJson(res, 200, { ok: true, file: reportFile, chars: text.length, text, defaultText: def })
     }
 
     // ⭐ **私信细则**（2026-10-21 加）：与 `/reply` 完全同构 ——

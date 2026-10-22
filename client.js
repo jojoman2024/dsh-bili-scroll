@@ -728,6 +728,67 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       return h('div', { 'data-bd-row': '' }, text, children)
     }
 
+    /**
+     * ⭐ **「一份可编辑的提示词文档」整块**（2026-10-21 抽出来）。
+     *
+     * 起因：使用者要求**章程**和**报告书写规范**也进面板，功能和「回复细则 / 私信细则」一样
+     * （保存 / 清空 / 恢复默认 + 确认浮层）。而那两块已经是同构的复制粘贴，
+     * 再加两块就是**四份一样的代码** ⇒ 抽成组件，少一处抄错的机会。
+     *
+     * ⚠️ 只给**新增的**两份用；`persona` / `reply` / `dm` 保持原样（它们是长在
+     *    各自的 state 与轮询逻辑上的，动它们收益小、风险大）。
+     *
+     * ⚠️ 「恢复默认」的禁用判据用**当前草稿**跟出厂正文比 —— 不能用服务端返回的
+     *    `isDefault` 快照（改了没存时它会过期，按钮会卡在禁用，反而恢复不了）。真机踩过。
+     */
+    function PromptDoc(props) {
+      const {
+        title, hint, warn, value, onChange, onSave, onReset,
+        saved, chars, file, defaultText, busy, rows, placeholder,
+        confirmOpen, setConfirmOpen, confirmTitle,
+      } = props
+      const draft = String(value ?? '')
+      const isDefault = Boolean(defaultText) && draft.trim() === String(defaultText).trim()
+      const dirty = value !== null && saved !== null && value !== saved
+      return h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
+        h('div', { 'data-bd-h': '' }, title),
+        hint ? h('div', { 'data-bd-note': '' }, hint) : null,
+        warn ? h('div', { 'data-bd-note': '' }, warn) : null,
+        h('div', { 'data-bd-sub': '' },
+          h('textarea', {
+            'data-bd-input': '', 'data-bd-persona': '', rows: rows || 14,
+            placeholder, value: draft, onChange,
+          }),
+          h('div', { 'data-bd-foot': '' },
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy, onClick: onSave }, '保存'),
+            h('button', { 'data-bd-btn': '', disabled: busy || !draft.trim(), onClick: () => onChange({ target: { value: '' } }) }, '清空'),
+            h('button', {
+              'data-bd-btn': '',
+              disabled: busy || !defaultText || isDefault,
+              onClick: () => setConfirmOpen(true),
+            }, isDefault ? '已是默认' : '恢复默认'),
+            dirty ? h('span', { 'data-bd-note': '' }, '有未保存的改动') : null),
+          h('div', { 'data-bd-note': '' },
+            chars != null ? `当前 ${chars} 字符` : '',
+            chars != null ? h('br') : null,
+            '存本地：', h('code', null, file || ''),
+            h('br'),
+            '每一轮开始前现读这个文件 —— 保存后立刻生效，不用重启 dsh。',
+            h('br'),
+            '⚠️ 「恢复默认」会覆盖你现在这份（从插件自带的出厂那份重新读），不可撤销。')),
+
+        confirmOpen ? h('div', { 'data-bd-confirm': '' },
+          h('div', { 'data-bd-confirm-box': '' },
+            h('div', { 'data-bd-confirm-title': '' }, confirmTitle || `恢复成出厂的${title}？`),
+            h('div', { 'data-bd-confirm-body': '' },
+              '你现在这份会被覆盖，改过的内容找不回来。',
+              h('br'),
+              '（要留个底的话，先复制上面的正文再点。）'),
+            h('div', { 'data-bd-confirm-foot': '' },
+              h('button', { 'data-bd-btn': '', onClick: () => setConfirmOpen(false) }, '取消'),
+              h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onReset }, '覆盖并恢复')))) : null)
+    }
+
     /* ════════ 面板界面状态：跨会话共享（2026-10-20 加）════════
      *
      * 🔴 **为什么要做**（使用者的原话）：
@@ -1128,7 +1189,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       // ⭐ 产物清单（2026-10-16 加：改成每条一份 md，不再是汇总日报）
       const [reports, setReports] = React.useState(null)
       const [reportFile, setReportFile] = React.useState(null)
-      const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
+      const [rl, setRl] = React.useState(null)          // 怎么写：full（写笔记）/ off（不写）—— 2026-10-21 去掉 brief
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       /**
        * ⭐ **「有新版本」弹窗是否打开**（2026-10-18 加）。
@@ -1356,6 +1417,13 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       const [dmChars, setDmChars] = React.useState(null)
       const [dmDefaultText, setDmDefaultText] = React.useState('')
       const [confirmResetDm, setConfirmResetDm] = React.useState(false)
+      /* ── 章程 / 报告书写规范（2026-10-21 新增）──
+       * 这两份用**一个通用状态**装着（`docs[id]`），配合 `PromptDoc` 组件渲染 ——
+       * 不再像 persona/reply/dm 那样各写四个 useState。
+       * ⚠️ 键名就是接口名：`duty` / `report`（`GET|POST /api/bili-scroll-jojo/<键>`）。
+       */
+      const [docs, setDocs] = React.useState({})
+      const [confirmDoc, setConfirmDoc] = React.useState('')   // 哪个文档在弹「恢复默认」
       // ── 模型（2026-10-15 新增）──
       // 清单从 /models 拉（**不硬编码**：DSH 的 provider/模型由使用者装的路由决定）
       const [models, setModels] = React.useState(null)          // [{id,name,models:[{id,name}]}]
@@ -1439,6 +1507,72 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         })()
         return () => { alive = false }
       }, [])
+
+      // ⭐ 章程 / 报告书写规范：挂载时各取一次（不进轮询，理由同人设）
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          for (const id of ['duty', 'report']) {
+            try {
+              const d = await jget('/' + id)
+              if (!alive || !d?.ok) continue
+              setDocs((cur) => ({
+                ...cur,
+                [id]: {
+                  text: cur[id]?.text ?? (d.text || ''),
+                  saved: d.text || '',
+                  file: d.file || '',
+                  chars: d.chars ?? (d.text || '').length,
+                  defaultText: String(d.defaultText ?? ''),
+                },
+              }))
+            } catch { /* 取不到就等用户点保存 */ }
+          }
+        })()
+        return () => { alive = false }
+      }, [])
+
+      /** 改一份文档的某个字段（只动这一个键） */
+      const setDocField = (id, patch) => setDocs((cur) => ({
+        ...cur, [id]: { ...(cur[id] || {}), ...patch },
+      }))
+
+      /** 保存某一份（`id` 就是接口名：duty / report） */
+      const saveDoc = async (id) => {
+        const text = String(docs[id]?.text ?? '')
+        setBusy(id)
+        try {
+          const r = await jpost('/' + id, { text })
+          if (r?.ok) {
+            setDocField(id, { saved: text, chars: r.chars ?? text.length })
+            // ⚠️ 不动 defaultText —— 出厂源没变
+            say('已保存 —— 下一轮就用新的（不用重启）', 'good')
+          } else {
+            say(r?.error || '保存失败', 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      /** 恢复出厂（破坏性 ⇒ 由 PromptDoc 里的确认浮层触发） */
+      const resetDoc = async (id) => {
+        setConfirmDoc('')
+        setBusy(id)
+        try {
+          const r = await jpost('/' + id + '/reset', {})
+          if (r?.ok) {
+            const text = String(r.text ?? '')
+            setDocField(id, {
+              text, saved: text, chars: r.chars ?? text.length,
+              ...(r.defaultText ? { defaultText: String(r.defaultText) } : {}),
+            })
+            say('已恢复出厂那份', 'good')
+          } else {
+            say(r?.error || '恢复默认失败', 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
 
       // ⭐ 模型清单：同样只在挂载时取一次（providers/模型不会天天变）
       React.useEffect(() => {
@@ -2383,22 +2517,24 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存关键词'),
             h('div', { 'data-bd-note': '' }, '（上面这些是长文本 / 成组的，所以要点保存；其余改完即时生效）'))),
 
-        /* ════════ 三、怎么写（产物形态 —— 独立一档，不再塞在「关注什么」里）════════ */
+        /* ════════ 三、怎么写（—— 2026-10-21 只留两档：写笔记 / 不写）════════
+           ⚠️ 原来有中间那档「薄版」，使用者要求去掉 —— 两档就够，别给第三种选择。
+           具体怎么写（结构模板等）在「提示词 → 报告书写规范」里。 */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '怎么写'),
           h('div', { 'data-bd-note': '' }, '挑中的每条视频各写一份 md 笔记；改完即时生效。'),
           h(Field, {
-            label: '写多细',
+            label: '写不写',
             note: rl === 'off'
               ? '不写任何文件（挑中仍会记进判重表）。'
-              : '写进产物目录，文件名是「标题-YYMMDD.md」。',
+              : '写进产物目录，文件名是「标题-YYMMDD.md」—— 具体结构照「提示词 → 报告书写规范」。',
             stack: true,
             children: h('select', {
-              'data-bd-input': '', value: rl ?? 'full',
-              onChange: (e) => { setRl(e.target.value); patch({ reportLevel: e.target.value }, '产物形态') },
+              'data-bd-input': '', value: rl === 'off' ? 'off' : 'full',
+              // ⚠️ 必须归一化：老配置里存着 `brief`（已废弃）⇒ 直接用它会让 select 落空、显示空白
+              onChange: (e) => { setRl(e.target.value); patch({ reportLevel: e.target.value }, '怎么写') },
             },
-              h('option', { value: 'full' }, '完整笔记 —— 讲了什么 / 关键点 / 为什么值得（默认）'),
-              h('option', { value: 'brief' }, '薄 —— 结构保留，但正文各压到两三行'),
+              h('option', { value: 'full' }, '写笔记 —— 每条一份 md（默认）'),
               h('option', { value: 'off' }, '不写 —— 只发评论，不生成文件')),
           })),
 
@@ -2672,6 +2808,30 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('br'),
               '每一轮开始前现读这个文件 —— 保存后立刻生效，不用重启 dsh。')) : null),
 
+        /* ════════ 七之一、章程（→ 子导航「提示词」页，2026-10-21 加）════════
+           ⭐ 使用者要求：「把现在去掉约束和边界的章程也放到提示词页供大家编辑，
+              也跟评论细则一样的功能。」
+           🔴 硬约束（纪律 / 边界 / 红线 / 各禁止项）**已经不在章程里了** ——
+              那部分由插件每轮直接注入、这里改不到。所以别在这块下面写"红线"之类。 */
+        h(PromptDoc, {
+          title: '章程',
+          hint: '这一份是"一轮要做的事"的流程说明。模型每轮开头会先读它再开跑。',
+          warn: '⚠️ 纪律 / 边界 / 红线那些硬约束已经由插件直接注入每一轮，这里改不到，也不该在这里重复写。',
+          rows: 18,
+          placeholder: '（读不到 duty.md —— 点「恢复默认」拿一份出厂的回来）',
+          value: docs.duty?.text ?? '',
+          onChange: (e) => setDocField('duty', { text: e.target.value }),
+          onSave: () => saveDoc('duty'),
+          onReset: () => resetDoc('duty'),
+          saved: docs.duty?.saved ?? null,
+          chars: docs.duty?.chars ?? null,
+          file: docs.duty?.file ?? '',
+          defaultText: docs.duty?.defaultText ?? '',
+          busy: busy == 'duty',
+          confirmOpen: confirmDoc === 'duty',
+          setConfirmOpen: (v) => setConfirmDoc(v ? 'duty' : ''),
+        }),
+
         /* ════════ 七之二、回复评论的细则（→ 子导航「提示词」页）════════
            ⭐ 与人设同一套路，但**多一个「恢复默认」**（它有出厂源）。
            ⚠️ 只有「回复评论」开着时**才会注入到提示词里** —— 那个开关在「功能设置」页，
@@ -2793,6 +2953,30 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('div', { 'data-bd-confirm-foot': '' },
                 h('button', { 'data-bd-btn': '', onClick: () => setConfirmResetDm(false) }, '取消'),
                 h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetDm }, '覆盖并恢复')))) : null),
+
+        /* ════════ 七之四、报告书写规范（→ 子导航「提示词」页，2026-10-21 加）════════
+           ⭐ 使用者要求：「建立报告书写规范文档，需要写的时候，读文档。
+              报告书写规范也需要能够在提示词页面进行修改。」
+           🔴 **与代码的分工**：写在哪 / 文件名 / 用哪个工具由代码给（每轮动态），
+              这份只管「内容怎么写」。所以别在这里写死目录路径。 */
+        h(PromptDoc, {
+          title: '报告书写规范',
+          hint: '「怎么写」设成「写笔记」时用得上 —— 写第一份之前，模型会先读一遍这份。',
+          warn: '⚠️ 写在哪、文件名长什么样、用哪个工具，那些由插件每轮直接给，不在这份里。',
+          rows: 16,
+          placeholder: '（读不到 report.md —— 点「恢复默认」拿一份出厂的回来）',
+          value: docs.report?.text ?? '',
+          onChange: (e) => setDocField('report', { text: e.target.value }),
+          onSave: () => saveDoc('report'),
+          onReset: () => resetDoc('report'),
+          saved: docs.report?.saved ?? null,
+          chars: docs.report?.chars ?? null,
+          file: docs.report?.file ?? '',
+          defaultText: docs.report?.defaultText ?? '',
+          busy: busy == 'report',
+          confirmOpen: confirmDoc === 'report',
+          setConfirmOpen: (v) => setConfirmDoc(v ? 'report' : ''),
+        }),
 
         /* ════════ 有新版本的弹窗（2026-10-18 加）════════
            ⭐ 复用的是「恢复默认」那个确认弹层（`data-bd-confirm`）——
