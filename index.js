@@ -514,7 +514,76 @@ export function apply(ctx, config) {
     return capped
   }
 
+  /* ─────────────── 私信细则（dm） ───────────────
+   * ⭐ **2026-10-21 改成与 `reply.md` 完全同一种待遇**（使用者要求）：
+   *   「把私信的非约束的提示词，也放到提示词面板里，供用户修改，
+   *     形式应该跟回复评论细则一样。」
+   *
+   * 以前 `dm.md` 只给**指针**（让模型自己去 `bilij_read`）——
+   * 那是因为当时它里面**混着硬约束**，藏起来更安全。
+   * 现在硬约束已经抽到 `prompts/hard-rules.md`（包内、注入、不可改），
+   * 这份只剩「怎么发、写成什么样」⇒ **给使用者改才合理**。
+   *
+   * ⚠️ 与 reply 的**唯一区别**：`reply.md` 是**整份塞进提示词**（开着时）；
+   *    `dm.md` 仍然**只给指针**（需要发私信时自己去读）——
+   *    这是使用者当初定的「需要触发的时候让 AI 去读」。
+   *    所以这里只加"可编辑 + 恢复默认"，不改注入方式。
+   */
+  const dmFile = join(stateDir, 'dm.md')
+  const dmDefaultFile = join(pluginDir, 'prompts', 'dm.md')
+  const readDm = () => {
+    try { return readFileSync(dmFile, 'utf8') } catch { return '' }
+  }
+  const readDmDefault = () => {
+    try { return readFileSync(dmDefaultFile, 'utf8') } catch { return '' }
+  }
+  const writeDm = (text) => {
+    const s = String(text ?? '')
+    const capped = s.length > 200_000 ? s.slice(0, 200_000) : s
+    writeFileSync(dmFile, capped, 'utf8')
+    return capped
+  }
+
   ensureHomeFiles(pluginDir, stateDir, log)
+
+  /**
+   * ⭐ **一次性迁移：把老用户那份 `reply.md` / `dm.md` 里【已被抽走】的约束小节删掉**
+   * （2026-10-21，配合把硬约束抽到 `prompts/hard-rules.md`）。
+   *
+   * 为什么需要这一步：
+   *   这两份是 `overwrite:false`（使用者能改）⇒ 升级**不会覆盖**，
+   *   于是老用户那份里**还留着**那些约束 —— 而它们现在已经在 `hard-rules.md` 里
+   *   **每轮直接注入**了 ⇒ ① 重复占预算；② `reply.md` 里那句
+   *   「回去看章程的『红线』一节」更是**死链**（章程那一节已经删了）。
+   *
+   * 做法：**只按 `## 标题` 整段删**，其余一字不动（使用者的风格、他自己加的内容都保留）。
+   * ⚠️ **幂等**：标题已经不在了就什么都不做，不会每次启动都重写文件。
+   * ⚠️ 只删这几个**已知**标题；不要在别处学它去删任意小节。
+   */
+  const stripLegacyRules = (file, headings) => {
+    try {
+      if (!existsSync(file)) return
+      const before = readFileSync(file, 'utf8')
+      const out = []
+      let skipping = false
+      for (const line of before.split(/\r?\n/)) {
+        const m = /^## (.+)$/.exec(line)
+        if (m) skipping = headings.includes(m[1])
+        if (!skipping) out.push(line)
+      }
+      const after = out.join('\n').replace(/\n{3,}/g, '\n\n')
+      if (after !== before) {
+        writeFileSync(file, after, 'utf8')
+        log(`已从 ${file} 删掉已抽走的约束段（这些规则现在每轮直接注入，不在文件里了）`)
+      }
+    } catch (e) { log(`清理 ${file} 的旧约束段失败（不影响其它）：${e?.message ?? e}`) }
+  }
+  stripLegacyRules(replyFile, [
+    '下面这些一律不回',
+    '🔴 被工具打回的时候怎么办（**别自己硬绕**）',
+    '红线（照旧适用）',
+  ])
+  stripLegacyRules(dmFile, ['失败了怎么办'])
 
   /* ── 设置命名空间：让 DSH 自带的「插件设置」能编辑这份 Config ──
    *
@@ -2869,7 +2938,42 @@ export function apply(ctx, config) {
        */
       const mentionOn = cfg.mentionInComment !== false
 
+      /**
+       * ⭐⭐ **硬约束：从【插件包】读，不落家目录、使用者改不了**（2026-10-21 加）。
+       *
+       * 使用者原话：「把所有的约束和边界的提示词内容全都解耦出来，作为 runtime-context
+       *   直接注入，不让用户直接修改了，包括章程里的，不以文档形式，出现在家目录里。」
+       * 补充：「只有插件在前台开启的会话、或者他自己后台运行的时候，才去注入。」
+       *
+       * ── 为什么放插件包里、**不要**加进 `ensureHomeFiles` ──────────
+       *   `duty.md` / `reply.md` / `dm.md` 都会铺到家目录（后两份还能被使用者改）；
+       *   硬约束**恰恰不能给改** ⇒ 只从 `<插件包>/prompts/hard-rules.md` 读，
+       *   **绝不写进家目录**。⚠️ 谁想把它加进 `ensureHomeFiles`，先想清楚这一条。
+       *
+       * ── 为什么不是 `systemPrompt.context()` ─────────────────────
+       *   那套是**全局**的：所有 context 被 merge 成**一整条**、组装时 scope 写死 `agent`
+       *   （见库里「context() 快照单条性」那条）⇒ 会污染使用者自己的普通会话。
+       *   而拼进 `promptFor()` **天然只出现在插件自己起的会话里**：
+       *     · 前台那轮 = 我们新建的 `bili-<uuid>` 会话，首条消息就是这段；
+       *     · 后台那轮 = 独立进程，提示词在命令行里。
+       *   ⇒ 不用任何会话过滤就满足「只在插件的会话里注入」。
+       *
+       * ⚠️ 读不到**不要静默省略** —— 少了约束比报错更危险（模型会照常发评论/私信）。
+       */
+      let hardDoc = ''
+      try {
+        const t = readFileSync(join(pluginDir, 'prompts', 'hard-rules.md'), 'utf8').trim()
+        hardDoc = t
+          ? `\n\n${t}\n`
+          : '\n\n⚠️ 插件的硬约束文件是空的（prompts/hard-rules.md）——**先停手**，'
+            + '把这事写进报告，不要凭猜去发评论或私信。\n'
+      } catch {
+        hardDoc = '\n\n⚠️ 本轮读不到插件的硬约束文件（prompts/hard-rules.md）——**先停手**，'
+          + '把这件事写进报告，不要凭猜去发评论或私信。\n'
+      }
+
       return `你是这个账号的 B站 助手。`
+      + hardDoc
       + (ownerDoc
         ? `下面是使用者的设定 —— **按它来**，别用你默认那套人格。`
         : `使用者还没写人设 —— 那就中性一点，别擅自扮演任何人格。`)
@@ -5000,6 +5104,38 @@ export function apply(ctx, config) {
       log(`回复细则已恢复出厂（${text.length} 字符）→ ${replyFile}`)
       // ⭐ 连 `defaultText` 一起回：面板要用它刷新「是否等于默认」的判据
       return sendJson(res, 200, { ok: true, file: replyFile, chars: text.length, text, defaultText: def })
+    }
+
+    // ⭐ **私信细则**（2026-10-21 加）：与 `/reply` 完全同构 ——
+    //    使用者要求「放面板里能改，形式跟回复评论细则一样」。
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/dm') {
+      const text = readDm()
+      const def = readDmDefault()
+      return sendJson(res, 200, {
+        ok: true, text, file: dmFile,
+        defaultFile: dmDefaultFile,
+        isDefault: Boolean(def) && text.trim() === def.trim(),
+        defaultText: def,
+        hasDefault: Boolean(def),
+        chars: text.length,
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/dm') {
+      const body = await readBody(req)
+      const text = writeDm(body?.text)
+      log(`私信细则已更新（${text.length} 字符）→ ${dmFile}`)
+      return sendJson(res, 200, { ok: true, file: dmFile, chars: text.length })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/dm/reset') {
+      const def = readDmDefault()
+      if (!def.trim()) {
+        return sendJson(res, 200, { ok: false, error: `出厂源读不到或为空：${dmDefaultFile}` })
+      }
+      const text = writeDm(def)
+      log(`私信细则已恢复出厂（${text.length} 字符）→ ${dmFile}`)
+      return sendJson(res, 200, { ok: true, file: dmFile, chars: text.length, text, defaultText: def })
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）

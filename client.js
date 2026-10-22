@@ -1343,6 +1343,19 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       const [replyDefaultText, setReplyDefaultText] = React.useState('')
       // ⭐ 确认弹层（不是 window.confirm —— panel 里用原生弹框在不同宿主下表现不一）
       const [confirmReset, setConfirmReset] = React.useState(false)
+      /* ── 私信细则（2026-10-21 新增）──
+       * ⭐ 与「回复细则」**完全同一套做法**（使用者要求「形式应该跟回复评论细则一样」）：
+       *    挂载时 GET 一次 → 本地草稿 → 保存落盘 `dm.md` → 多一个「恢复默认」。
+       * ⚠️ 与 reply 的**唯一区别**：`dm.md` 不是整份注入，而是
+       *    「私信开着时给模型一个指针，让它自己去读」—— 那是使用者当初定的方式，没改。
+       *    硬约束已抽到插件包里的 `hard-rules.md`（注入、不可改），所以这份能放心给改。
+       */
+      const [dm, setDm] = React.useState(null)
+      const [dmSaved, setDmSaved] = React.useState(null)
+      const [dmFile, setDmFile] = React.useState('')
+      const [dmChars, setDmChars] = React.useState(null)
+      const [dmDefaultText, setDmDefaultText] = React.useState('')
+      const [confirmResetDm, setConfirmResetDm] = React.useState(false)
       // ── 模型（2026-10-15 新增）──
       // 清单从 /models 拉（**不硬编码**：DSH 的 provider/模型由使用者装的路由决定）
       const [models, setModels] = React.useState(null)          // [{id,name,models:[{id,name}]}]
@@ -1405,6 +1418,23 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             setReplyFile(d.file || '')
             setReplyChars(d.chars ?? (d.text || '').length)
             setReplyDefaultText(String(d.defaultText ?? ''))
+          } catch { /* 取不到就等用户点保存 */ }
+        })()
+        return () => { alive = false }
+      }, [])
+
+      // ⭐ 私信细则：与回复细则同一套路（挂载取一次，不进轮询）
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          try {
+            const d = await jget('/dm')
+            if (!alive || !d?.ok) return
+            setDm((cur) => (cur === null ? (d.text || '') : cur))
+            setDmSaved(d.text || '')
+            setDmFile(d.file || '')
+            setDmChars(d.chars ?? (d.text || '').length)
+            setDmDefaultText(String(d.defaultText ?? ''))
           } catch { /* 取不到就等用户点保存 */ }
         })()
         return () => { alive = false }
@@ -1861,6 +1891,43 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             // ⭐ 服务端把出厂正文也回给我们了 ⇒ 顺手刷新它（升级后出厂源会变）
             if (r.defaultText) setReplyDefaultText(String(r.defaultText))
             say('已恢复出厂那份回复细则', 'good')
+          } else {
+            say(r?.error || '恢复默认失败', 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      // ⭐ **私信细则**（2026-10-21）：与回复细则同构
+      const onSaveDm = async () => {
+        const text = String(dm ?? '')
+        setBusy('dm')
+        try {
+          const r = await jpost('/dm', { text })
+          if (r?.ok) {
+            setDmSaved(text)
+            setDmChars(r.chars ?? text.length)
+            // ⚠️ 不要动 dmDefaultText —— 出厂源没变
+            say('私信细则已保存 —— 下一轮就用新的（不用重启）', 'good')
+          } else {
+            say(r?.error || '私信细则保存失败', 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const onResetDm = async () => {
+        setConfirmResetDm(false)
+        setBusy('dm')
+        try {
+          const r = await jpost('/dm/reset', {})
+          if (r?.ok) {
+            const text = String(r.text ?? '')
+            setDm(text)
+            setDmSaved(text)
+            setDmChars(r.chars ?? text.length)
+            if (r.defaultText) setDmDefaultText(String(r.defaultText))
+            say('已恢复出厂那份私信细则', 'good')
           } else {
             say(r?.error || '恢复默认失败', 'warn')
           }
@@ -2663,6 +2730,69 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('div', { 'data-bd-confirm-foot': '' },
                 h('button', { 'data-bd-btn': '', onClick: () => setConfirmReset(false) }, '取消'),
                 h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetReply }, '覆盖并恢复')))) : null),
+
+        /* ════════ 七之三、私信细则（→ 子导航「提示词」页，2026-10-21 加）════════
+           ⭐ 使用者要求：「把私信的非约束的提示词，也放到提示词面板里，供用户修改，
+              形式应该跟回复评论细则一样。」
+           ⚠️ 与回复细则的**唯一区别**：这份**不是整份注入** ——
+              私信开着时提示词里只给一个指针，模型要发私信时自己去读它。
+              （那是使用者当初定的方式，这次没改。）
+           🔴 「不许拿理由不发 / uid 查不到别猜 / 别自曝 AI / 只能用 bilij_send_dm」
+              那几条**已经抽到插件包里的 hard-rules.md**（每轮注入、改不了），
+              所以这份只剩「怎么发、写成什么样」—— 说清楚，免得使用者以为约束没了。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
+          h('div', { 'data-bd-h': '' }, '私信细则'),
+          h('div', { 'data-bd-note': '' },
+            '这份只在「私信通知」开着时起作用（那个开关在「功能设置」页）—— '
+            + '发私信前模型会自己去读它。'),
+          h('div', { 'data-bd-note': '' },
+            '⚠️ 私信的硬规矩（不许拿理由不发、uid 查不到别猜、别自曝是 AI、'
+            + '只能用插件给的工具发）已经写死在插件里、每一轮直接注入，这里改不到，'
+            + '也不该在这里重复写。'),
+
+          h('div', { 'data-bd-sub': '' },
+            h('textarea', {
+              'data-bd-input': '', 'data-bd-persona': '', rows: 14,
+              placeholder: '（读不到 dm.md —— 点「恢复默认」拿一份出厂的回来）',
+              value: dm ?? '',
+              onChange: (e) => setDm(e.target.value),
+            }),
+            h('div', { 'data-bd-foot': '' },
+              h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'dm', onClick: onSaveDm }, '保存细则'),
+              h('button', {
+                'data-bd-btn': '', disabled: busy === 'dm' || !(dm || '').trim(),
+                onClick: () => { setDm('') },
+              }, '清空'),
+              // ⚠️ 禁用判据用**当前草稿**跟出厂正文比（不能用服务端快照，理由同回复细则那段）
+              h('button', {
+                'data-bd-btn': '',
+                disabled: busy === 'dm'
+                  || !dmDefaultText
+                  || String(dm ?? '').trim() === dmDefaultText.trim(),
+                onClick: () => setConfirmResetDm(true),
+              }, (dmDefaultText && String(dm ?? '').trim() === dmDefaultText.trim())
+                ? '已是默认' : '恢复默认'),
+              (dm !== null && dmSaved !== null && dm !== dmSaved)
+                ? h('span', { 'data-bd-note': '' }, '有未保存的改动') : null),
+            h('div', { 'data-bd-note': '' },
+              dmChars != null ? `当前 ${dmChars} 字符` : '',
+              dmChars != null ? h('br') : null,
+              '存本地：', h('code', null, dmFile || ''),
+              h('br'),
+              '每一轮发私信前现读这个文件 —— 保存后立刻生效，不用重启 dsh。',
+              h('br'),
+              '⚠️ 「恢复默认」会覆盖你现在这份（从插件自带的出厂那份重新读），不可撤销。')),
+
+          confirmResetDm ? h('div', { 'data-bd-confirm': '' },
+            h('div', { 'data-bd-confirm-box': '' },
+              h('div', { 'data-bd-confirm-title': '' }, '恢复成出厂的私信细则？'),
+              h('div', { 'data-bd-confirm-body': '' },
+                '你现在这份会被覆盖，改过的内容找不回来。',
+                h('br'),
+                '（要留个底的话，先复制上面的正文再点。）'),
+              h('div', { 'data-bd-confirm-foot': '' },
+                h('button', { 'data-bd-btn': '', onClick: () => setConfirmResetDm(false) }, '取消'),
+                h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetDm }, '覆盖并恢复')))) : null),
 
         /* ════════ 有新版本的弹窗（2026-10-18 加）════════
            ⭐ 复用的是「恢复默认」那个确认弹层（`data-bd-confirm`）——
