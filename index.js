@@ -1737,20 +1737,86 @@ export function apply(ctx, config) {
     return id ? { kind: 'prompt', id } : null
   }
 
+  /* ─────────────── 按标题（节）改文件（2026-10-24 加） ───────────────
+   *
+   * 🔴 **为什么要这个**：`bilij_write` 原来只能整份覆盖。
+   *    而真正的需求往往是「**只改这一节，别的章一个字不动**」——
+   *    模型只能自己把全文拼出来再整份写；一拼错、一偷懒，**整份文档就没了**。
+   *    实测 2026-10-23 一晚上连着四次（persona.md 十几章全被覆盖，每次都要手写补回）。
+   *
+   * ✅ 现在：按 `##` / `###` 标题定位，**只动那一节**，物理上不可能把别的章冲掉。
+   */
+
+  /** 把 markdown 按标题切成节；返回 [{ level, title, startLine, endLine }]（行号 0 起、endLine 不含） */
+  const splitSections = (lines) => {
+    const marks = []
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^(#{1,6})\s+(.*)$/.exec(lines[i])
+      if (m) marks.push({ level: m[1].length, title: m[2].trim(), startLine: i })
+    }
+    return marks.map((mk, idx) => {
+      // ⚠️ 结束位置 = 下一个**同级或更高级**标题；这样二级节能自然包住它下面的三级子节
+      let end = lines.length
+      for (let j = idx + 1; j < marks.length; j++) {
+        if (marks[j].level <= mk.level) { end = marks[j].startLine; break }
+      }
+      return { ...mk, endLine: end }
+    })
+  }
+
+  /**
+   * 按标题找节。
+   * @returns {{ok:true, sec}|{ok:false, error, candidates?}}
+   */
+  const findSection = (lines, want) => {
+    const q = String(want ?? '').trim()
+    if (!q) return { ok: false, error: 'section 是空的' }
+    const secs = splitSections(lines)
+    // ① 精确（忽略首尾空白）
+    const exact = secs.filter((s) => s.title === q)
+    if (exact.length === 1) return { ok: true, sec: exact[0] }
+    if (exact.length > 1) {
+      return { ok: false, error: `有 ${exact.length} 个同名节「${q}」，认不准是哪个`, candidates: exact.map((s) => s.title) }
+    }
+    // ② 子串（跟 memj_read 的 section 语义一致）
+    const sub = secs.filter((s) => s.title.includes(q))
+    if (sub.length === 1) return { ok: true, sec: sub[0] }
+    if (sub.length > 1) {
+      return {
+        ok: false,
+        error: `「${q}」命中了 ${sub.length} 个节，请给更完整的标题`,
+        candidates: sub.map((s) => s.title),
+      }
+    }
+    return { ok: false, error: `找不到标题含「${q}」的节`, candidates: secs.map((s) => s.title) }
+  }
+
   tool({
     name: 'bilij_write',
     description: '往插件家目录里写文件（**写产物就用它**，路径见提示词里给的那个）。\n'
       + '⚠️ 沙箱只让前台会话写它**自己的工作区**，写不到家目录 ⇒ 所以要走这个工具。\n'
-      + '默认**覆盖**整个文件；要追加传 `append: true`。\n'
-      + '🔴 **改提示词文件（duty / report / comment / reply / dm .md）时本工具会自动校验**：\n'
+      + '🔴🔴 **写之前先想清楚你要哪种操作 —— 它是必填的，不填直接拒：**\n'
+      + '   · `append: true` —— 追加到**文件末尾**（想加一章/加一段，用这个）\n'
+      + '   · `section: "某节标题"` + `op` —— **只改那一节，别的章节一个字不动**（最安全，改已有文档首选）\n'
+      + '   · `overwrite: true` —— **整份替换**。🔴 **这会删掉文件里其他所有内容**，\n'
+      + '     只有在你**确实要重写整份文件**时才用；改一节千万别用它。\n'
+      + '🔴 **改提示词文件（duty / report / comment / reply / dm / persona .md）时本工具会自动校验**：\n'
       + '  规则文件不能为空、不能塞「无视 hard-rules」这类话；不合格直接拒写。\n'
       + '  建议先传 `dryRun: true` 试校验，通过了再正式写。\n'
       + '⛔ **`config.json` 不能用本工具改** —— 那只能走面板（或 `bilij_config`）。',
     parameters: {
       path: { type: 'string', description: '文件路径（相对家目录或绝对，必须在插件家目录内）' },
       text: { type: 'string', description: '要写入的内容' },
-      append: { type: 'boolean', description: 'true = 追加（默认 false = 覆盖）' },
-      dryRun: { type: 'boolean', description: 'true = 只校验不落盘（改提示词文件时建议先跑一次）' },
+      // ⭐ 三种操作，必须显式选（2026-10-24：默认从"覆盖"改成"拒绝"）
+      append: { type: 'boolean', description: '⭐ 追加到文件末尾。想给文档加一章/一段就用这个。' },
+      overwrite: { type: 'boolean', description: '🔴 整份替换（会删掉文件里其他所有内容）。改一节请改用 section+op。' },
+      section: { type: 'string', description: '⭐ 按 markdown 标题定位一节（`## ` / `### ` 都行；子串匹配，命中多个会报错让你写全）。配合 op 使用。' },
+      op: {
+        type: 'string',
+        description: '配合 section：`replace`（替换整节）/ `append`（加到该节末尾）/ `prepend`（加到该节开头）/ `drop`（删掉该节，text 会被忽略）。不给默认 replace。',
+      },
+      dryRun: { type: 'boolean', description: 'true = 只校验/只演算不落盘（改提示词文件时建议先跑一次）' },
+      confirmShrink: { type: 'boolean', description: '覆盖时新内容比原来短一半以上会被拦；确认这是真的要大幅精简，就传 true。' },
     },
     async execute(args) {
       const r = resolveInHome(args.path)
@@ -1767,10 +1833,99 @@ export function apply(ctx, config) {
         }
       }
 
+      const exists = existsSync(r.abs)
+      const oldText = exists ? readFileSync(r.abs, 'utf8') : ''
+
+      /* ⭐⭐⭐ 按节修改（最安全的路 —— 改已有文档首选）
+       * 只动目标那一节，其余字节原样保留。物理上不可能把别的章冲掉。 */
+      if (typeof args.section === 'string' && args.section.trim()) {
+        if (!exists) return { ok: false, error: `文件不存在，没法按节改：${r.abs}（新建文件请用 overwrite）` }
+        const op = String(args.op ?? 'replace').trim()
+        if (!['replace', 'append', 'prepend', 'drop'].includes(op)) {
+          return { ok: false, error: `op 只能是 replace / append / prepend / drop，你给的是「${op}」` }
+        }
+        // ⚠️ 保持原换行风格：CRLF 文件切出来要能原样拼回去
+        const crlf = oldText.includes('\r\n')
+        const lines = oldText.split(/\r?\n/)
+        const found = findSection(lines, args.section)
+        if (!found.ok) {
+          return {
+            ok: false,
+            error: found.error,
+            availableSections: found.candidates?.slice(0, 40),
+            hint: '`availableSections` 是这个文件现有的标题；照抄一个完整的过来。',
+          }
+        }
+        const sec = found.sec
+        const head = lines.slice(0, sec.startLine)          // 本节标题行之前
+        const titleLine = lines[sec.startLine]
+        const bodyLines = lines.slice(sec.startLine + 1, sec.endLine)   // 本节正文
+        const tail = lines.slice(sec.endLine)               // 后面所有内容
+
+        const newBody = body === '' ? [] : body.split(/\r?\n/)
+        let merged
+        // 🔴 四种 op 都必须带上 `head`（本节标题之前的所有内容）——
+        //    漏了它就会把「本节之前的所有章节」整段吃掉（探针当场抓到过，见 tools/probe-bilij-write.mjs）
+        if (op === 'replace') merged = [...head, titleLine, ...newBody, ...tail]
+        else if (op === 'append') merged = [...head, titleLine, ...bodyLines, ...newBody, ...tail]
+        else if (op === 'prepend') merged = [...head, titleLine, ...newBody, ...bodyLines, ...tail]
+        else merged = [...head, ...tail]                    // drop：连标题一起删
+
+        const next = merged.join(crlf ? '\r\n' : '\n')
+
+        // 提示词文件照样要过校验（整份送去校验，保证最终落盘的那份是合规的）
+        if (guard?.kind === 'prompt') {
+          const chk = checkPromptText(guard.id, next)
+          if (!chk.ok) {
+            return {
+              ok: false, blocked: true, file: guard.id, errors: chk.errors, warnings: chk.warnings,
+              hint: '几节拼起来之后整份没过校验，所以没写盘。',
+            }
+          }
+        }
+        if (args.dryRun) {
+          return {
+            ok: true, dryRun: true, mode: 'section', op, section: sec.title,
+            charsBefore: oldText.length, charsAfter: next.length,
+            note: '只是演算，没落盘。',
+          }
+        }
+        writeFileSync(r.abs, next, 'utf8')
+        return {
+          ok: true, path: r.abs, mode: 'section', op, section: sec.title,
+          charsBefore: oldText.length, charsAfter: next.length, bytes: statSync(r.abs).size,
+          promptFile: guard?.kind === 'prompt' ? guard.id : undefined,
+          note: `只改了「${sec.title}」这一节，其余内容原样保留。`,
+        }
+      }
+
+      /* ⭐⭐ 整份覆盖：必须显式 overwrite:true
+       * 2026-10-24 之前默认就是覆盖 ⇒ 模型想"改一节"却整份重写，一晚上把 persona 冲掉四次。 */
+      const wantOverwrite = args.overwrite === true
+      const wantAppend = args.append === true
+
+      if (!wantOverwrite && !wantAppend) {
+        return {
+          ok: false,
+          error: '没说要哪种操作，所以什么都没写。三种任选其一：'
+            + '`append: true`（追加到末尾）、`section` + `op`（只改一节，最安全）、`overwrite: true`（整份替换）。',
+          hint: exists
+            ? `这个文件现在有 ${oldText.length} 字符 / ${oldText.split(/\r?\n/).length} 行；整份覆盖会把它们全部丢掉。`
+            : '文件还不存在，新建请传 overwrite: true。',
+        }
+      }
+      if (wantOverwrite && wantAppend) {
+        return { ok: false, error: 'append 和 overwrite 不能同时给 —— 到底是要追加还是整份替换？' }
+      }
+
       // ② 五份提示词：走硬校验（没有 force，别想绕）
       if (guard?.kind === 'prompt') {
-        if (args.append) {
-          return { ok: false, error: '提示词文件不支持 append —— 会写出半份规范。请给完整正文、整份覆盖。' }
+        if (wantAppend) {
+          return {
+            ok: false,
+            error: '提示词文件不支持 append —— 会写出半份规范。',
+            hint: '想加一章请用 `section` + `op:"append"`；想整份重写请传 `overwrite: true` 并给完整正文。',
+          }
         }
         const chk = checkPromptText(guard.id, body)
         if (!chk.ok) {
@@ -1790,20 +1945,52 @@ export function apply(ctx, config) {
         const size = existsSync(r.abs) ? statSync(r.abs).size : 0
         return {
           ok: true, path: r.abs, mode: 'overwrite', bytes: size, chars: body.length,
+          charsBefore: oldText.length, charsAfter: body.length,
           promptFile: guard.id, warnings: chk.warnings,
           note: '提示词已更新 —— 下一轮现读，即时生效（不用重启）。',
         }
       }
 
-      // ③ 其它文件：照旧
-      if (args.dryRun) return { ok: true, dryRun: true, note: '这个路径不受提示词校验约束，dryRun 无意义' }
+      // ③ 其它文件
+      if (args.dryRun) {
+        return {
+          ok: true, dryRun: true, mode: wantAppend ? 'append' : 'overwrite',
+          charsBefore: oldText.length, charsAfter: wantAppend ? oldText.length + body.length : body.length,
+          note: '只是演算，没落盘。',
+        }
+      }
+
+      /* 🔴 兜底闸：整份覆盖且新内容比原来短一半以上 ⇒ 拦一次
+       * 实测那次事故：persona.md 20932 → 937 字符（剩 4.5%），一眼就是"把别的章弄丢了"。
+       * 不直接拒（有时确实要大幅精简），但要求下一步明确，且回执里说清丢了多少。 */
+      let shrinkWarn
+      if (wantOverwrite && exists && oldText.length > 500 && body.length < oldText.length * 0.5) {
+        const pct = Math.round((body.length / oldText.length) * 100)
+        shrinkWarn = `⚠️ 新内容只有原来的 ${pct}%（${oldText.length} → ${body.length} 字符）。`
+        if (args.dryRun !== true && args.confirmShrink !== true) {
+          return {
+            ok: false,
+            blocked: true,
+            needConfirm: 'confirmShrink',
+            error: shrinkWarn + ' 如果这是一次误操作（比如只想改一节却整份重写），**什么都没写**。',
+            hint: '真要大幅精简就传 `confirmShrink: true` 再来一次；只想改一节请改用 `section` + `op`。',
+          }
+        }
+      }
+
       try {
         mkdirSync(dirname(r.abs), { recursive: true })
-        if (args.append) appendFileSync(r.abs, body, 'utf8')
+        if (wantAppend) appendFileSync(r.abs, body, 'utf8')
         else writeFileSync(r.abs, body, 'utf8')
         // ⭐ 回执带**写后的字节数** —— 让它能自证"真写进去了"，而不是以为自己写了
         const size = existsSync(r.abs) ? statSync(r.abs).size : 0
-        return { ok: true, path: r.abs, mode: args.append ? 'append' : 'overwrite', bytes: size, chars: body.length }
+        return {
+          ok: true, path: r.abs, mode: wantAppend ? 'append' : 'overwrite',
+          bytes: size, chars: body.length,
+          charsBefore: oldText.length,
+          charsAfter: wantAppend ? oldText.length + body.length : body.length,
+          shrinkWarning: shrinkWarn,
+        }
       } catch (e) { return { ok: false, error: `写失败：${e?.message ?? e}` } }
     },
   })
