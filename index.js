@@ -3095,7 +3095,20 @@ export function apply(ctx, config) {
       + (Number(cfg.searchDays) > 0
         ? `只搜最近 ${Number(cfg.searchDays)} 天（**必须**给 bilij_search 传 days=${Number(cfg.searchDays)}，返回里没有时间字段、不传就筛不了）。`
         : `不限时间。`)
-      + `本地转写是${cfg.transcribe ? '开着的（没字幕就用家目录里的 asr.py 转，命令见章程）' : '关着的（没字幕就跳过）'}；`
+      /**
+       * ⭐ **转写命令按开关注入**（2026-10-22 改）。
+       *
+       * 原来它常驻在 `duty.md` 里（400 字符），而转写默认是关的 ⇒
+       * **每轮都在占预算，却几乎从不执行**。现在收进这里，只在这轮真要用时才给。
+       * ⚠️ 命令格式与 `duty.md` 里原来那份保持一致（独立 venv，别用主 venv）。
+       */
+      + (cfg.transcribe
+        ? `本地转写是**开着的** —— 没字幕时用家目录里的独立环境转写（别用主 venv）：\n`
+          + (process.platform === 'win32'
+            ? `  \`${join(stateDir, '.venv-asr', 'Scripts', 'python.exe')}\` \`${join(stateDir, 'asr.py')}\` <BV号>\n`
+            : `  \`${join(stateDir, '.venv-asr', 'bin', 'python')}\` \`${join(stateDir, 'asr.py')}\` <BV号>\n`)
+          + `  它会把字幕打到标准输出（第一次调用要加载模型，慢几十秒正常）；`
+        : `本地转写是**关着的**（没字幕就跳过，别硬凑）；`)
       /**
        * 🔴 **「自动评论」要写成命令，不是描述**（2026-10-18 修，真机反馈）。
        *
