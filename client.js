@@ -886,10 +886,26 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         现在它挂在 split 下（split 没有 transform）⇒ fixed 的包含块回到视口。
 
      ⭐ **半透明要"看得出半透明"，靠的是下面那层不变的背景**：
-        按钮现在浮在**详情栏的不透明白底**上 ⇒ 72% 白几乎看不出来。
-        改用**中性深色半透明**（rgba(0,0,0,.55)）+ 白字 —— 这是"悬浮在内容之上的控件"，
+        按钮现在浮在**详情栏的不透明白底**上 ⇒ 白色半透明几乎看不出来。
+        改用**中性深色半透明** + 白字 —— 这是"悬浮在内容之上的控件"，
         在浅色正文上看得清、也不会被下面的文字穿透成糊字。
-     ⚠️ 别改成纯白半透明：那在白色详情栏上等于没有背景。 */
+     ⚠️ 别改成纯白半透明：那在白色详情栏上等于没有背景。
+
+     🔴🔴 **alpha 不能随便调小 —— 要按对比度算**（2026-10-22 实测数据）：
+        白字压在这个按钮上，叠在**白色详情栏**上合成后的效果是：
+
+          alpha 0.38 → 合成 rgb(158,158,158) → 对比度 **2.68** ✗ 连 AA 大字线(3.0)都不到
+          alpha 0.42 → 3.04  ✓ AA-large（勉过）
+          alpha 0.45 → **3.35**  ✓ AA-large（**当前取值**）
+          alpha 0.55 → 4.76  ✓ AA-normal（上一版，偏实）
+          alpha 0.60 → 5.74  ✓ AA-normal
+
+        ⇒ 使用者要求"透明度再低一点"，从 0.55 降到 **0.45**（明显更透），
+          刚好还压住 AA 大字线；再小白字就糊了。
+        ⚠️ 想更透就必须同时**把字号加大到 18.66px 以上**（那才是"大字号"）或者
+          换成更实的底 —— 单纯调 alpha 会掉到不可读区间。
+        ⭐ 另补一条 text-shadow：半透明底上白字的边缘容易和背景糊在一起，
+          给一点点黑影就能把字"提"出来（不影响整体通透感）。 */
   [data-bd-split][data-narrow-open]>.bd-narrow-back{
     display:flex;position:fixed;z-index:3;
     /* ⭐ 距底边 1/3 屏高（使用者原话：「大概距离底边三分之一屏高的位置」） */
@@ -897,14 +913,15 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
     align-items:center;gap:4px;
     padding:7px 12px 7px 14px;font:inherit;font-size:13px;line-height:1;
     color:#fff;
-    background:rgba(0,0,0,.55);
+    text-shadow:0 1px 2px rgba(0,0,0,.45);
+    background:rgba(0,0,0,.6);
     border:1px solid rgba(255,255,255,.22);border-right:none;
     border-radius:10px 0 0 10px;
     backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
     box-shadow:-2px 2px 8px rgba(0,0,0,.12);
     cursor:pointer;
   }
-  [data-bd-split][data-narrow-open]>.bd-narrow-back:hover{background:rgba(0,0,0,.68);}
+  [data-bd-split][data-narrow-open]>.bd-narrow-back:hover{background:rgba(0,0,0,.72);}
 }
 
 /* 🔴 **全局兜底：返回按钮在任何情况下都不该在宽屏出现**（memj 那条注释踩过）：
