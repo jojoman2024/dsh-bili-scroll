@@ -724,7 +724,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-page][data-bd-tab="artifacts"] [data-bd-sec][data-bd-tabin="artifacts"]{
   flex:1 1 auto;min-height:0;margin:0 -16px;padding:0;border-top:0;}
 
-[data-bd-split]{display:flex;align-items:stretch;gap:0;height:100%;min-height:0;}
+[data-bd-split]{display:flex;align-items:stretch;gap:0;height:100%;min-height:0;
+  /* 🔴 **必须显式压掉 padding**（2026-10-22 量出来的）：
+     上面那条「分节里的每个直接子元素 = 一行」是 padding:16px 0 —— split 是分节的
+     直接子元素 ⇒ 它自己也被套上了 16px 上下内距 ⇒ 左右两栏的顶/底各缩进 16px，
+     **竖线和横线都顶不到头**（实测：SPLIT top=86 而 SIDE top=102，差整 16）。
+     ⚠️ 这正是使用者反复说的"还是有空隙、线也没顶到上面"。
+     同族：[data-bd-sec]>* 还给 border-bottom，这里一并不需要。 */
+  padding:0;border-bottom:0;}
 
 /* ── 左：列表栏 ──
    宽度照 memj 的 25%（使用者要求"参考 memj"），但给 min-width:150px 兜底 ——
@@ -750,17 +757,22 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
  *    ⚠️ 别把右边那 10px 挪回盒子 —— 分隔线会缺一个角（这条踩过）。
  */
 [data-bd-side]>.bd-side-head{flex:0 0 auto;display:flex;flex-direction:column;gap:8px;
-  padding:10px 0 10px 10px;
-  border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
-[data-bd-side]>.bd-side-head>input[data-bd-input]{margin-right:10px;font-size:13px;
-  padding:6px 9px;border-radius:7px;}
+  padding:10px;border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 🔴 搜索框：width 必须写 auto（2026-10-22 量出来的）
+   实测：input 带通用规则的 width:100% + margin-right:10 ⇒ 100% 是相对**内容盒**
+   (150-10=140) 算的，再加 margin ⇒ 右边缘 151，**压在竖线上**（列表项是 141）。
+   ⇒ width:auto + align-self:stretch 让它随父盒 padding 收缩，右边缘回到 141。
+   ⚠️ 父盒 padding-right 会不会让 border-bottom 变短？**不会** —— border 画在
+      padding 外面，线照样通到右边缘。（这条我先估错了，以为 padding 会吃掉线。） */
+[data-bd-side]>.bd-side-head>input[data-bd-input]{
+  width:auto;align-self:stretch;font-size:13px;padding:6px 9px;border-radius:7px;}
 [data-bd-side]>.bd-side-head>.bd-count{
   font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;
-  color:var(--dsw-alias-label-tertiary,#81858c);margin-right:10px;}
+  color:var(--dsw-alias-label-tertiary,#81858c);}
 
 /* 列表本体：**只有它滚**。数值照 memj 的 .list：padding:8px / gap:6px
    ⚠️ 右边 padding 10px 与上面搜索区的 margin-right 同值 ⇒ 两栏右边线对齐。 */
-[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 16px 10px;
+[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 16px;
   display:flex;flex-direction:column;gap:6px;}
 
 /* 一条产物。数值照 memj 的 .item：padding:8px 10px / radius:8px */

@@ -77,21 +77,43 @@ if (!target) {
 /* ───────── ② 搜索区与列表的左右内边距必须一致 ─────────
  * 判据是**两边数值相等**，不是各自写死一个数 —— 改一个另一个必须跟着改。
  */
-const headPad = /\[data-bd-side\]>\.bd-side-head\{[^}]*padding:(\d+)px 0 (\d+)px (\d+)px;/.exec(css)
-const headIn = /\[data-bd-side\]>\.bd-side-head>input\[data-bd-input\]\{margin-right:(\d+)px;/.exec(css)
-const listPad = /\[data-bd-list\]\{[^}]*padding:(\d+)px (\d+)px (\d+)px (\d+)px;/.exec(css)
+/* 🔴 2026-10-22 **量出来之后重写**：原来这条比的是"搜索框 margin-right vs 列表 padding-right"，
+ *    但真机上错的不是那两个数相等，而是 **input 的 width:100% + margin 让它溢出 10px**
+ *    （实测搜索框 right=151、列表项 right=141 ⇒ 搜索框正好压在竖线上）。
+ * ⇒ 现在断言的是**结构性**的两条：
+ *    ① 搜索框必须 width:auto + align-self:stretch（不能是 100%，否则会被 margin 撑出去）；
+ *    ② 搜索区盒子的 padding 与列表的左右 padding 相同（这样左边缘才对齐）。
+ */
+const headPad = /\[data-bd-side\]>\.bd-side-head\{[^}]*padding:(\d+)(?:px)??[;]/.exec(css)
+  || /\[data-bd-side\]>\.bd-side-head\{[^}]*padding:(\d+)px;/.exec(css)
+const headIn = /\[data-bd-side\]>\.bd-side-head>input\[data-bd-input\]\{([^}]*)\}/.exec(css)
+const listPad = /\[data-bd-list\]\{[^}]*padding:(\d+)px (\d+)px (\d+)px(?: (\d+)px)?;/.exec(css)
 if (!headPad || !headIn || !listPad) {
-  problems.push('找不到 left 栏的 padding/margin 声明（结构改过就要跟着改这项检查）')
+  problems.push('找不到左栏的 padding 声明（结构改过就要跟着改这项检查）')
 } else {
-  const headL = Number(headPad[3]) + 0      // 盒子的左内距（搜索框没有额外左边距）
-  const headR = Number(headIn[1]) + Number(headPad[3]) * 0 + Number(headIn[1]) * 0
-  // 右边距 = 搜索框自己的 margin-right（盒子 padding-right 是 0，那样分隔线才能顶到边）
-  const searchR = Number(headIn[1])
-  const listL = Number(listPad[4])
+  const headAll = Number(headPad[1])
+  const inDecl = headIn[1]
+  const listL = Number(listPad[4] ?? listPad[2])   // 简写 3 值时：上 左右 下
   const listR = Number(listPad[2])
-  if (headL !== listL) problems.push(`搜索区左内距 ${headL}px ≠ 列表左内距 ${listL}px（两者左边缘会对不齐）`)
-  if (searchR !== listR) problems.push(`搜索框右边距 ${searchR}px ≠ 列表右内距 ${listR}px（搜索框会贴着竖线或留一道缺口）`)
-  void headR
+  if (!/width\s*:\s*auto/.test(inDecl)) {
+    problems.push('搜索框没有 width:auto —— 通用规则的 width:100% 会把它按 margin 撑出父盒（真机上会压在竖线上）')
+  }
+  if (!/align-self\s*:\s*stretch/.test(inDecl)) {
+    problems.push('搜索框没有 align-self:stretch —— 右边缘不会跟着父盒 padding 收缩')
+  }
+  if (headAll !== listL) problems.push(`搜索区 padding ${headAll}px ≠ 列表左 padding ${listL}px（左边缘对不齐）`)
+  if (headAll !== listR) problems.push(`搜索区 padding ${headAll}px ≠ 列表右 padding ${listR}px（右边缘对不齐）`)
+}
+
+/* 🔴 2026-10-22 量出来的真根因：split 被「每个直接子元素 = 一行」那条规则套了 padding。
+ * 实测：SPLIT top=86 而 SIDE top=102 ⇒ 差 16px，竖线/横线都顶不到头。
+ * ⇒ 断言 split 上显式写了 padding:0。
+ */
+const splitRule = /\[data-bd-split\]\{([^}]*)\}/.exec(css)
+if (!splitRule) {
+  problems.push('找不到 [data-bd-split] 规则')
+} else if (!/padding\s*:\s*0/.test(splitRule[1])) {
+  problems.push('split 没写 padding:0 —— 它会被「每个直接子元素 = 一行」那条规则套上 16px 上下内距，左右栏顶不到导航线')
 }
 
 /* ───────── ③ 左栏宽度照 memj 的 25% ───────── */
