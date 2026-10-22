@@ -676,34 +676,70 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-pre][data-bd-clog][data-bd-wrap]{word-break:break-all;max-height:120px;}
 
 /* ══════════════════════════════════════════════════════════════════════════
-   ⭐⭐ 「产物报告」页：左列表 / 右详情（2026-10-22 加）
+   ⭐⭐ 「产物报告」页：左列表 / 右详情（2026-10-22 加，同日按反馈重做布局）
 
-   使用者要求：「把功能设置页的看产物…单独做个子导航页【产物报告】…
-   左侧列表，右侧详情，详情需要渲染。具体实现看 memj 插件的知识库页的实现。」
+   使用者要求（第一版交出去之后）：
+     「左侧栏和右侧栏的宽度比例不对，很难受，参考 memj」
+     「左右栏的分隔线要顶到头啊，现在页面和上面导航分隔线完全空着一块」
+     「包括左右栏与上方的间隔也过大了」
+     「左侧栏，搜索框和列表间也应该有分隔线，且需要注意间隔」
+     「搜索栏上方，也像 memj 那样标出 XX/XX」
 
-   🔴🔴 **这里必须自己建立 flex 上下文**（这是本页最容易踩、且不报错的地方）：
-     库内条目 b15ee951 记着 memj 那边栽的同一个坑 ——
-     "flex:1" 不是"我要占满"，而是"**在父容器的 flex 分配里占 1 份**"。
-     本面板的祖先链是 [data-bd-tabwrap](overflow:auto) > [data-bd-page](flex) > 分节，
-     而分节 [data-bd-sec] 是 display:flex; flex-direction:column —— 它**是** flex 容器，
-     可它能给子项分配的高度是"内容撑开"的（tabwrap 自己在滚）⇒
-     左右两栏都会长到内容那么高，**右侧的 overflow:auto 永不触发、正文滚不动**。
-     ⇒ 所以这一页**不能**再用 [data-bd-sec] 那套逐行留白，得给它一个
-       **固定高度 + 中间滚动**的盒子（见下面的 [data-bd-split]）。
-     ⚠️ 高度用 calc(100vh - …) 是按"面板在视口里"估的；实测若被截，改这个数即可
-        （面板本来就在右侧栏里，用户能接受"上下各让出一点"）。
+   ── 第一版错在哪（两处都是"猜数值"造成的）──────────────────────────
+   ① 高度用 calc(100vh - 128px) 死估 ⇒ 顶栏到底多高是变的（有时多一行提示），
+      估多了就空一块、估少了就截断；
+   ② 这一节还沿用了普通分节的 margin:28px / padding:20px（**为了那条分节上边线**），
+      而本页左右栏之间那条竖线要"顶到头" ⇒ 那 48px 空白正好卡在导航线和竖线之间。
+
+   ── 现在怎么做的（**不再估任何高度**）──────────────────────────────
+   tabwrap 自己是 height:100%（它本来就有，是撑满右侧栏的）⇒ 给它底下这层
+   [data-bd-page] 加一个 data-bd-fill 让它 height:100%（**百分比高度只在父级高度确定时才算**），
+   于是整条链变成"确定高度"：[data-bd-fill] → 分节(flex:1) → [data-bd-split](height:100%)，
+   左右两栏各自 overflow:auto。
+   ⚠️ 只给「产物报告」这一页加 data-bd-fill —— 别的页还是要"内容撑开到哪算哪"，
+      否则它们会被压成一屏高、内容溢出。
+   ⚠️ 这一节同时把 margin/padding 归零、上边线也去掉（那条线本来是为了分隔分节，
+      而本页整块就是一个"贴满"的区域，再画线只会和导航线之间多出一条空缝）。
+
+   🔴 布局机制别丢：flex:1 不是"我要占满"，而是"在父容器的分配里占 1 份"
+      （库内 b15ee951：少一层 display:flex 就整条失效，且**不报错**、只是滚不动）。
    ══════════════════════════════════════════════════════════════════════════ */
-[data-bd-split]{display:flex;align-items:stretch;gap:0;min-height:0;
-  /* 顶栏(sticky) + 标签条 ≈ 96px，再给上下各 16px 呼吸 */
-  height:calc(100vh - 128px);}
-/* 左：列表栏。**定宽**（不是 flex:1），右侧才不会跟着列表长度抖 */
-[data-bd-side]{flex:0 0 42%;max-width:42%;min-width:0;display:flex;flex-direction:column;
+
+/* 只在「产物报告」页生效的两个开关（见 Panel 里 data-bd-fill / data-bd-flush） */
+[data-bd-page][data-bd-fill]{height:100%;}
+[data-bd-head][data-bd-flush]{margin-bottom:0;}
+
+/* 这一节：贴满、不留白、不画分节上边线（理由见上面 ②） */
+[data-bd-sec][data-bd-tabin="artifacts"]{
+  flex:1 1 auto;min-height:0;margin:0 -16px;padding:0;border-top:0;}
+
+[data-bd-split]{display:flex;align-items:stretch;gap:0;height:100%;min-height:0;}
+
+/* ── 左：列表栏 ──
+   宽度照 memj 的 25%（使用者要求"参考 memj"），但给 min-width:150px 兜底 ——
+   右侧栏可以被拖得很窄，25% 在 500px 面板里只有 125px，比标题还短。
+   ⚠️ 用 flex-basis 而不是 width：min-width 才能真的把它顶住。 */
+[data-bd-side]{flex:0 0 25%;max-width:25%;min-width:150px;display:flex;flex-direction:column;
   min-height:0;border-right:1px solid var(--dsw-alias-border-l2,#0000001a);}
-/* 左栏顶部那条搜索框：不参与滚动 */
-[data-bd-side]>.bd-search{flex:0 0 auto;padding:0 10px 8px 0;}
-[data-bd-side]>input[data-bd-input]{width:100%;}
+
+/* 左栏顶部（计数 + 搜索框）：**不参与滚动**，下面带一条分隔线把它和列表分开。
+   🔴 **右边距必须与列表一致**（2026-10-22 使用者反馈：「搜索栏与左右栏分隔线的右边距
+      应该与列表统一的。现在与分割线完全贴在一起了。」）
+      ⇒ 判据是**同一个数**：搜索框与列表项都离竖线 8px。
+      实现：盒子本身 padding-right:0（这样它的 border-bottom 能一直画到边缘、
+      接上竖线），内边距只给上/下/左，**右边那 8px 交给搜索框自己的 margin-right**。
+      ⚠️ 别改成给盒子 padding-right —— 那样分隔线会跟着缩进去、在角上留个缺口。 */
+[data-bd-side]>.bd-side-head{flex:0 0 auto;display:flex;flex-direction:column;gap:8px;
+  padding:12px 0 12px 0;
+  border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 🔴 右边那 8px 落在**这两个孩子**身上（不是盒子），理由见上 */
+[data-bd-side]>.bd-side-head>input[data-bd-input]{margin-right:8px;}
+[data-bd-side]>.bd-side-head>.bd-count{font-size:var(--dsw-font-xxs-12-font-size,12px);
+  line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c);
+  margin-right:8px;}   /* 计数那行与搜索框同一右边距，左对齐、右对齐都统一 */
+
 /* 列表本体：**只有它滚** */
-[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:2px 8px 16px 0;
+[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 8px 16px 0;
   display:flex;flex-direction:column;gap:2px;}
 /* 一条产物 */
 [data-bd-item]{flex:0 0 auto;padding:8px 10px;border-radius:var(--dsw-radius-sm,8px);
@@ -719,15 +755,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
   line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c);margin-top:2px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* 右：详情。**它才是滚动容器**（min-width:0 防长行把它撑爆 —— memj 也踩过） */
-[data-bd-detail]{flex:1 1 auto;min-width:0;min-height:0;overflow:auto;padding:0 0 32px 14px;}
-[data-bd-detail] .bd-detail-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
-[data-bd-detail] .bd-detail-head>[data-bd-grow]{flex:1 1 auto;min-width:0;}
-[data-bd-detail] .bd-detail-file{font-size:11px;line-height:16px;
+[data-bd-detail]{flex:1 1 auto;min-width:0;min-height:0;overflow:auto;padding:14px 14px 40px;}
+/* 详情顶上那行小字（文件名）——只是"这是磁盘上哪一份"，不是标题 */
+[data-bd-detail] .bd-detail-file{font-size:11px;line-height:16px;margin:0 0 10px;
   color:var(--dsw-alias-label-tertiary,#81858c);word-break:break-all;}
 
-/* 窄屏（右侧栏被拖得很窄时）：左栏收窄，别把正文挤没 */
+/* 窄屏（右侧栏被拖得很窄时）：左栏放宽一点，否则一个标题都放不下 */
 @media (max-width:520px){
-  [data-bd-side]{flex:0 0 46%;max-width:46%;}
+  [data-bd-side]{flex:0 0 38%;max-width:38%;}
   [data-bd-detail]{padding-left:10px;}
 }
 
@@ -2440,7 +2475,18 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         //    不该排在最显眼的位置，但也不能藏。放这最后一页正合适。
         { id: 'lab', label: '实验功能' },
       ]
-      return h('div', { 'data-bd-page': '', 'data-bd-tab': tab },
+      return h('div', {
+        'data-bd-page': '', 'data-bd-tab': tab,
+        /**
+         * ⭐ **整页撑满**只在「产物报告」那一页开（2026-10-22 加）。
+         * 为什么：那一页要左右分栏、各自滚动、竖线顶到导航线 ⇒ 高度必须**确定**，
+         *   不能靠"内容撑开到哪算哪"。而 tabwrap 本身是 height:100%，
+         *   所以这一层给 height:100% 就能把确定高度传下去。
+         * ⚠️ **别的页不能加** —— 它们要的是"内容多长就多长、让 tabwrap 滚"，
+         *   压成一屏高会把内容挤出去（还多出一条内滚动条）。
+         */
+        'data-bd-fill': tab === 'artifacts' ? '' : undefined,
+      },
 
         /* ⭐ **浮现式提示**：整块面板共用**一个** toast。
            半透明黑底白字、浮在**面板**正中偏下（屏幕 2/3 处）、不吃排版、2.6 秒自己消失
@@ -2449,8 +2495,13 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           h('div', null, runNote.t)) : null,
 
         /* ── 顶栏 + 子导航：**包在同一个 sticky 容器里**（不跟着滚）──
-           ⚠️ 两个 sticky 元素都写 top:0 会互相盖住 ⇒ 包一层、只有它 sticky。 */
-        h('div', { 'data-bd-head': '' },
+           ⚠️ 两个 sticky 元素都写 top:0 会互相盖住 ⇒ 包一层、只有它 sticky。
+           ⭐ **data-bd-flush**：产物报告页要去掉顶栏下面那 8px（左右栏的竖线
+              要一直顶到导航线）—— 见 CSS 里那条注释。 */
+        h('div', {
+          'data-bd-head': '',
+          'data-bd-flush': tab === 'artifacts' ? '' : undefined,
+        },
           // ⚠️ [data-bd-top] 现在自己就是 flex 行（不再套一层 row）—— 见上面 CSS 注释
           h('div', { 'data-bd-top': '' },
             /* ⭐ 顶栏那一排徽章 —— 已抽成 renderVersionBadges（可离线验的分支）。
@@ -3133,16 +3184,24 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 
             return h('div', { 'data-bd-split': '' },
 
-              /* ── 左：搜索 + 列表（只有列表滚）── */
+              /* ── 左：计数 + 搜索 + 列表（只有列表滚）── */
               h('div', { 'data-bd-side': '' },
-                h('input', {
-                  'data-bd-input': '', type: 'search',
-                  placeholder: '搜标题…',
-                  value: artQuery,
-                  onChange: (e) => setArtQuery(e.target.value),
-                  // 小屏下回车别提交表单（它不是 form，但输入法常把回车当确认）
-                  onKeyDown: (e) => { if (e.key === 'Enter') e.preventDefault() },
-                }),
+                /* 顶部这一块**不参与滚动**，底部一条分隔线把它和列表分开（像 memj）。
+                   ⚠️ 分隔线画在这个盒子的下边（不是列表的上边）—— 盒子没有右边距,
+                      于是那条线一直画到右边缘、正好接上竖线（两条线在角上对上）。 */
+                h('div', { class: 'bd-side-head' },
+                  /* ⭐ 计数：照 memj 那个「869 / 869 条」的样式（使用者要求）。
+                     左边是**当前列表条数**（搜索时会变小），右边是**总数**。 */
+                  h('div', { class: 'bd-count' },
+                    `${list.length} / ${all.length} 条`),
+                  h('input', {
+                    'data-bd-input': '', type: 'search',
+                    placeholder: '搜标题…',
+                    value: artQuery,
+                    onChange: (e) => setArtQuery(e.target.value),
+                    // 小屏下回车别提交表单（它不是 form，但输入法常把回车当确认）
+                    onKeyDown: (e) => { if (e.key === 'Enter') e.preventDefault() },
+                  })),
                 h('div', { 'data-bd-list': '' },
                   busy === 'reports' && reports === null
                     ? h('div', { 'data-bd-note': '' }, '读产物清单中…')
@@ -3161,19 +3220,15 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                           h('div', { class: 'bd-item-meta' },
                             [dayOf(f.name), kb(f.size)].filter(Boolean).join(' · ')))))),
 
-              /* ── 右：详情（它才是滚动容器，正文渲染成 HTML）── */
+              /* ── 右：详情（它才是滚动容器，正文渲染成 HTML）──
+                 ⚠️ **没有「刷新 / 打开文件夹」按钮**（2026-10-22 使用者要求去掉：
+                    「去掉刷新和打开文件夹按钮。没必要。」）
+                    · 刷新：切走再切回来会重拉（见上面那个 tab effect），
+                      而且这页是**只读**的，磁盘上多一份少一份不影响用；
+                    · 打开文件夹：「功能设置 → 它的地盘」里还有一个。 */
               h('div', { 'data-bd-detail': '' },
-                h('div', { class: 'bd-detail-head' },
-                  h('div', { 'data-bd-grow': '' },
-                    picked
-                      ? h('div', { class: 'bd-detail-file' }, picked.name)
-                      : h('div', { class: 'bd-detail-file' },
-                        all.length ? '左边挑一份' : '还没有产物')),
-                  h('button', {
-                    'data-bd-btn': '', disabled: busy === 'reports',
-                    onClick: () => void loadReports(true),
-                  }, '刷新'),
-                  h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开文件夹')),
+                h('div', { class: 'bd-detail-file' },
+                  picked ? picked.name : (all.length ? '左边挑一份' : '还没有产物')),
 
                 /* 正文：**走 dangerouslySetInnerHTML** —— 内容由本文件的 renderMarkdown
                    生成，而它**先把整段输入 escapeHtml 了**再插标签 ⇒ 正文里的
