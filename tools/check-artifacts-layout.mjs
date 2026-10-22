@@ -212,16 +212,33 @@ if (!narrow) {
        *    ⇒ 断言"白字压在按钮上、按钮叠在白底上"的对比度 ≥ 3.0。
        *    ⚠️ 这里只覆盖"叠白底"这一种情况（详情栏就是白底），够用。
        */
+      /* 🔴 **对比度要按【实际文字色】算，不能写死白字**（2026-10-22 二次修正）：
+       *    第一版这里是 `const L1 = lum(255,255,255)`（写死白字）——
+       *    后来使用者把 alpha 调到 0.2，我同时把文字换成深色（白字在
+       *    rgb(204,204,204) 上只有 1.61，根本看不见），
+       *    结果这条守卫还在按白字报错，**报了个早就不存在的问题**。
+       *    ⭐ 判据：断言里的"常量"如果来自被测代码，就必须**从代码里读**，不能写死。
+       */
       const lum = (r, g, b) => {
         const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
         return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
       }
       const a2 = Number(alpha[4])
-      const L1 = lum(255, 255, 255)                       // 白字
-      const L2 = lum(255 * (1 - a2), 255 * (1 - a2), 255 * (1 - a2))  // 黑 a 叠白底
+      // 文字色：优先从规则里读 color:，认 #fff / #ffffff / var(...,#0f1115) 三种常见写法
+      const cm = /color\s*:\s*(#[0-9a-fA-F]{3,8}|var\([^)]*?(#[0-9a-fA-F]{3,8})\))/.exec(bb)
+      let fg = [15, 17, 21]        // 兜底用面板主文字色
+      if (cm) {
+        let hex = cm[1].startsWith('var') ? cm[2] : cm[1]
+        hex = hex.replace('#', '')
+        if (hex.length === 3) hex = hex.split('').map((c) => c + c).join('')
+        fg = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)]
+      }
+      const bgComp = [255 * (1 - a2), 255 * (1 - a2), 255 * (1 - a2)]   // 黑 a 叠白底
+      const L1 = lum(...fg)
+      const L2 = lum(...bgComp)
       const cr = (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05)
       if (cr < 3.0) {
-        problems.push(`返回按钮白字对比度只有 ${cr.toFixed(2)}（alpha=${a2}）—— 低于 AA 大字线 3.0，字会糊；要么调大 alpha、要么加大字号`)
+        problems.push(`返回按钮文字（rgb ${fg.join(',')}）对比度只有 ${cr.toFixed(2)}（alpha=${a2}）—— 低于 AA 大字线 3.0，字会糊；换文字色或调 alpha`)
       }
     }
   }

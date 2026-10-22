@@ -912,16 +912,16 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
     bottom:33vh;right:0;
     align-items:center;gap:4px;
     padding:7px 12px 7px 14px;font:inherit;font-size:13px;line-height:1;
-    color:#fff;
-    text-shadow:0 1px 2px rgba(0,0,0,.45);
-    background:rgba(0,0,0,.6);
-    border:1px solid rgba(255,255,255,.22);border-right:none;
+    color:var(--dsw-alias-label-primary,#0f1115);
+    /* 深色字不需要 text-shadow（浅底上本来就清楚；加影子反而显脏） */
+    background:rgba(0,0,0,.2);
+    border:1px solid rgba(0,0,0,.14);border-right:none;
     border-radius:10px 0 0 10px;
     backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
     box-shadow:-2px 2px 8px rgba(0,0,0,.12);
     cursor:pointer;
   }
-  [data-bd-split][data-narrow-open]>.bd-narrow-back:hover{background:rgba(0,0,0,.72);}
+  [data-bd-split][data-narrow-open]>.bd-narrow-back:hover{background:rgba(0,0,0,.3);}
 }
 
 /* 🔴 **全局兜底：返回按钮在任何情况下都不该在宽屏出现**（memj 那条注释踩过）：
