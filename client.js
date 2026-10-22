@@ -879,21 +879,32 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
      ⚠️ 样式照 memj 的 .narrow-back：贴右边、半透明、毛玻璃、
         左边圆角右边直角（"从屏幕长出来"的样子）。
      ⚠️ 层级要压过详情栏（z-index:2）⇒ 给 3。
-     ⚠️ 用 position:fixed 是因为它要跟着**屏幕**而不是某个滚动容器。 */
-  [data-bd-split][data-narrow-open] .bd-narrow-back{
+
+     🔴🔴 **必须是 split 的直接子元素（用子选择器 >）** —— 理由见 JSX 那段长注释：
+        祖先只要有 transform 就会成为 fixed 的包含块。放在详情栏里时按钮会跟着滑、
+        位置也偏（实测 bottom 写了 250.8px 但实际距视口底 283px）。
+        现在它挂在 split 下（split 没有 transform）⇒ fixed 的包含块回到视口。
+
+     ⭐ **半透明要"看得出半透明"，靠的是下面那层不变的背景**：
+        按钮现在浮在**详情栏的不透明白底**上 ⇒ 72% 白几乎看不出来。
+        改用**中性深色半透明**（rgba(0,0,0,.55)）+ 白字 —— 这是"悬浮在内容之上的控件"，
+        在浅色正文上看得清、也不会被下面的文字穿透成糊字。
+     ⚠️ 别改成纯白半透明：那在白色详情栏上等于没有背景。 */
+  [data-bd-split][data-narrow-open]>.bd-narrow-back{
     display:flex;position:fixed;z-index:3;
+    /* ⭐ 距底边 1/3 屏高（使用者原话：「大概距离底边三分之一屏高的位置」） */
     bottom:33vh;right:0;
     align-items:center;gap:4px;
     padding:7px 12px 7px 14px;font:inherit;font-size:13px;line-height:1;
-    color:var(--dsw-alias-label-primary,#0f1115);
-    background:rgba(255,255,255,.72);
-    border:1px solid rgba(0,0,0,.12);border-right:none;
+    color:#fff;
+    background:rgba(0,0,0,.55);
+    border:1px solid rgba(255,255,255,.22);border-right:none;
     border-radius:10px 0 0 10px;
     backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
     box-shadow:-2px 2px 8px rgba(0,0,0,.12);
     cursor:pointer;
   }
-  [data-bd-split][data-narrow-open] .bd-narrow-back:hover{background:rgba(255,255,255,.88);}
+  [data-bd-split][data-narrow-open]>.bd-narrow-back:hover{background:rgba(0,0,0,.68);}
 }
 
 /* 🔴 **全局兜底：返回按钮在任何情况下都不该在宽屏出现**（memj 那条注释踩过）：
@@ -3391,16 +3402,6 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     没意义」——这行小字是同一类"磁盘信息"，一并去掉；正文第一行
                     就是标题，重复它只会让人以为有两条标题）。 */
               h('div', { 'data-bd-detail': '' },
-                /* ⭐ **「返回列表」按钮**（2026-10-22 加，照 memj 的 .narrow-back）：
-                   · 只在**窄屏 + 详情展开**时显示（CSS 里两条规则都在媒体查询内）；
-                   · 宽屏下**完全不出现**（外面那条 `.bd-narrow-back{display:none}` 兜底）。
-                   ⚠️ 它必须在**详情栏里面**：这样详情栏滑出屏幕时按钮跟着走 ——
-                      否则窄屏收起后按钮会留在屏幕上、点了没反应。 */
-                h('button', {
-                  type: 'button', class: 'bd-narrow-back',
-                  onClick: () => setArtOpen(false),
-                }, '‹ 返回列表'),
-
                 /* 空白态才说一句"左边挑一份"；有内容时**直接就是正文** */
                 reportFile === null
                   ? (all.length === 0
@@ -3409,7 +3410,36 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   : h('div', {
                     'data-bd-md': '',
                     dangerouslySetInnerHTML: { __html: renderMarkdown(reportFile) },
-                  })))
+                  })),
+
+              /* ⭐ **「返回列表」按钮**（2026-10-22 加，照 memj 的 .narrow-back）：
+                 · 只在**窄屏 + 详情展开**时显示（CSS 那两条规则都在媒体查询内）；
+                 · 宽屏下**完全不出现**（外面那条 .bd-narrow-back{display:none} 兜底）。
+
+                 🔴🔴 **它必须挂在 [data-bd-split] 下，绝不能放进 [data-bd-detail] 里**
+                     （2026-10-22 实测抓到，这是本轮最隐蔽的一个坑）：
+
+                     第一版我把它放在详情栏**里面**，理由是"详情栏滑出屏幕时按钮跟着走、
+                     收起后不会留在屏幕上"。**那个理由本身没错，但代价是致命的**：
+
+                     CSS Transforms 规范规定 —— **祖先元素只要有 transform（值不是 none），
+                     它就成为后代 position:fixed 元素的包含块**（containing block）。
+                     而详情栏正是带 transform:translateX(...) 的那个 ⇒ 于是：
+                       · 按钮的 fixed **不再是相对视口**，而是相对详情栏；
+                       · 详情栏一滑，按钮**跟着滑**（使用者截图说的"还跟着滑动"）；
+                       · bottom:33vh 也变成"距详情栏底边"，**位置整体偏掉**
+                         （实测：CSS 写 250.8px，实际距视口底 283px）；
+                       · 半透明背景**看不出来** —— 它透的是详情栏自己的不透明白底。
+
+                     ⇒ 正解：挂在 split 下（split 自己**没有** transform，实测确认），
+                       这样 fixed 的包含块才是视口，三个症状一次全好。
+                     ⚠️ 而"收起后按钮会不会留在屏幕上"这件事，由**显示条件**解决：
+                       按钮只在 [data-narrow-open] 存在时 display:flex
+                       ⇒ 收起（去掉该属性）它同时消失，不需要跟着详情栏走。 */
+              h('button', {
+                type: 'button', class: 'bd-narrow-back',
+                onClick: () => setArtOpen(false),
+              }, '‹ 返回列表'))
           })()),
 
         /* ════════ 七、它的人设（长文本 ⇒ 留保存按钮）════════ */

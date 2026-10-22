@@ -182,11 +182,30 @@ if (!narrow) {
   if (!/\[data-bd-split\]\[data-narrow-open\] \[data-bd-detail\]/.test(nb)) {
     problems.push('窄屏展开态没写「[data-bd-split][data-narrow-open] [data-bd-detail]」（中间是空格=后代），否则滑不进来')
   }
-  if (/\[data-bd-split\]\[data-narrow-open\]>\.bd-narrow-back/.test(nb)) {
-    problems.push('返回按钮用了子选择器 ">" —— 它在 [data-bd-detail] 里面、不是 split 的直接子元素，会永远匹配不到（不报错）')
+  /* 🔴🔴 **返回按钮必须是 split 的直接子元素**（2026-10-22 二次修正）：
+   *    第一版放在 [data-bd-detail] 里 ⇒ 详情栏的 transform 成了它 fixed 的**包含块**
+   *    ⇒ ① 跟着详情栏一起横向滑动；② bottom:33vh 变成"距详情栏底"（实测偏 33px）；
+   *    ③ 半透明看不出（透的是详情栏的不透明白底）。
+   *    ⇒ 所以现在**必须是子选择器 >**，写后代（空格）反而是错的（那意味着它可能挂在更深处）。
+   */
+  if (!/\[data-bd-split\]\[data-narrow-open\]>\.bd-narrow-back/.test(nb)) {
+    problems.push('返回按钮必须写成 [data-bd-split][data-narrow-open]>.bd-narrow-back（子选择器）—— 它必须挂在 split 下；放进详情栏里会因祖先 transform 变成 fixed 的包含块，跟着滑动且位置偏')
   }
-  if (!/\[data-bd-split\]\[data-narrow-open\] \.bd-narrow-back/.test(nb)) {
-    problems.push('窄屏展开态没写返回按钮的显示规则（[data-bd-split][data-narrow-open] .bd-narrow-back）')
+  // 按钮块里必须有 fixed + bottom:33vh + 半透明背景
+  const backBlock = /\[data-bd-split\]\[data-narrow-open\]>\.bd-narrow-back\{([^}]*)\}/.exec(nb)
+  if (!backBlock) {
+    problems.push('找不到返回按钮的规则块')
+  } else {
+    const bb = backBlock[1]
+    if (!/position\s*:\s*fixed/.test(bb)) problems.push('返回按钮不是 position:fixed —— 它不会悬浮')
+    if (!/bottom\s*:\s*33vh/.test(bb)) problems.push('返回按钮不是 bottom:33vh（距底边三分之一屏高）')
+    // 半透明：rgba 且 alpha < 1；纯白半透明在白色详情栏上等于没有背景
+    const alpha = /background\s*:\s*rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/.exec(bb)
+    if (!alpha) problems.push('返回按钮的背景不是 rgba 半透明')
+    else if (Number(alpha[4]) >= 1) problems.push('返回按钮的背景不透明（alpha=' + alpha[4] + '）')
+    else if (Number(alpha[1]) > 200 && Number(alpha[2]) > 200 && Number(alpha[3]) > 200) {
+      problems.push('返回按钮是"白色半透明" —— 它浮在详情栏的白色底上，看不出半透明（实测踩过）')
+    }
   }
 }
 if (!/\.bd-narrow-back\{display:none;\}/.test(css)) {
