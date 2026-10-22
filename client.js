@@ -709,8 +709,19 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-page][data-bd-fill]{height:100%;}
 [data-bd-head][data-bd-flush]{margin-bottom:0;}
 
-/* 这一节：贴满、不留白、不画分节上边线（理由见上面 ②） */
-[data-bd-sec][data-bd-tabin="artifacts"]{
+/* 这一节：贴满、不留白、不画分节上边线（理由见上面 ②）
+ *
+ * 🔴🔴 **选择器必须带上 [data-bd-page][data-bd-tab="artifacts"] 前缀**（2026-10-22 踩了）：
+ *   上面「按 tab 点名去首节上边线」那条规则里也有 artifacts，它写的是
+ *     [data-bd-page][data-bd-tab="artifacts"] [data-bd-tabin="artifacts"]{...padding-top:20px;}
+ *   —— 权重 (0,3,0)；而我原来这条只写 [data-bd-sec][data-bd-tabin="artifacts"]，
+ *   权重 (0,2,0) ⇒ **padding-top:20px 又回来了**，竖线上方就多出 20px 空缝
+ *   （使用者截图指出："左右栏的分隔线要顶到头啊，现在…完全空着一块"）。
+ *   ⚠️ 现在这条是 (0,4,0)，稳压上面那条。
+ *   ⭐ 判据：**改一个元素的 padding/margin 却没生效时，先查有没有别的更具体的选择器
+ *      在同一个属性上** —— 这类覆盖**不报错**，只能量出来或算权重。
+ */
+[data-bd-page][data-bd-tab="artifacts"] [data-bd-sec][data-bd-tabin="artifacts"]{
   flex:1 1 auto;min-height:0;margin:0 -16px;padding:0;border-top:0;}
 
 [data-bd-split]{display:flex;align-items:stretch;gap:0;height:100%;min-height:0;}
@@ -722,43 +733,64 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-side]{flex:0 0 25%;max-width:25%;min-width:150px;display:flex;flex-direction:column;
   min-height:0;border-right:1px solid var(--dsw-alias-border-l2,#0000001a);}
 
-/* 左栏顶部（计数 + 搜索框）：**不参与滚动**，下面带一条分隔线把它和列表分开。
-   🔴 **右边距必须与列表一致**（2026-10-22 使用者反馈：「搜索栏与左右栏分隔线的右边距
-      应该与列表统一的。现在与分割线完全贴在一起了。」）
-      ⇒ 判据是**同一个数**：搜索框与列表项都离竖线 8px。
-      实现：盒子本身 padding-right:0（这样它的 border-bottom 能一直画到边缘、
-      接上竖线），内边距只给上/下/左，**右边那 8px 交给搜索框自己的 margin-right**。
-      ⚠️ 别改成给盒子 padding-right —— 那样分隔线会跟着缩进去、在角上留个缺口。 */
+/* 左栏顶部（计数 + 搜索框）：**不参与滚动**，下面一条分隔线把它和列表分开。
+ *
+ * ⭐ 数值**照抄 memj**（2026-10-22 使用者：「还是差一点，你看看能不能直接抄 memj 啊」）：
+ *    memj 的 .filters 是 padding:10px + gap:8px，.search 是 padding:6px 9px / font 13px。
+ *    ⇒ 这里用**四边 10px** 的 padding（不是上/左/右分开给）。
+ *
+ * 🔴 **左右内边距怎么做到"和列表一致"**（使用者连着提了两次）：
+ *    · memj 的做法是 .list{padding:8px} + .item{padding:8px 10px}，
+ *      两边**都在盒子内部**留白，所以搜索框与列表项的左边缘**天然对齐**；
+ *    · 我这里的分隔线要"顶到竖线"⇒ 盒子不能有 padding-right
+ *      （有的话 border-bottom 会跟着缩进去、右下角留缺口）。
+ *    ⇒ 折中：盒子 padding 只给上/下/左（各 10px），**右边 10px 落在两个孩子身上**。
+ *      视觉结果与 memj 一致：搜索框左边缘 = 列表项左边缘；
+ *      搜索框右边缘距竖线 = 列表项右边缘距竖线 = 10px。
+ *    ⚠️ 别把右边那 10px 挪回盒子 —— 分隔线会缺一个角（这条踩过）。
+ */
 [data-bd-side]>.bd-side-head{flex:0 0 auto;display:flex;flex-direction:column;gap:8px;
-  padding:12px 0 12px 0;
+  padding:10px 0 10px 10px;
   border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
-/* 🔴 右边那 8px 落在**这两个孩子**身上（不是盒子），理由见上 */
-[data-bd-side]>.bd-side-head>input[data-bd-input]{margin-right:8px;}
-[data-bd-side]>.bd-side-head>.bd-count{font-size:var(--dsw-font-xxs-12-font-size,12px);
-  line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c);
-  margin-right:8px;}   /* 计数那行与搜索框同一右边距，左对齐、右对齐都统一 */
+[data-bd-side]>.bd-side-head>input[data-bd-input]{margin-right:10px;font-size:13px;
+  padding:6px 9px;border-radius:7px;}
+[data-bd-side]>.bd-side-head>.bd-count{
+  font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;
+  color:var(--dsw-alias-label-tertiary,#81858c);margin-right:10px;}
 
-/* 列表本体：**只有它滚** */
-[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 8px 16px 0;
-  display:flex;flex-direction:column;gap:2px;}
-/* 一条产物 */
-[data-bd-item]{flex:0 0 auto;padding:8px 10px;border-radius:var(--dsw-radius-sm,8px);
+/* 列表本体：**只有它滚**。数值照 memj 的 .list：padding:8px / gap:6px
+   ⚠️ 右边 padding 10px 与上面搜索区的 margin-right 同值 ⇒ 两栏右边线对齐。 */
+[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 16px 10px;
+  display:flex;flex-direction:column;gap:6px;}
+
+/* 一条产物。数值照 memj 的 .item：padding:8px 10px / radius:8px */
+[data-bd-item]{flex:0 0 auto;padding:8px 10px;border-radius:8px;
   cursor:pointer;border:1px solid transparent;font-family:inherit;text-align:left;
   background:none;color:var(--dsw-alias-label-primary,#0f1115);}
 [data-bd-item]:hover{background:var(--dsw-alias-bg-module-platform,#f5f6f7);}
-[data-bd-item][data-on]{background:var(--dsw-alias-bg-module-platform,#f5f6f7);
-  border-color:var(--dsw-alias-border-l3,#0000001f);}
-[data-bd-item] .bd-item-title{font-size:var(--dsw-font-s-14-font-size,14px);line-height:20px;
-  font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+/* ⭐ 选中项：**白底 + 主色边框**（照 memj 的 .item.active）。
+   🔴 别改回灰底 —— memj 那边记着使用者的原话「左边列表部分的背景颜色也应该和
+      右边和按钮全都统一」，灰底是唯一一块和右侧不一致的地方。
+   ⚠️ 本条排在 :hover 之后 ⇒ 悬停选中项仍是白底（"选中项恒为白"）。 */
+[data-bd-item][data-on]{background:var(--dsw-alias-bg-layer-1,#fff);
+  border-color:var(--dsw-alias-state-business-primary,#0f1115);}
+/* 标题：照 memj 的 .item-title（**13.5px / 600 / 1.4**）。
+   ⚠️ 原来是 14px/500/20px —— 使用者说"字体是不是有点大"，就是这一条。 */
+[data-bd-item] .bd-item-title{font-size:13.5px;line-height:1.4;font-weight:600;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
   overflow:hidden;word-break:break-word;}
-[data-bd-item] .bd-item-meta{font-size:var(--dsw-font-xxs-12-font-size,12px);
-  line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c);margin-top:2px;
+/* 辅助信息（日期）：照 memj 的 .item-time（**10px**、最弱那档灰、tabular-nums）。
+   ⚠️ **不再显示文件大小**（2026-10-22 使用者：「标题下面不要去显示那个文件大小，
+      没意义」）—— 那一行现在只有日期，没有就不渲染这一行（见 JSX）。 */
+[data-bd-item] .bd-item-meta{font-size:10px;line-height:1.4;margin-top:6px;
+  font-variant-numeric:tabular-nums;
+  color:var(--dsw-alias-label-tertiary,#81858c);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-/* 右：详情。**它才是滚动容器**（min-width:0 防长行把它撑爆 —— memj 也踩过） */
+/* 右：详情。**它才是滚动容器**（min-width:0 防长行把它撑爆 —— memj 也踩过）
+   ⚠️ 这里**没有**"文件名小字"那一行（2026-10-22 使用者：「标题下面不要去显示那个
+      文件大小，没意义」——那条已删；正文第一行就是标题，再顶一行磁盘文件名只是噪音）。
+   ⚠️ 左右两栏的**顶部内边距要相等**（都是 14px），否则第一行文字看不齐。 */
 [data-bd-detail]{flex:1 1 auto;min-width:0;min-height:0;overflow:auto;padding:14px 14px 40px;}
-/* 详情顶上那行小字（文件名）——只是"这是磁盘上哪一份"，不是标题 */
-[data-bd-detail] .bd-detail-file{font-size:11px;line-height:16px;margin:0 0 10px;
-  color:var(--dsw-alias-label-tertiary,#81858c);word-break:break-all;}
 
 /* 窄屏（右侧栏被拖得很窄时）：左栏放宽一点，否则一个标题都放不下 */
 @media (max-width:520px){
@@ -3217,25 +3249,25 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                           onClick: () => { if (f.name !== artPick) void openReportFile(f.name) },
                         },
                           h('div', { class: 'bd-item-title' }, f.label),
-                          h('div', { class: 'bd-item-meta' },
-                            [dayOf(f.name), kb(f.size)].filter(Boolean).join(' · ')))))),
+                          /* ⚠️ 只在**有日期**时才渲染这一行（2026-10-22 使用者：「标题下面
+                             不要去显示那个文件大小，没意义」）⇒ 只剩日期，没日期就整个不渲染，
+                             不留一行空白。 */
+                          dayOf(f.name)
+                            ? h('div', { class: 'bd-item-meta' }, dayOf(f.name))
+                            : null)))),
 
               /* ── 右：详情（它才是滚动容器，正文渲染成 HTML）──
                  ⚠️ **没有「刷新 / 打开文件夹」按钮**（2026-10-22 使用者要求去掉：
                     「去掉刷新和打开文件夹按钮。没必要。」）
-                    · 刷新：切走再切回来会重拉（见上面那个 tab effect），
-                      而且这页是**只读**的，磁盘上多一份少一份不影响用；
-                    · 打开文件夹：「功能设置 → 它的地盘」里还有一个。 */
+                 ⚠️ **也不显示文件名**（同一天追加：「标题下面不要去显示那个文件大小，
+                    没意义」——这行小字是同一类"磁盘信息"，一并去掉；正文第一行
+                    就是标题，重复它只会让人以为有两条标题）。 */
               h('div', { 'data-bd-detail': '' },
-                h('div', { class: 'bd-detail-file' },
-                  picked ? picked.name : (all.length ? '左边挑一份' : '还没有产物')),
-
-                /* 正文：**走 dangerouslySetInnerHTML** —— 内容由本文件的 renderMarkdown
-                   生成，而它**先把整段输入 escapeHtml 了**再插标签 ⇒ 正文里的
-                   `<script>` 只会显示成文字（有探针反证，见 → 失败/踩坑 里那条 XSS）。 */
+                /* 空白态才说一句"左边挑一份"；有内容时**直接就是正文** */
                 reportFile === null
-                  ? h('div', { 'data-bd-note': '' },
-                    artPick === '' ? '' : '读正文中…')
+                  ? (all.length === 0
+                    ? h('div', { 'data-bd-note': '' }, '还没有产物 —— 跑一轮之后，挑中的每条会各写一份 md。')
+                    : h('div', { 'data-bd-note': '' }, artPick === '' ? '左边挑一份' : '读正文中…'))
                   : h('div', {
                     'data-bd-md': '',
                     dangerouslySetInnerHTML: { __html: renderMarkdown(reportFile) },

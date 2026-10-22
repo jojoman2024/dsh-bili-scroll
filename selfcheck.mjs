@@ -68,6 +68,27 @@ try {
   fail('CSS 模板串有问题 —— 真机里会是 `import failed`（把注释里的反引号去掉）', { message: out.trim() })
 }
 
+/**
+ * 🔴 **再查「产物报告」页的布局数值**（2026-10-22 加）。
+ *
+ * 为什么单独一条：那一页的错**全都是"数值/权重"型的**，而且**不报错**——
+ *   ① 我写的 padding:0 被另一条权重更高的规则盖回 padding-top:20px
+ *      ⇒ 左右栏竖线上方多 20px 空隙；
+ *   ② 搜索区左右内距与列表不一致（10 vs 8）⇒ 左边缘错开、搜索框贴着竖线。
+ * `node --check` 与上面那条 CSS 守卫**都查不到**这两类。使用者连着提了两次，
+ * 所以做成硬检查（它会算 CSS 权重、比对两处数值是否相等）。
+ */
+try {
+  const { execFileSync } = await import('node:child_process')
+  const out = execFileSync(process.execPath, ['tools/check-artifacts-layout.mjs', 'client.js'],
+    { stdio: 'pipe', encoding: 'utf8' })
+  for (const line of String(out).split('\n')) if (line.trim()) console.log(line)
+} catch (e) {
+  const out = String(e?.stdout ?? '') + String(e?.stderr ?? '')
+  fail('「产物报告」页布局不对（权重被覆盖 / 左右内距不一致 / 宽度或字号偏离 memj）',
+    { message: out.trim() })
+}
+
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 let loaded = null
 const prevWindow = globalThis.window
