@@ -116,6 +116,31 @@ if (!splitRule) {
   problems.push('split 没写 padding:0 —— 它会被「每个直接子元素 = 一行」那条规则套上 16px 上下内距，左右栏顶不到导航线')
 }
 
+/* ───────── ②-b 导航标签条必须可横向滑动 ─────────
+ * 🔴 2026-10-22（使用者：「导航标签应该是可左右滑动的…否则移动端的显示会很奇怪」）：
+ *    光把 overflow-x 设成 auto **不够** —— flex 子项的 flex-shrink 默认是 1，
+ *    标签会自己缩、scrollWidth 永远等于 clientWidth ⇒ **滑动不触发**、文字还被挤断。
+ *    实测四档宽度：加 overflow 但没 flex:0 0 auto 时 scrollWidth 跟着 328→288→268→248 一路缩。
+ *  ⇒ 断言三件事：容器 overflow-x:auto、标签 flex:0 0 auto、标签 nowrap。
+ */
+const tabsRule = /\[data-bd-tabs\]\{([^}]*)\}/.exec(css)
+if (!tabsRule) {
+  problems.push('找不到 [data-bd-tabs] 规则')
+} else {
+  if (!/overflow-x\s*:\s*auto/.test(tabsRule[1])) problems.push('[data-bd-tabs] 没有 overflow-x:auto —— 标签超出时滑不动')
+  if (!/flex-wrap\s*:\s*nowrap/.test(tabsRule[1])) problems.push('[data-bd-tabs] 没有 flex-wrap:nowrap —— 标签会折成两行')
+}
+const tabBtn = /\[data-bd-tabs\]>button\{([^}]*)\}/.exec(css)
+if (!tabBtn) {
+  problems.push('找不到 [data-bd-tabs]>button 规则')
+} else {
+  if (!/flex\s*:\s*0\s+0\s+auto/.test(tabBtn[1])) {
+    problems.push('[data-bd-tabs]>button 没有 flex:0 0 auto —— flex-shrink 默认 1 会让标签自己缩，滑动永远不触发')
+  }
+  if (!/white-space\s*:\s*nowrap/.test(tabBtn[1])) {
+    problems.push('[data-bd-tabs]>button 没有 white-space:nowrap —— 文字会被挤成两行')
+  }
+}
 /* ───────── ③ 左栏宽度照 memj 的 25% ───────── */
 const sideW = /\[data-bd-side\]\{flex:0 0 (\d+)%;max-width:\1%/.exec(css)
 if (!sideW) problems.push('找不到左栏宽度声明')

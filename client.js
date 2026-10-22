@@ -162,11 +162,38 @@ window.__ModuleLoader__.load({
       官方那份 8px 是在它自己的上下文里（与它旁边的标题对齐）；
       在我们这儿，右边的内容从 tabwrap 的 16px 内距开始
       ⇒ 标签再缩 8px 就会**比下面的标题多出 8px**，看着不齐。
-      ⚠️ 所以这里是**有意偏离官方那 8px 的**，理由写在上面。 */
-[data-bd-tabs]{display:flex;gap:36px;margin-top:10px;padding-left:0;position:relative;}
+      ⚠️ 所以这里是**有意偏离官方那 8px 的**，理由写在上面。
+
+   ⭐⭐ **2026-10-22 加：横向可滑**（使用者：「导航标签应该是可左右滑动的，
+   也可以参考 memj 对导航标签的处理。否则，移动端的显示会很奇怪。」）
+
+   🔴 **必须做的一步不是加 overflow-x，而是给每个标签 flex:0 0 auto**：
+     实测（360/320/300/280 四档）加 overflow-x:auto 之后
+     "scrollWidth === clientWidth"（328→288→268→248 一路跟着缩），
+     因为 flex 子项的 flex-shrink 默认是 **1** ⇒ 标签**自己缩没了**，
+     overflow 永远不触发、**滑动条根本不出现**。
+     ⚠️ 也就是"看起来加了"但**实际不可滑**，而且文字会被挤成两行/断开。
+     ⇒ memj 的 .tabbar .tabs .tab 正是显式给了 flex:0 0 auto（那边写在窄屏里）。
+     我这里**全程窄**（右栏本来就只有 300~500px），所以不加媒体查询、一直生效。
+
+   ⚠️ **滑动只加在 [data-bd-tabs] 上**（memj 那条注释的判据）：
+      它里面只有标签，没有别的固定元素；若以后往这一行里加"齿轮/按钮"，
+      **那个元素不能被一起滚走** ⇒ 那时要么单独挪到外面，要么 flex:0 0 auto + 外层不滚。
+
+   ⚠️ **隐藏滚动条**（scrollbar-width:none + ::-webkit-scrollbar）：
+      这一行只有 26px 高，画出滚动条会把标签挤扁、还多一条灰杠。
+      触屏上滑动本来就是手势，桌面端可用 shift+滚轮 / 触控板横划。
+      ⚠️ 隐藏不等于不能滚 —— 别为了"看起来干净"把 overflow 也去掉。 */
+[data-bd-tabs]{display:flex;gap:36px;margin-top:10px;padding-left:0;position:relative;
+  flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;}
+[data-bd-tabs]::-webkit-scrollbar{display:none;}
 [data-bd-tabs]>button{color:var(--dsw-alias-label-tertiary,#81858c);cursor:pointer;
   background:none;border:none;padding:0 0 9px;font-size:13px;font-weight:500;
-  line-height:16px;position:relative;font-family:inherit;}
+  line-height:16px;position:relative;font-family:inherit;
+  /* 🔴 见上面注释：不给这条，标签会自己缩、滑动永远不触发 */
+  flex:0 0 auto;white-space:nowrap;}
 [data-bd-tabs]>button:after{content:'';background:none;border-radius:2px;height:2px;
   position:absolute;bottom:-1px;left:0;right:0;}
 [data-bd-tabs]>button[data-on]{color:var(--dsw-alias-state-business-primary,#0f1115);}
