@@ -1512,7 +1512,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       React.useEffect(() => {
         let alive = true
         ;(async () => {
-          for (const id of ['duty', 'report']) {
+          for (const id of ['duty', 'report', 'comment']) {
             try {
               const d = await jget('/' + id)
               if (!alive || !d?.ok) continue
@@ -2976,6 +2976,29 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           busy: busy == 'report',
           confirmOpen: confirmDoc === 'report',
           setConfirmOpen: (v) => setConfirmDoc(v ? 'report' : ''),
+        }),
+
+        /* ════════ 七之五、发评论规范（→ 子导航「提示词」页，2026-10-22 加）════════
+           ⭐ 使用者要求：「给视频评论做个单独的设置文档，以及在提示词页留编辑器」。
+           🔴 **与「回复评论的细则」的分工**：这份管「**发**一条新评论」（开关 `autoComment`），
+              那份管「**回**别人的评论」（开关 `replyToComments`）。两者都是评论但触发条件不同。 */
+        h(PromptDoc, {
+          title: '发评论规范',
+          hint: '「自动评论」开着时用得上 —— 发之前，模型会先读一遍这份。',
+          warn: '⚠️ 禁止项（不刷屏 / 同一视频只评一次 / 不吵架 / 别写风控词）在插件内置的硬约束里，不在这份。',
+          rows: 16,
+          placeholder: '（读不到 comment.md —— 点「恢复默认」拿一份出厂的回来）',
+          value: docs.comment?.text ?? '',
+          onChange: (e) => setDocField('comment', { text: e.target.value }),
+          onSave: () => saveDoc('comment'),
+          onReset: () => resetDoc('comment'),
+          saved: docs.comment?.saved ?? null,
+          chars: docs.comment?.chars ?? null,
+          file: docs.comment?.file ?? '',
+          defaultText: docs.comment?.defaultText ?? '',
+          busy: busy == 'comment',
+          confirmOpen: confirmDoc === 'comment',
+          setConfirmOpen: (v) => setConfirmDoc(v ? 'comment' : ''),
         }),
 
         /* ════════ 有新版本的弹窗（2026-10-18 加）════════

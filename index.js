@@ -586,6 +586,29 @@ export function apply(ctx, config) {
     return capped
   }
 
+  /**
+   * ⭐ **发评论规范 `comment.md`**（2026-10-22 加）—— 与 `report.md` 完全同构。
+   *
+   * 原来「发新评论」的规矩散在两处：`duty.md` 的「评论与 @ 本人」整节 + `promptFor()`
+   * 里那段硬编码字符串。后果是**两条来源、两种措辞**（章程说「缺一条就只写笔记」，
+   * 而代码的准入门是 `autoComment && (!mentionOn || mentionName)` —— 两者相反）。
+   * ⇒ 收进这一份，章程只留指针，面板可改。
+   */
+  const commentFile = join(stateDir, 'comment.md')
+  const commentDefaultFile = join(pluginDir, 'prompts', 'comment.md')
+  const readComment = () => {
+    try { return readFileSync(commentFile, 'utf8') } catch { return '' }
+  }
+  const readCommentDefault = () => {
+    try { return readFileSync(commentDefaultFile, 'utf8') } catch { return '' }
+  }
+  const writeComment = (text) => {
+    const s = String(text ?? '')
+    const capped = s.length > 200_000 ? s.slice(0, 200_000) : s
+    writeFileSync(commentFile, capped, 'utf8')
+    return capped
+  }
+
   ensureHomeFiles(pluginDir, stateDir, log)
 
   /**
@@ -3157,9 +3180,22 @@ export function apply(ctx, config) {
           + `\n  🔴 **别把「回复评论关着」说成「没有发评论」** —— 那是两件事：`
           + `「回复评论」管的是**回别人的楼中楼**，「自动评论」管的是**在视频下发评论**。`
           + `前者关着、后者照样发过，就别写成"一句都没发"。`
+          /**
+           * ⭐ **发评论规范改成给指针**（2026-10-22 改）。
+           *
+           * 原来「怎么写、要不要 @、保持简洁」这些**静态规范**硬编码在这里，
+           * 而 `duty.md` 的「评论与 @ 本人」整节又写了一遍 ⇒ **两条来源、两种措辞**，
+           * 而且章程那句「缺一条就只写笔记」跟下面的准入门是**相反**的。
+           * ⇒ 静态规范收进 `comment.md`（面板可改），这里只留**每轮动态的那部分**
+           *   （开关状态、条数、@ 谁）+ 一个指针。
+           */
+          + `\n  📄 **发评论的规范在 \`${commentFile}\`**（家目录里的 \`comment.md\`）—— `
+          + `**发之前先读一遍**（前台用 \`bilij_read\` 读，\`path\` 传 \`comment.md\`）。`
         : '关着的（只写报告，别发评论）'}。`
-      + `\n  ⚠️ **评论就是评论，保持简洁**（一两句、150 字内）—— `
-      + `**别把上面那份笔记的内容搬进评论**：笔记是给人细读的，评论只是**叫他来看一眼**。\n`
+      /**
+       * ⚠️ 「评论保持简洁、别搬笔记」那句**已移入 `comment.md` §三**（2026-10-22）。
+       *    这里不再重复 —— 否则使用者改了 `comment.md` 也不生效（两处说法打架）。
+       */
       /**
        * ⭐⭐ **私信通知**（2026-10-18 加，使用者要求）。
        *
@@ -5216,6 +5252,44 @@ export function apply(ctx, config) {
       const text = writeReport(def)
       log(`报告书写规范已恢复出厂（${text.length} 字符）→ ${reportFile}`)
       return sendJson(res, 200, { ok: true, file: reportFile, chars: text.length, text, defaultText: def })
+    }
+
+    /* ── 发评论规范（comment）：设置页的文本框 ⇄ 家目录里的 comment.md ──
+     * 读：GET  /api/bili-scroll-jojo/comment          ⇒ { ok, text, file, chars, isDefault }
+     * 写：POST /api/bili-scroll-jojo/comment { text } ⇒ 落盘 comment.md
+     * 恢复：POST /api/bili-scroll-jojo/comment/reset  ⇒ 用**出厂源**覆盖家目录那份
+     *
+     * ⭐ 与 `/report` 完全同构（三处都现读/现写，不缓存 ⇒ 改完下一轮即生效）。
+     */
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/comment') {
+      const text = readComment()
+      const def = readCommentDefault()
+      return sendJson(res, 200, {
+        ok: true, text, file: commentFile,
+        defaultFile: commentDefaultFile,
+        isDefault: Boolean(def) && text.trim() === def.trim(),
+        defaultText: def,
+        hasDefault: Boolean(def),
+        chars: text.length,
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/comment') {
+      const body = await readBody(req)
+      const text = writeComment(body?.text)
+      log(`发评论规范已更新（${text.length} 字符）→ ${commentFile}`)
+      return sendJson(res, 200, { ok: true, file: commentFile, chars: text.length })
+    }
+
+    // ⚠️ 面板侧必须先弹确认再调它 —— 这是破坏性操作（覆盖使用者改过的内容）。
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/comment/reset') {
+      const def = readCommentDefault()
+      if (!def.trim()) {
+        return sendJson(res, 200, { ok: false, error: `出厂源读不到或为空：${commentDefaultFile}` })
+      }
+      const text = writeComment(def)
+      log(`发评论规范已恢复出厂（${text.length} 字符）→ ${commentFile}`)
+      return sendJson(res, 200, { ok: true, file: commentFile, chars: text.length, text, defaultText: def })
     }
 
     // ⭐ **私信细则**（2026-10-21 加）：与 `/reply` 完全同构 ——
