@@ -197,7 +197,21 @@ if (!narrow) {
     problems.push('找不到返回按钮的规则块')
   } else {
     const bb = backBlock[1]
-    if (!/position\s*:\s*fixed/.test(bb)) problems.push('返回按钮不是 position:fixed —— 它不会悬浮')
+    /* ⭐ **无边框、无阴影**（2026-10-22 使用者明确要求：「按钮不要边框，不要阴影」）。
+     *    它本来就靠"半透明底 + 毛玻璃"从正文里浮出来；加边框/阴影反而显重。
+     *    ⚠️ 以后想加回来之前先确认使用者是不是改主意了 —— 这是他的原话要求。 */
+    if (/border\s*:\s*(?!none)[^;]*solid/.test(bb)) problems.push('返回按钮又加了边框 —— 使用者要求"不要边框"')
+    /* ⚠️ **判据：取 box-shadow 的实际值**，不是"有没有写"。
+     *    第一版写的是"把 box-shadow:none 删掉再看还剩不剩" —— 那样写
+     *    对 `box-shadow:none` 会删成空串、对真阴影又删不掉，逻辑绕且易错。
+     *    ⇒ 直接读出值来断言它必须是 none。
+     *    （反证时才发现第一版**假绿**：加了真阴影它仍报通过。） */
+    const shadowVal = (/box-shadow\s*:\s*([^;]+)/.exec(bb) || [])[1]
+    if (shadowVal === undefined) {
+      problems.push('返回按钮没有显式写 box-shadow:none —— 会继承/默认出阴影，使用者要求"不要阴影"')
+    } else if (shadowVal.trim() !== 'none') {
+      problems.push(`返回按钮又加了阴影（box-shadow:${shadowVal.trim()}）—— 使用者要求"不要阴影"`)
+    }    if (!/position\s*:\s*fixed/.test(bb)) problems.push('返回按钮不是 position:fixed —— 它不会悬浮')
     if (!/bottom\s*:\s*33vh/.test(bb)) problems.push('返回按钮不是 bottom:33vh（距底边三分之一屏高）')
     // 半透明：rgba 且 alpha < 1；纯白半透明在白色详情栏上等于没有背景
     const alpha = /background\s*:\s*rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/.exec(bb)
