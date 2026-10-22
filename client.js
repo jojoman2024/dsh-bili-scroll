@@ -2832,7 +2832,30 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           setConfirmOpen: (v) => setConfirmDoc(v ? 'duty' : ''),
         }),
 
-        /* ════════ 七之二、回复评论的细则（→ 子导航「提示词」页）════════
+        /* ════════ 七之二、发评论规范（→ 子导航「提示词」页，2026-10-22 加）════════
+           ⭐ 使用者要求：「给视频评论做个单独的设置文档，以及在提示词页留编辑器」。
+           🔴 **与「回复评论的细则」的分工**：这份管「**发**一条新评论」（开关 `autoComment`），
+              那份管「**回**别人的评论」（开关 `replyToComments`）。两者都是评论但触发条件不同。 */
+        h(PromptDoc, {
+          title: '发评论规范',
+          hint: '「自动评论」开着时用得上 —— 发之前，模型会先读一遍这份。',
+          warn: '⚠️ 禁止项（不刷屏 / 同一视频只评一次 / 不吵架 / 别写风控词）在插件内置的硬约束里，不在这份。',
+          rows: 16,
+          placeholder: '（读不到 comment.md —— 点「恢复默认」拿一份出厂的回来）',
+          value: docs.comment?.text ?? '',
+          onChange: (e) => setDocField('comment', { text: e.target.value }),
+          onSave: () => saveDoc('comment'),
+          onReset: () => resetDoc('comment'),
+          saved: docs.comment?.saved ?? null,
+          chars: docs.comment?.chars ?? null,
+          file: docs.comment?.file ?? '',
+          defaultText: docs.comment?.defaultText ?? '',
+          busy: busy == 'comment',
+          confirmOpen: confirmDoc === 'comment',
+          setConfirmOpen: (v) => setConfirmDoc(v ? 'comment' : ''),
+        }),
+
+        /* ════════ 七之三、回复评论的细则（→ 子导航「提示词」页）════════
            ⭐ 与人设同一套路，但**多一个「恢复默认」**（它有出厂源）。
            ⚠️ 只有「回复评论」开着时**才会注入到提示词里** —— 那个开关在「功能设置」页，
               所以这里要说明归属，免得使用者找不着。 */
@@ -2891,7 +2914,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 h('button', { 'data-bd-btn': '', onClick: () => setConfirmReset(false) }, '取消'),
                 h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetReply }, '覆盖并恢复')))) : null),
 
-        /* ════════ 七之三、私信细则（→ 子导航「提示词」页，2026-10-21 加）════════
+        /* ════════ 七之四、私信细则（→ 子导航「提示词」页，2026-10-21 加）════════
            ⭐ 使用者要求：「把私信的非约束的提示词，也放到提示词面板里，供用户修改，
               形式应该跟回复评论细则一样。」
            ⚠️ 与回复细则的**唯一区别**：这份**不是整份注入** ——
@@ -2954,7 +2977,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 h('button', { 'data-bd-btn': '', onClick: () => setConfirmResetDm(false) }, '取消'),
                 h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onResetDm }, '覆盖并恢复')))) : null),
 
-        /* ════════ 七之四、报告书写规范（→ 子导航「提示词」页，2026-10-21 加）════════
+        /* ════════ 七之五、报告书写规范（→ 子导航「提示词」页，2026-10-21 加）════════
            ⭐ 使用者要求：「建立报告书写规范文档，需要写的时候，读文档。
               报告书写规范也需要能够在提示词页面进行修改。」
            🔴 **与代码的分工**：写在哪 / 文件名 / 用哪个工具由代码给（每轮动态），
@@ -2976,29 +2999,6 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           busy: busy == 'report',
           confirmOpen: confirmDoc === 'report',
           setConfirmOpen: (v) => setConfirmDoc(v ? 'report' : ''),
-        }),
-
-        /* ════════ 七之五、发评论规范（→ 子导航「提示词」页，2026-10-22 加）════════
-           ⭐ 使用者要求：「给视频评论做个单独的设置文档，以及在提示词页留编辑器」。
-           🔴 **与「回复评论的细则」的分工**：这份管「**发**一条新评论」（开关 `autoComment`），
-              那份管「**回**别人的评论」（开关 `replyToComments`）。两者都是评论但触发条件不同。 */
-        h(PromptDoc, {
-          title: '发评论规范',
-          hint: '「自动评论」开着时用得上 —— 发之前，模型会先读一遍这份。',
-          warn: '⚠️ 禁止项（不刷屏 / 同一视频只评一次 / 不吵架 / 别写风控词）在插件内置的硬约束里，不在这份。',
-          rows: 16,
-          placeholder: '（读不到 comment.md —— 点「恢复默认」拿一份出厂的回来）',
-          value: docs.comment?.text ?? '',
-          onChange: (e) => setDocField('comment', { text: e.target.value }),
-          onSave: () => saveDoc('comment'),
-          onReset: () => resetDoc('comment'),
-          saved: docs.comment?.saved ?? null,
-          chars: docs.comment?.chars ?? null,
-          file: docs.comment?.file ?? '',
-          defaultText: docs.comment?.defaultText ?? '',
-          busy: busy == 'comment',
-          confirmOpen: confirmDoc === 'comment',
-          setConfirmOpen: (v) => setConfirmDoc(v ? 'comment' : ''),
         }),
 
         /* ════════ 有新版本的弹窗（2026-10-18 加）════════
