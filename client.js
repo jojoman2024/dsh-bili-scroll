@@ -1046,7 +1046,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
      */
     function PromptDoc(props) {
       const {
-        title, hint, warn, value, onChange, onSave, onReset,
+        title, hint, warn, value, onChange, onSave, onReset, onReload,
         saved, chars, file, defaultText, busy, rows, placeholder,
         confirmOpen, setConfirmOpen, confirmTitle,
       } = props
@@ -1064,6 +1064,24 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           }),
           h('div', { 'data-bd-foot': '' },
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy, onClick: onSave }, '保存'),
+            /* ⭐ 刷新（2026-10-24 加）：模型也能改这几份文档了，而编辑器只在挂载时读一次。
+               不给个手动刷新，用户开着面板就看不到模型的改动，一保存还会把它冲掉。 */
+            onReload
+              ? h('button', {
+                'data-bd-btn': '',
+                disabled: busy,
+                title: dirty
+                  ? '从磁盘重新读入 —— 会丢掉你还没保存的改动'
+                  : '从磁盘重新读入（模型可能刚改过这份）',
+                onClick: () => {
+                  // ⚠️ 有未保存改动时先确认 —— 刷新会把它冲掉，且找不回来
+                  if (dirty && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                    if (!window.confirm('你有还没保存的改动，重新读入会丢掉它们。确定要继续？')) return
+                  }
+                  onReload()
+                },
+              }, dirty ? '刷新（有改动）' : '刷新')
+              : null,
             h('button', { 'data-bd-btn': '', disabled: busy || !draft.trim(), onClick: () => onChange({ target: { value: '' } }) }, '清空'),
             h('button', {
               'data-bd-btn': '',
@@ -2111,6 +2129,33 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         finally { setBusy('') }
       }
 
+      /**
+       * ⭐ **重新从磁盘读一份**（2026-10-24 加）
+       *
+       * 🔴 为什么需要：这几份文档现在**模型也能改**（`bilij_write` 被开放给 AI 了）。
+       *    而编辑器只在**挂载时**取一次 ⇒ 模型改完，用户开着面板也看不到，
+       *    还以为自己那份是最新的，一保存就把模型的改动冲掉了。
+       *
+       * ⚠️ 这是**手动**刷新（按钮），不是自动轮询 —— 轮询要处理"用户正在编辑"的冲突，
+       *    而手动刷新时用人是知情的：他自己点的，被覆盖也能接受。
+       *    ⇒ **草稿也会被覆盖**，所以按钮上要写清楚。
+       */
+      const reloadDoc = async (id) => {
+        setBusy(id)
+        try {
+          const d = await jget('/' + id)
+          if (!d?.ok) { say(d?.error || '读取失败', 'warn'); return }
+          const text = String(d.text ?? '')
+          setDocField(id, {
+            text, saved: text, chars: d.chars ?? text.length,
+            file: d.file || '',
+            ...(d.defaultText != null ? { defaultText: String(d.defaultText) } : {}),
+          })
+          say('已从磁盘重新读入', 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
       /** 恢复出厂（破坏性 ⇒ 由 PromptDoc 里的确认浮层触发） */
       const resetDoc = async (id) => {
         setConfirmDoc('')
@@ -2572,6 +2617,59 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        */
       const onSaveWatch = async () => {
         await patch({ watchNote: String(watchDraft ?? '') }, '关注什么（自由描述）')
+      }
+
+      /* ⭐ 三个「刷新」函数（2026-10-24 加）
+       *
+       * 🔴 为什么需要：这几份文档**模型也能改**（`bilij_write` 开放给 AI 了）。
+       *    而编辑器只在**挂载时**读一次 ⇒ 模型改完，用户开着面板看不到，
+       *    还以为自己那份最新，一保存就把模型的改动冲掉了。
+       *
+       * ⚠️ 只做**手动**刷新，不自动轮询 —— 轮询要处理"用户正在编辑"的冲突，
+       *    而手动刷新时用户是知情的（他自己点的）。
+       */
+      const reloadPersona = async () => {
+        setBusy('persona')
+        try {
+          const d = await jget('/persona')
+          if (!d?.ok) { say(d?.error || '读取失败', 'warn'); return }
+          const t = String(d.text || '')
+          setPersona(t); setPersonaSaved(t)
+          setPersonaFile(d.file || '')
+          setPersonaChars(d.chars ?? t.length)
+          say('人设已从磁盘重新读入', 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const reloadReply = async () => {
+        setBusy('reply')
+        try {
+          const d = await jget('/reply')
+          if (!d?.ok) { say(d?.error || '读取失败', 'warn'); return }
+          const t = String(d.text || '')
+          setReply(t); setReplySaved(t)
+          setReplyFile(d.file || '')
+          setReplyChars(d.chars ?? t.length)
+          if (d.defaultText != null) setReplyDefaultText(String(d.defaultText))
+          say('回复细则已从磁盘重新读入', 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const reloadDm = async () => {
+        setBusy('dm')
+        try {
+          const d = await jget('/dm')
+          if (!d?.ok) { say(d?.error || '读取失败', 'warn'); return }
+          const t = String(d.text || '')
+          setDm(t); setDmSaved(t)
+          setDmFile(d.file || '')
+          setDmChars(d.chars ?? t.length)
+          if (d.defaultText != null) setDmDefaultText(String(d.defaultText))
+          say('私信细则已从磁盘重新读入', 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
       }
 
       // ⭐ 保存人设：POST /persona ⇒ 落盘 persona.md。下一轮 promptFor() 现读 ⇒ 即时生效
@@ -3554,6 +3652,20 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             }),
             h('div', { 'data-bd-foot': '' },
               h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'persona', onClick: onSavePersona }, '保存人设'),
+              /* ⭐ 刷新（2026-10-24）：模型也能改这份了，手动从磁盘重读 */
+              h('button', {
+                'data-bd-btn': '',
+                disabled: busy === 'persona',
+                title: (persona !== null && personaSaved !== null && persona !== personaSaved)
+                  ? '从磁盘重新读入 —— 会丢掉你还没保存的改动'
+                  : '从磁盘重新读入（模型可能刚改过这份）',
+                onClick: () => {
+                  const dirty = persona !== null && personaSaved !== null && persona !== personaSaved
+                  if (dirty && typeof window !== 'undefined' && typeof window.confirm === 'function'
+                    && !window.confirm('你有还没保存的改动，重新读入会丢掉它们。确定要继续？')) return
+                  reloadPersona()
+                },
+              }, (persona !== null && personaSaved !== null && persona !== personaSaved) ? '刷新（有改动）' : '刷新'),
               h('button', {
                 'data-bd-btn': '', disabled: busy === 'persona' || !(persona || '').trim(),
                 onClick: () => { setPersona('') },
@@ -3582,6 +3694,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           onChange: (e) => setDocField('duty', { text: e.target.value }),
           onSave: () => saveDoc('duty'),
           onReset: () => resetDoc('duty'),
+          onReload: () => reloadDoc('duty'),
           saved: docs.duty?.saved ?? null,
           chars: docs.duty?.chars ?? null,
           file: docs.duty?.file ?? '',
@@ -3605,6 +3718,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           onChange: (e) => setDocField('comment', { text: e.target.value }),
           onSave: () => saveDoc('comment'),
           onReset: () => resetDoc('comment'),
+          onReload: () => reloadDoc('comment'),
           saved: docs.comment?.saved ?? null,
           chars: docs.comment?.chars ?? null,
           file: docs.comment?.file ?? '',
@@ -3633,6 +3747,19 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             }),
             h('div', { 'data-bd-foot': '' },
               h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'reply', onClick: onSaveReply }, '保存细则'),
+              h('button', {
+                'data-bd-btn': '',
+                disabled: busy === 'reply',
+                title: (reply !== null && replySaved !== null && reply !== replySaved)
+                  ? '从磁盘重新读入 —— 会丢掉你还没保存的改动'
+                  : '从磁盘重新读入（模型可能刚改过这份）',
+                onClick: () => {
+                  const dirty = reply !== null && replySaved !== null && reply !== replySaved
+                  if (dirty && typeof window !== 'undefined' && typeof window.confirm === 'function'
+                    && !window.confirm('你有还没保存的改动，重新读入会丢掉它们。确定要继续？')) return
+                  reloadReply()
+                },
+              }, (reply !== null && replySaved !== null && reply !== replySaved) ? '刷新（有改动）' : '刷新'),
               h('button', {
                 'data-bd-btn': '', disabled: busy === 'reply' || !(reply || '').trim(),
                 onClick: () => { setReply('') },
@@ -3702,6 +3829,19 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             h('div', { 'data-bd-foot': '' },
               h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'dm', onClick: onSaveDm }, '保存细则'),
               h('button', {
+                'data-bd-btn': '',
+                disabled: busy === 'dm',
+                title: (dm !== null && dmSaved !== null && dm !== dmSaved)
+                  ? '从磁盘重新读入 —— 会丢掉你还没保存的改动'
+                  : '从磁盘重新读入（模型可能刚改过这份）',
+                onClick: () => {
+                  const dirty = dm !== null && dmSaved !== null && dm !== dmSaved
+                  if (dirty && typeof window !== 'undefined' && typeof window.confirm === 'function'
+                    && !window.confirm('你有还没保存的改动，重新读入会丢掉它们。确定要继续？')) return
+                  reloadDm()
+                },
+              }, (dm !== null && dmSaved !== null && dm !== dmSaved) ? '刷新（有改动）' : '刷新'),
+              h('button', {
                 'data-bd-btn': '', disabled: busy === 'dm' || !(dm || '').trim(),
                 onClick: () => { setDm('') },
               }, '清空'),
@@ -3751,6 +3891,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           onChange: (e) => setDocField('report', { text: e.target.value }),
           onSave: () => saveDoc('report'),
           onReset: () => resetDoc('report'),
+          onReload: () => reloadDoc('report'),
           saved: docs.report?.saved ?? null,
           chars: docs.report?.chars ?? null,
           file: docs.report?.file ?? '',
