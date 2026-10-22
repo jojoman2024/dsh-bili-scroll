@@ -141,6 +141,69 @@ if (!tabBtn) {
     problems.push('[data-bd-tabs]>button 没有 white-space:nowrap —— 文字会被挤成两行')
   }
 }
+/* ───────── ②-c 窄屏两级导航（2026-10-22 加）─────────
+ * 使用者：窄屏默认只看列表、点条目详情滑出占满、展开时留返回列表按钮。
+ * 三条容易「写了但不生效」的地方，逐条断言：
+ *  ① 返回按钮必须用**后代**选择器（它在 [data-bd-detail] 里面，不是 split 的直接子元素）
+ *     —— 写成 ">" 时 matches() 返回 false、按钮永不出现，**且不报错**（实测抓到过）。
+ *  ② 必须有 `.bd-narrow-back{display:none}` 的**全局兜底**，且在媒体查询**外面**
+ *     —— 否则宽屏下它没有任何 display 声明、退回默认值 ⇒ 按钮冒出来。
+ *  ③ 详情栏收起态必须 `pointer-events:none` —— 否则移出屏幕看不见却仍能点到。
+ */
+const narrow = /@media \(max-width:640px\)\{([\s\S]*?)\n\}/.exec(css)
+if (!narrow) {
+  problems.push('找不到窄屏的 @media (max-width:640px) 块')
+} else {
+  const nb = narrow[1]
+  /* 🔴 **必须把每个声明的范围限制在它自己的 {} 里**（2026-10-22 反证抓到的）：
+   *    我第一版写的是 /\[data-bd-detail\]\{[\s\S]*?pointer-events:none/ ——
+   *    `[\s\S]*?` 会**跨过块边界**，于是把别处的 pointer-events:none 也算进来
+   *    ⇒ 故意删掉详情栏那条时**依然报绿**（假绿）。这正是"守卫要验反证"的理由。
+   */
+  const blockOf = (sel) => {
+    const re = new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\{([^}]*)\\}')
+    const mm = re.exec(nb)
+    return mm ? mm[1] : null
+  }
+  const detailBase = blockOf('[data-bd-detail]')
+  if (detailBase === null) {
+    problems.push('窄屏块里找不到 [data-bd-detail] 的基础规则')
+  } else {
+    if (!/transform\s*:\s*translateX\(100%\)/.test(detailBase)) {
+      problems.push('窄屏下详情栏没有 translateX(100%) 收起态 —— 它不会"默认隐藏"')
+    }
+    if (!/pointer-events\s*:\s*none/.test(detailBase)) {
+      problems.push('窄屏下收起态的详情栏没有 pointer-events:none —— 看不见却能点到')
+    }
+    if (!/position\s*:\s*absolute/.test(detailBase)) {
+      problems.push('窄屏下详情栏没有 position:absolute —— 它无法"占满屏幕覆盖列表"')
+    }
+  }
+  if (!/\[data-bd-split\]\[data-narrow-open\] \[data-bd-detail\]/.test(nb)) {
+    problems.push('窄屏展开态没写「[data-bd-split][data-narrow-open] [data-bd-detail]」（中间是空格=后代），否则滑不进来')
+  }
+  if (/\[data-bd-split\]\[data-narrow-open\]>\.bd-narrow-back/.test(nb)) {
+    problems.push('返回按钮用了子选择器 ">" —— 它在 [data-bd-detail] 里面、不是 split 的直接子元素，会永远匹配不到（不报错）')
+  }
+  if (!/\[data-bd-split\]\[data-narrow-open\] \.bd-narrow-back/.test(nb)) {
+    problems.push('窄屏展开态没写返回按钮的显示规则（[data-bd-split][data-narrow-open] .bd-narrow-back）')
+  }
+}
+if (!/\.bd-narrow-back\{display:none;\}/.test(css)) {
+  problems.push('缺 `.bd-narrow-back{display:none}` 全局兜底 —— 宽屏下返回按钮会冒出来')
+}
+// 兜底那行必须在媒体查询之外（简单判据：它的位置在 @media 块结束之后）
+{
+  const mediaEnd = css.indexOf('@media (max-width:640px)')
+  const fallbackIdx = css.indexOf('.bd-narrow-back{display:none;}')
+  if (mediaEnd >= 0 && fallbackIdx >= 0 && fallbackIdx > mediaEnd) {
+    // 还要确认它不在那个 media 块的 {} 里面
+    const bodyStart = css.indexOf('{', mediaEnd)
+    let depth = 0, end = -1
+    for (let i = bodyStart; i < css.length; i++) { if (css[i] === '{') depth++; else if (css[i] === '}') { depth--; if (depth === 0) { end = i; break } } }
+    if (fallbackIdx < end) problems.push('`.bd-narrow-back{display:none}` 被写进了媒体查询里 —— 宽屏下就不会生效')
+  }
+}
 /* ───────── ③ 左栏宽度照 memj 的 25% ───────── */
 const sideW = /\[data-bd-side\]\{flex:0 0 (\d+)%;max-width:\1%/.exec(css)
 if (!sideW) problems.push('找不到左栏宽度声明')

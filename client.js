@@ -751,7 +751,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-page][data-bd-tab="artifacts"] [data-bd-sec][data-bd-tabin="artifacts"]{
   flex:1 1 auto;min-height:0;margin:0 -16px;padding:0;border-top:0;}
 
-[data-bd-split]{display:flex;align-items:stretch;gap:0;height:100%;min-height:0;
+[data-bd-split]{display:flex;align-items:stretch;gap:0;height:100%;min-height:0;position:relative;
   /* 🔴 **必须显式压掉 padding**（2026-10-22 量出来的）：
      上面那条「分节里的每个直接子元素 = 一行」是 padding:16px 0 —— split 是分节的
      直接子元素 ⇒ 它自己也被套上了 16px 上下内距 ⇒ 左右两栏的顶/底各缩进 16px，
@@ -831,11 +831,75 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
    ⚠️ 左右两栏的**顶部内边距要相等**（都是 14px），否则第一行文字看不齐。 */
 [data-bd-detail]{flex:1 1 auto;min-width:0;min-height:0;overflow:auto;padding:14px 14px 40px;}
 
-/* 窄屏（右侧栏被拖得很窄时）：左栏放宽一点，否则一个标题都放不下 */
-@media (max-width:520px){
-  [data-bd-side]{flex:0 0 38%;max-width:38%;}
-  [data-bd-detail]{padding-left:10px;}
+/* 窄屏（右侧栏被拖得很窄 / 手机）：**全屏两级导航**（2026-10-22 加）
+ *
+ * 使用者：「产物报告页，在窄屏时，右边详情页应该默认隐藏，左边栏占满屏幕。
+ *   点击条目时，右边栏滑出占满屏幕。右边栏展开时，留返回列表按钮，
+ *   点击隐藏右边栏详情页，留下列表。这个的处理也可以参考 memj。」
+ *
+ * ⭐⭐ **实现照抄 memj（它那边同样做过，注释很全）**：
+ *    · **纯 CSS 定位 + 一个 "data-narrow-open" 开关，不重排 DOM**：
+ *      详情栏默认 "translateX(100%)" 移出屏幕右侧，打开时 "translateX(0)" 滑入；
+ *    · ⚠️ **不用 "display:none" 藏它** —— 那会丢掉滑入动画，
+ *      而且"hidden 期间读 scrollTop 恒为 0"这类坑会跟着来（memj 记过）；
+ *    · ⚠️ **用 "position:absolute" 而不是 "fixed"**：定位基准是 [data-bd-split]
+ *      （它自己有高度）⇒ 自动跟随面板缩放，不必用 JS 量高度；
+ *    · ⚠️ **移出屏幕时必须 "pointer-events:none"** —— 否则看不见却能点到；
+ *    · ⚠️ **背景必须不透明** —— 否则会透出下面的列表（memj 也踩过）；
+ *    · ⚠️ "transform: translateX(100%)" 用**百分比**（不是固定 px）⇒ 任意宽度都对。
+ *
+ * 🔴 **阈值 640px 的道理**：右栏是 25%、且 min-width:150px。
+ *    面板宽到 640 时右栏约 160px、左栏 480px —— 再窄下去右栏就装不下一行中文了。
+ *    ⚠️ 这个数字和 JS 里的 "NARROW_MAX" **必须一致**（改一处要改两处）。
+ *    ⚠️ 为什么不跟 memj 一样用 900px：memj 是全页面板（宽），
+ *       我们这块是**右侧栏**，900px 时它早就够宽了、切成两级反而更难用。
+ */
+@media (max-width:640px){
+  /* 列表栏占满：宽度、最大宽度、右边框都不要了 */
+  [data-bd-side]{flex:1 1 auto;max-width:none;min-width:0;border-right:none;}
+
+  /* 详情栏：滑入前的状态 —— 移出屏幕右侧、不可点 */
+  [data-bd-detail]{
+    position:absolute;inset:0;z-index:2;
+    background:var(--dsw-alias-bg-base,#fff);
+    transform:translateX(100%);
+    transition:transform .22s ease;
+    pointer-events:none;
+    border-right:none;
+  }
+  /* 打开态：滑进来、恢复可交互（由 JS 在"选中某条"时加、'返回列表'时去）
+     ⚠️ **不写嵌套**：原生 CSS 没有这种写法（那是 SCSS），必须写全选择器链。 */
+  [data-bd-split][data-narrow-open] [data-bd-detail]{
+    transform:translateX(0);pointer-events:auto;}
+
+  /* 详情栏要能自己滚（它已经 overflow:auto，这里只补定位下的高度约束） */
+  [data-bd-detail]{max-height:100%;}
+
+  /* 「返回列表」按钮：**只在窄屏 + 详情打开时出现**。
+     ⚠️ 样式照 memj 的 .narrow-back：贴右边、半透明、毛玻璃、
+        左边圆角右边直角（"从屏幕长出来"的样子）。
+     ⚠️ 层级要压过详情栏（z-index:2）⇒ 给 3。
+     ⚠️ 用 position:fixed 是因为它要跟着**屏幕**而不是某个滚动容器。 */
+  [data-bd-split][data-narrow-open] .bd-narrow-back{
+    display:flex;position:fixed;z-index:3;
+    bottom:33vh;right:0;
+    align-items:center;gap:4px;
+    padding:7px 12px 7px 14px;font:inherit;font-size:13px;line-height:1;
+    color:var(--dsw-alias-label-primary,#0f1115);
+    background:rgba(255,255,255,.72);
+    border:1px solid rgba(0,0,0,.12);border-right:none;
+    border-radius:10px 0 0 10px;
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    box-shadow:-2px 2px 8px rgba(0,0,0,.12);
+    cursor:pointer;
+  }
+  [data-bd-split][data-narrow-open] .bd-narrow-back:hover{background:rgba(255,255,255,.88);}
 }
+
+/* 🔴 **全局兜底：返回按钮在任何情况下都不该在宽屏出现**（memj 那条注释踩过）：
+   上面整块在媒体查询里 ⇒ 宽屏下它**没有任何 display 声明**，会退回默认值 ⇒
+   按钮**冒出来**。所以这一条必须留在媒体查询**外面**。 */
+.bd-narrow-back{display:none;}
 
 /* ── 渲染出来的 markdown 正文（只作用于本面板，别外泄到宿主）──
    ⚠️ 全部挂在 [data-bd-md] 下面：这是**别人页面里的插件**，
@@ -1566,6 +1630,18 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        */
       const [artPick, setArtPick] = React.useState('')
       const [artQuery, setArtQuery] = React.useState('')
+      /**
+       * ⭐ **窄屏两级导航：详情栏是否展开**（2026-10-22 加，照 memj 的做法）。
+       *
+       * 窄屏（≤640px）时默认只看列表；点某条 ⇒ 详情栏从右侧滑入占满；
+       * 点「返回列表」⇒ 滑回去。宽屏下这个状态**没有任何作用**
+       * （CSS 那两条规则都在媒体查询内）⇒ 不需要按窗口宽度分支。
+       *
+       * ⚠️ **不要用 display:none 藏详情栏** —— 那会丢掉滑入动画，
+       *    而且 hidden 期间读 scrollTop 恒为 0（memj 记过这个坑）⇒ 用 translateX。
+       * ⚠️ 它**不参与跨会话共享**（那是"当前浏览到哪"，不是"设置"）。
+       */
+      const [artOpen, setArtOpen] = React.useState(false)
       const [rl, setRl] = React.useState(null)          // 怎么写：full（写笔记）/ off（不写）—— 2026-10-21 去掉 brief
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       /**
@@ -3253,7 +3329,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             const kb = (n) => (n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n || 0}B`)
             const picked = list.find((f) => f.name === artPick) || null
 
-            return h('div', { 'data-bd-split': '' },
+            return h('div', {
+              'data-bd-split': '',
+              /* ⭐ 窄屏两级导航的**唯一开关**（照 memj 的 data-narrow-open）：
+                 有这个属性 ⇒ 详情栏 translateX(0) 滑入；没有 ⇒ 移出屏幕。
+                 ⚠️ 宽屏下这个属性**不起作用**（那两条 CSS 都在媒体查询里），
+                    所以不需要判断窗口宽度、也不会在宽屏留下副作用。 */
+              'data-narrow-open': artOpen ? '' : undefined,
+            },
 
               /* ── 左：计数 + 搜索 + 列表（只有列表滚）── */
               h('div', { 'data-bd-side': '' },
@@ -3285,7 +3368,13 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                           key: f.name, type: 'button', 'data-bd-item': '',
                           'data-on': f.name === artPick ? '' : undefined,
                           title: f.name,
-                          onClick: () => { if (f.name !== artPick) void openReportFile(f.name) },
+                          /* ⭐ 窄屏下点这条会把详情栏滑出来（宽屏下 setArtOpen 无视觉作用，
+                             因为那两条 CSS 都在媒体查询里）—— 所以**无条件设 true**，
+                             不需要在这里判窗口宽度（样板里不建议读 window.innerWidth 做分支）。 */
+                          onClick: () => {
+                            setArtOpen(true)
+                            if (f.name !== artPick) void openReportFile(f.name)
+                          },
                         },
                           h('div', { class: 'bd-item-title' }, f.label),
                           /* ⚠️ 只在**有日期**时才渲染这一行（2026-10-22 使用者：「标题下面
@@ -3302,6 +3391,16 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     没意义」——这行小字是同一类"磁盘信息"，一并去掉；正文第一行
                     就是标题，重复它只会让人以为有两条标题）。 */
               h('div', { 'data-bd-detail': '' },
+                /* ⭐ **「返回列表」按钮**（2026-10-22 加，照 memj 的 .narrow-back）：
+                   · 只在**窄屏 + 详情展开**时显示（CSS 里两条规则都在媒体查询内）；
+                   · 宽屏下**完全不出现**（外面那条 `.bd-narrow-back{display:none}` 兜底）。
+                   ⚠️ 它必须在**详情栏里面**：这样详情栏滑出屏幕时按钮跟着走 ——
+                      否则窄屏收起后按钮会留在屏幕上、点了没反应。 */
+                h('button', {
+                  type: 'button', class: 'bd-narrow-back',
+                  onClick: () => setArtOpen(false),
+                }, '‹ 返回列表'),
+
                 /* 空白态才说一句"左边挑一份"；有内容时**直接就是正文** */
                 reportFile === null
                   ? (all.length === 0
