@@ -5484,10 +5484,26 @@ export function apply(ctx, config) {
       return sendJson(res, 200, runAsrInstall())
     }
 
-    // ⭐ **产物清单**（2026-10-16 加）：每条视频一份 md，列出来给面板。
-    //    （旧的「看今天的报告」那条路由留着不动 —— 兼容旧日报，但不再新写。）
+    /**
+     * ⭐ **产物清单**（2026-10-16 加）：每条视频一份 md，列出来给面板。
+     *    （旧的「看今天的报告」那条路由留着不动 —— 兼容旧日报，但不再新写。）
+     *
+     * ⭐ **2026-10-22 多回一个 `title`**：面板要按**标题**搜（使用者要求
+     *    「左侧列表栏应该可以搜索，搜索标题即可」），而文件名是 `safeFileStem()`
+     *    截到 60 字符、还把 Windows 非法字符换成了 `-` ⇒ 拿它当搜索词会漏。
+     *    ⇒ 这里读每份文件开头的 `# 一级标题` 当显示名（读不到就退回文件名）。
+     * ⚠️ 只读**前 8KB**：标题总在最前面，没必要整份读进来（200 份 × 全文会很慢）。
+     */
     if (req.method === 'GET' && path === '/api/bili-scroll-jojo/reports') {
       const dir = reportDirFor()
+      /** 从产物正文里取一级标题；取不到返回空串。 */
+      const headTitleOf = (full) => {
+        try {
+          const head = readFileSync(full, 'utf8').slice(0, 8192)
+          const m = /^\s*#\s+(.+?)\s*$/m.exec(head)
+          return m ? m[1].trim() : ''
+        } catch { return '' }
+      }
       let files = []
       try {
         files = readdirSync(dir)
@@ -5496,7 +5512,7 @@ export function apply(ctx, config) {
             const full = join(dir, n)
             let size = 0, mtime = 0
             try { const st = statSync(full); size = st.size; mtime = st.mtimeMs } catch { /* 读不到就算了 */ }
-            return { name: n, size, mtime }
+            return { name: n, size, mtime, title: headTitleOf(full) }
           })
           .sort((a, b) => b.mtime - a.mtime)
           .slice(0, 200)

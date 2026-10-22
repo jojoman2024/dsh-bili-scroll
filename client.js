@@ -190,6 +190,7 @@ window.__ModuleLoader__.load({
       （因为没有任何规则把它隐藏掉，于是**所有分节都还在**）。
       ⚠️ 2026-10-17 加「实验功能」时就差点漏掉这条（当时只有 settings/prompt/env）。 */
 [data-bd-page][data-bd-tab="settings"] [data-bd-tabin]:not([data-bd-tabin="settings"]),
+[data-bd-page][data-bd-tab="artifacts"] [data-bd-tabin]:not([data-bd-tabin="artifacts"]),
 [data-bd-page][data-bd-tab="prompt"]   [data-bd-tabin]:not([data-bd-tabin="prompt"]),
 [data-bd-page][data-bd-tab="env"]      [data-bd-tabin]:not([data-bd-tabin="env"]),
 [data-bd-page][data-bd-tab="lab"]      [data-bd-tabin]:not([data-bd-tabin="lab"]){display:none;}
@@ -262,6 +263,7 @@ window.__ModuleLoader__.load({
  *       纯 CSS 表达不了"第一个可见的"（没有反向兄弟选择器），
  *       那时更稳的做法是渲染时给每个 tab 的首个分节打个标记属性。
  */
+[data-bd-page][data-bd-tab="artifacts"] [data-bd-tabin="artifacts"],
 [data-bd-page][data-bd-tab="prompt"] [data-bd-tabin="prompt"],
 [data-bd-page][data-bd-tab="env"] [data-bd-tabin="env"],
 [data-bd-page][data-bd-tab="lab"] [data-bd-tabin="lab"]{border-top:0;margin-top:0;padding-top:20px;}
@@ -672,6 +674,101 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
    而上面那条 word-break:normal 会让它**横向溢出弹窗**（弹窗只有 320px 宽）。
    ⇒ 这一条单独放开断词，宁可断在单词中间，也别让人看不全。 */
 [data-bd-pre][data-bd-clog][data-bd-wrap]{word-break:break-all;max-height:120px;}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⭐⭐ 「产物报告」页：左列表 / 右详情（2026-10-22 加）
+
+   使用者要求：「把功能设置页的看产物…单独做个子导航页【产物报告】…
+   左侧列表，右侧详情，详情需要渲染。具体实现看 memj 插件的知识库页的实现。」
+
+   🔴🔴 **这里必须自己建立 flex 上下文**（这是本页最容易踩、且不报错的地方）：
+     库内条目 b15ee951 记着 memj 那边栽的同一个坑 ——
+     "flex:1" 不是"我要占满"，而是"**在父容器的 flex 分配里占 1 份**"。
+     本面板的祖先链是 [data-bd-tabwrap](overflow:auto) > [data-bd-page](flex) > 分节，
+     而分节 [data-bd-sec] 是 display:flex; flex-direction:column —— 它**是** flex 容器，
+     可它能给子项分配的高度是"内容撑开"的（tabwrap 自己在滚）⇒
+     左右两栏都会长到内容那么高，**右侧的 overflow:auto 永不触发、正文滚不动**。
+     ⇒ 所以这一页**不能**再用 [data-bd-sec] 那套逐行留白，得给它一个
+       **固定高度 + 中间滚动**的盒子（见下面的 [data-bd-split]）。
+     ⚠️ 高度用 calc(100vh - …) 是按"面板在视口里"估的；实测若被截，改这个数即可
+        （面板本来就在右侧栏里，用户能接受"上下各让出一点"）。
+   ══════════════════════════════════════════════════════════════════════════ */
+[data-bd-split]{display:flex;align-items:stretch;gap:0;min-height:0;
+  /* 顶栏(sticky) + 标签条 ≈ 96px，再给上下各 16px 呼吸 */
+  height:calc(100vh - 128px);}
+/* 左：列表栏。**定宽**（不是 flex:1），右侧才不会跟着列表长度抖 */
+[data-bd-side]{flex:0 0 42%;max-width:42%;min-width:0;display:flex;flex-direction:column;
+  min-height:0;border-right:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 左栏顶部那条搜索框：不参与滚动 */
+[data-bd-side]>.bd-search{flex:0 0 auto;padding:0 10px 8px 0;}
+[data-bd-side]>input[data-bd-input]{width:100%;}
+/* 列表本体：**只有它滚** */
+[data-bd-list]{flex:1 1 auto;min-height:0;overflow:auto;padding:2px 8px 16px 0;
+  display:flex;flex-direction:column;gap:2px;}
+/* 一条产物 */
+[data-bd-item]{flex:0 0 auto;padding:8px 10px;border-radius:var(--dsw-radius-sm,8px);
+  cursor:pointer;border:1px solid transparent;font-family:inherit;text-align:left;
+  background:none;color:var(--dsw-alias-label-primary,#0f1115);}
+[data-bd-item]:hover{background:var(--dsw-alias-bg-module-platform,#f5f6f7);}
+[data-bd-item][data-on]{background:var(--dsw-alias-bg-module-platform,#f5f6f7);
+  border-color:var(--dsw-alias-border-l3,#0000001f);}
+[data-bd-item] .bd-item-title{font-size:var(--dsw-font-s-14-font-size,14px);line-height:20px;
+  font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;word-break:break-word;}
+[data-bd-item] .bd-item-meta{font-size:var(--dsw-font-xxs-12-font-size,12px);
+  line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 右：详情。**它才是滚动容器**（min-width:0 防长行把它撑爆 —— memj 也踩过） */
+[data-bd-detail]{flex:1 1 auto;min-width:0;min-height:0;overflow:auto;padding:0 0 32px 14px;}
+[data-bd-detail] .bd-detail-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+[data-bd-detail] .bd-detail-head>[data-bd-grow]{flex:1 1 auto;min-width:0;}
+[data-bd-detail] .bd-detail-file{font-size:11px;line-height:16px;
+  color:var(--dsw-alias-label-tertiary,#81858c);word-break:break-all;}
+
+/* 窄屏（右侧栏被拖得很窄时）：左栏收窄，别把正文挤没 */
+@media (max-width:520px){
+  [data-bd-side]{flex:0 0 46%;max-width:46%;}
+  [data-bd-detail]{padding-left:10px;}
+}
+
+/* ── 渲染出来的 markdown 正文（只作用于本面板，别外泄到宿主）──
+   ⚠️ 全部挂在 [data-bd-md] 下面：这是**别人页面里的插件**，
+      给裸 h1 / table 写全局样式会改坏宿主自己的界面。 */
+[data-bd-md]{font-size:var(--dsw-font-s-14-font-size,14px);
+  line-height:1.72;color:var(--dsw-alias-label-primary,#0f1115);word-break:break-word;}
+[data-bd-md]>*:first-child{margin-top:0;}
+[data-bd-md] p{margin:0 0 10px;}
+[data-bd-md] h1,[data-bd-md] h2,[data-bd-md] h3,
+[data-bd-md] h4,[data-bd-md] h5,[data-bd-md] h6{
+  margin:18px 0 8px;line-height:1.4;font-weight:600;
+  color:var(--dsw-alias-label-primary,#0f1115);}
+[data-bd-md] h1{font-size:17px;}
+[data-bd-md] h2{font-size:15px;padding-bottom:4px;
+  border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
+[data-bd-md] h3{font-size:14px;}
+[data-bd-md] h4,[data-bd-md] h5,[data-bd-md] h6{font-size:13px;}
+[data-bd-md] ul,[data-bd-md] ol{margin:0 0 10px;padding-left:20px;}
+[data-bd-md] li{margin:2px 0;}
+[data-bd-md] blockquote{margin:0 0 10px;padding:6px 12px;border-left:3px solid var(--dsw-alias-border-l2,#0000001a);
+  background:var(--dsw-alias-bg-module-platform,#f5f6f7);
+  color:var(--dsw-alias-label-secondary,#61666b);border-radius:0 var(--dsw-radius-xs,4px) var(--dsw-radius-xs,4px) 0;}
+[data-bd-md] blockquote p{margin:0;}
+[data-bd-md] blockquote p+p{margin-top:4px;}
+[data-bd-md] code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.9em;padding:1px 5px;border-radius:var(--dsw-radius-xs,4px);
+  background:var(--dsw-alias-bg-module-platform,#f5f6f7);word-break:break-word;}
+[data-bd-md] pre{margin:0 0 10px;padding:10px 12px;border-radius:var(--dsw-radius-sm,8px);
+  overflow:auto;background:var(--dsw-alias-bg-module-platform,#f5f6f7);
+  border:1px solid var(--dsw-alias-border-l2,#0000001a);}
+[data-bd-md] pre code{padding:0;background:none;white-space:pre-wrap;word-break:break-word;}
+[data-bd-md] a{color:var(--dsw-alias-state-business-primary,#0f1115);
+  text-decoration:underline;text-underline-offset:2px;word-break:break-word;}
+[data-bd-md] hr{border:none;border-top:1px solid var(--dsw-alias-border-l2,#0000001a);margin:16px 0;}
+[data-bd-md] table{border-collapse:collapse;width:100%;margin:0 0 10px;display:block;overflow:auto;}
+[data-bd-md] th,[data-bd-md] td{border:1px solid var(--dsw-alias-border-l2,#0000001a);
+  padding:5px 9px;text-align:left;vertical-align:top;}
+[data-bd-md] th{background:var(--dsw-alias-bg-module-platform,#f5f6f7);font-weight:600;}
+[data-bd-md] img{max-width:100%;}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -789,8 +886,171 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('button', { 'data-bd-btn': '', 'data-danger': '', onClick: onReset }, '覆盖并恢复')))) : null)
     }
 
-    /* ════════ 面板界面状态：跨会话共享（2026-10-20 加）════════
+    /* ════════ 极简 Markdown 渲染器（2026-10-22 加，给「产物报告」页用）════════
      *
+     * 🔴 **为什么不引第三方库**（memj 那边是用 CDN 引 `marked` 的，这里不行）：
+     *    · 本插件是**装进别人 WB 里**的 npm 包，面板直接跑在宿主页面里；
+     *      为它加一个运行时依赖（或插一个 `<script src=cdn>`）要改 `files` / 打包 / 断网兜底，
+     *      而产物是**我们自己写的固定格式**（`prompts/report.md` 那份骨架：H1/H2、
+     *      引用行、`- **UP**：…` 列表、正文段落、`---` 分隔）—— 用不到完整的 GFM；
+     *    · ⚠️ 断网时 CDN 拿不到 ⇒ 面板会退化成"显示原文"，等于这个页面白做。
+     *    ⇒ 自己写一个小渲染器，覆盖**产物里真实出现过的那些语法**。
+     *
+     * 支持的语法（实测 `reports/*.md` 的 15 份里，出现过的全在这儿）：
+     *   `#`~`######` 标题 · ``` 围栏代码块 · `>` 引用 · `---` 分隔线 ·
+     *   `-` / `*` / `1.` 列表（不嵌套）· **粗体** · *斜体* · `行内代码` ·
+     *   `[文字](链接)` · 裸 URL · GFW 表格（`| a | b |` + 分隔行）· 段落
+     *
+     * 🔴🔴 **安全**：先 `escapeHtml()` 整个输入，再按语法插入标签。
+     *    ⇒ 正文里写 `<script>` 只会**显示成文字**，不会执行。这是刻意选的方向
+     *    （与 memj 那边"把 marked 的 html 渲染器改成转义"同一个口径）。
+     *    ⚠️ 所以**不要**为了支持某段 HTML 改成"先渲染再清洗"—— 那需要真 DOM 与白名单。
+     *
+     * @param {string} src - markdown 原文
+     * @returns {string} HTML 串（调用方用 `dangerouslySetInnerHTML` 塞进去）
+     */
+    const escapeHtml = (s) => String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
+    /** 行内语法（**入口先转义**，之后才插标签）。 */
+    const mdInline = (s) => {
+      // 🔴 **必须在这里转义，不能只在代码块里转义**（2026-10-22 探针抓到的真 XSS）：
+      //    第一版只在 <pre> 分支调了 escapeHtml，而普通段落/标题/列表/表格全都直接
+      //    拼进 HTML ⇒ 产物正文里一句 `<script>alert(1)</script>` 就是**活的脚本**。
+      //    产物是模型写的、也可能被人手改 ⇒ 不能当可信输入。
+      //    ⚠️ 转义放**最前面**：它不碰 [ ] ( ) * ` | 这些语法字符，不影响后面的解析。
+      let t = escapeHtml(s)
+      // 行内代码**先抠出来占位**：否则 `code` 里的 * 和 _ 会被当成强调符号
+      const codes = []
+      t = t.replace(/`([^`\n]+)`/g, (_, c) => {
+        codes.push(c)
+        return `\u0000${codes.length - 1}\u0000`
+      })
+      // 链接：只放行 http(s)，其余（javascript: 等）原样当文字 —— 见下面的判据
+      t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        (_, txt, href) => `<a href="${href}" target="_blank" rel="noreferrer">${txt}</a>`)
+      // 裸 URL（产物里 UP 链接常写成纯文本）
+      t = t.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g,
+        (_, pre, href) => `${pre}<a href="${href}" target="_blank" rel="noreferrer">${href}</a>`)
+      t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      t = t.replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+      t = t.replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+      // 把行内代码放回来
+      t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)]}</code>`)
+      return t
+    }
+
+    /**
+     * 把 markdown 渲染成 HTML。
+     * ⚠️ **不是通用 markdown 实现** —— 只覆盖产物里真有的语法（见上面那份清单）。
+     *    遇到不认识的语法就当普通文字，**不会报错、也不会吞内容**。
+     */
+    const renderMarkdown = (src) => {
+      const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n')
+      const out = []
+      let listType = ''      // '' / 'ul' / 'ol'
+      let inCode = false
+      let codeBuf = []
+      let inQuote = false
+      let paraBuf = []
+      let inTable = false
+
+      const flushPara = () => {
+        if (paraBuf.length) { out.push(`<p>${mdInline(paraBuf.join(' '))}</p>`); paraBuf = [] }
+      }
+      const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = '' } }
+      const closeQuote = () => { if (inQuote) { out.push('</blockquote>'); inQuote = false } }
+      const closeTable = () => { if (inTable) { out.push('</tbody></table>'); inTable = false } }
+      const closeAll = () => { flushPara(); closeList(); closeQuote(); closeTable() }
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        const t = line.trim()
+
+        // 围栏代码块（``` 或 ~~~）：内部**原样保留**，不解析任何语法
+        const fence = /^(```+|~~~+)\s*([\w-]*)\s*$/.exec(t)
+        if (fence) {
+          if (inCode) {
+            out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`)
+            codeBuf = []
+            inCode = false
+          } else {
+            closeAll()
+            inCode = true
+          }
+          continue
+        }
+        if (inCode) { codeBuf.push(line); continue }
+
+        // 空行：把攒着的块都关掉
+        if (t === '') { closeAll(); continue }
+
+        // 分隔线
+        if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { closeAll(); out.push('<hr>'); continue }
+
+        // 标题
+        const hm = /^(#{1,6})\s+(.*)$/.exec(t)
+        if (hm) {
+          closeAll()
+          const lv = hm[1].length
+          out.push(`<h${lv}>${mdInline(hm[2].trim())}</h${lv}>`)
+          continue
+        }
+
+        // 表格：本行是 | a | b |，且下一行是 |---|---|
+        if (/^\|.*\|$/.test(t) && /^\|[\s:|-]+\|$/.test(String(lines[i + 1] ?? '').trim()) && /-/.test(String(lines[i + 1]))) {
+          closeAll()
+          const cells = (row) => row.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim())
+          out.push('<table><thead><tr>'
+            + cells(t).map((c) => `<th>${mdInline(c)}</th>`).join('')
+            + '</tr></thead><tbody>')
+          inTable = true
+          i++                       // 跳过 `|---|` 那行
+          continue
+        }
+        if (inTable) {
+          if (/^\|.*\|$/.test(t)) {
+            const cells = t.replace(/^\||\|$/g, '').split('|').map((c) => c.trim())
+            out.push('<tr>' + cells.map((c) => `<td>${mdInline(c)}</td>`).join('') + '</tr>')
+            continue
+          }
+          closeTable()
+        }
+
+        // 引用（产物里每份都有一段 `> 一句话说清这条在讲什么`）
+        const qm = /^>\s?(.*)$/.exec(t)
+        if (qm) {
+          flushPara(); closeList(); closeTable()
+          if (!inQuote) { out.push('<blockquote>'); inQuote = true }
+          if (qm[1].trim() !== '') out.push(`<p>${mdInline(qm[1])}</p>`)
+          continue
+        }
+        closeQuote()
+
+        // 列表（不嵌套 —— 产物的列表都是平的）
+        const ulm = /^[-*+]\s+(.*)$/.exec(t)
+        const olm = /^\d+[.)]\s+(.*)$/.exec(t)
+        if (ulm || olm) {
+          flushPara(); closeTable()
+          const want = ulm ? 'ul' : 'ol'
+          if (listType !== want) { closeList(); out.push(`<${want}>`); listType = want }
+          out.push(`<li>${mdInline((ulm || olm)[1])}</li>`)
+          continue
+        }
+        closeList()
+
+        // 普通段落行（连续几行合成一段）
+        paraBuf.push(t)
+      }
+
+      // 收尾：代码块没闭合也要吐出来（否则内容直接消失）
+      if (inCode && codeBuf.length) out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`)
+      closeAll()
+      return out.join('\n')
+    }
+
+    /* ════════ 面板界面状态：跨会话共享（2026-10-20 加）════════     *
      * 🔴 **为什么要做**（使用者的原话）：
      *    「右侧栏是跟会话的。可能会导致不同页面面板的设置显示不一样，
      *      搞得用户也弄不清楚到底设置的是啥。应该要保持统一，不跟会话。」
@@ -1189,6 +1449,17 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       // ⭐ 产物清单（2026-10-16 加：改成每条一份 md，不再是汇总日报）
       const [reports, setReports] = React.useState(null)
       const [reportFile, setReportFile] = React.useState(null)
+      /**
+       * ⭐⭐ **「产物报告」页的状态**（2026-10-22 加：从「功能设置 → 它的地盘」里那个
+       *    「看产物」按钮 + 一块裸 pre 升级成独立一页：左列表 / 右详情、详情渲染 markdown）。
+       *    · `artPick`   = 右侧当前显示的文件名（空串 = 还没选）
+       *    · `artQuery`  = 左栏搜索词（**只搜标题**，使用者明确说"搜索标题即可"）
+       *    · 正文复用 `reportFile`（本来就是"某一份产物的正文"）
+       *  ⚠️ 搜索状态**不跨会话共享**：那是"我这一次在找什么"，
+       *     不像标签页那样"用户以为设置变了"（共享清单见 readSharedUI 那段注释）。
+       */
+      const [artPick, setArtPick] = React.useState('')
+      const [artQuery, setArtQuery] = React.useState('')
       const [rl, setRl] = React.useState(null)          // 怎么写：full（写笔记）/ off（不写）—— 2026-10-21 去掉 brief
       const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       /**
@@ -1632,19 +1903,64 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         finally { setBusy('') }
       }
 
-      /** ⭐ 列产物（每条一份 md；2026-10-16 加，取代「看今天的报告」）。 */
-      const onListReports = async () => {
-        if (reports !== null) { setReports(null); setReportFile(null); return }  // 再点一次收起
+      /**
+       * ⭐ 刷新产物清单（2026-10-22 改：给「产物报告」页用，不再是个"收起/展开"的开关）。
+       *
+       * 原来的 `onListReports` 是个 **toggle**（再点一次收起），那是"按钮 + 一块内联清单"
+       * 时代的写法。现在清单是独立一页里的**常驻左栏** ⇒ 收起没有意义，
+       * 改成纯粹的"刷新"，并且**自动选中第一条**（否则进来右边是空的，像坏了）。
+       *
+       * @param {boolean} keepPick - 刷新时保留当前选中的那份（默认 true）
+       */
+      const loadReports = async (keepPick = true) => {
         setBusy('reports')
         try {
           const r = await jget('/reports')
-          setReports(r && r.ok ? r : { ok: false, files: [], count: 0 })
-          setReportFile(null)
-        } catch (e) { say('读不到产物清单：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
+          const data = r && r.ok ? r : { ok: false, files: [], count: 0 }
+          setReports(data)
+          const files = Array.isArray(data.files) ? data.files : []
+          const stillThere = keepPick && artPick && files.some((f) => f.name === artPick)
+          if (!stillThere) {
+            // ⭐ 自动选第一条：面板一进来就能看到内容，不用先点一下
+            const first = files.length ? files[0].name : ''
+            setArtPick(first)
+            setReportFile(null)
+            if (first) void openReportFile(first)
+          }
+        } catch (e) {
+          say('读不到产物清单：' + String(e?.message ?? e), 'warn')
+        } finally { setBusy('') }
       }
 
+      /** 读某一份产物的正文（点左栏那一项时调）。 */
+      const openReportFile = async (name) => {
+        const n = String(name || '')
+        if (n === '') return
+        setArtPick(n)
+        setReportFile(null)                    // 先清空：否则会短暂显示上一份的内容
+        try {
+          const r = await jget('/report-file?name=' + encodeURIComponent(n))
+          if (!r || r.ok !== true) { setReportFile('读不到：' + (r?.error || '接口没回 ok')); return }
+          setReportFile(r.exists === false ? '（这份文件已经不在了 —— 点「刷新」重看目录）' : String(r.text || '（空的）'))
+        } catch (e) { setReportFile('读不到：' + String(e?.message ?? e)) }
+      }
+
+      /**
+       * ⭐ **进「产物报告」页就自动拉一次清单**（2026-10-22 加）。
+       * 为什么不用 `useEffect` 挂载时拉：那样每次面板重开（切会话）都会打一次接口，
+       * 而这一页多数时候没人看。切到这一页再拉，既省一次请求、又能拿到最新产物。
+       * ⚠️ 只在 `reports === null`（还没拉过）时拉 —— 否则每次切页都会重拉、还会把
+       *    用户当前选中的那份重置掉。
+       */
+      React.useEffect(() => {
+        if (tab === 'artifacts' && reports === null && busy !== 'reports') void loadReports(false)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [tab])
+
+      // ⚠️ 旧的 `onListReports`（toggle 版）**已删**（2026-10-22）：清单升级成独立一页，
+      //    「它的地盘」里那个按钮改成"跳到产物报告页"。
       // ⚠️ 旧的 `onShowReport`（读「今天的报告」）**已删**（2026-10-16）：
-      //    日报不再写了，那个按钮也换成了「看产物」。`/report` 路由留着兼容旧文件。
+      //    日报不再写了。`/report` 路由留着兼容旧文件。
 
       const copyText = async (text) => {
         const v = String(text || '')
@@ -2110,9 +2426,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        *   ⚠️ 归属写在分节的 data-bd-tabin 上，切页由 CSS 负责（见上面那条规则）——
        *      **没有新增内容容器**，就是为了不把 flex 上下文断掉（那个坑见 CSS 注释里引的 b15ee951）。
        * ══════════════════════════════════════════════════════════════════ */
-      /** 子导航三页；顺序即显示顺序。 */
+      /**
+       * 子导航；顺序即显示顺序。
+       * ⭐ **2026-10-22 新增「产物报告」**（使用者要求：「放在功能设置右边，提示词页左边」）
+       *    —— 它原来是「功能设置 → 它的地盘」里一个「看产物」按钮 + 一块裸 pre。
+       */
       const TABS = [
         { id: 'settings', label: '功能设置' },
+        { id: 'artifacts', label: '产物报告' },
         { id: 'prompt', label: '提示词' },
         { id: 'env', label: '环境与账号' },
         // ⭐ 「实验功能」放最后（2026-10-17 加）—— 里面是那种"打开就会改变安全边界"的开关，
@@ -2776,6 +3097,96 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
 
+        /* ════════ 六点五、产物报告（→ 子导航「产物报告」页，2026-10-22 加）════════
+           ⭐ 使用者要求：「把功能设置页的看产物，也就是所有报告的查看，单独做个子导航页
+              【产物报告】（放在功能设置右边，提示词页左边）：左侧列表，右侧详情，
+              详情需要渲染。具体实现看 memj 插件的知识库页的实现。」
+              外加：「不需要做筛选啥的，但是左侧列表栏应该可以搜索，搜索标题即可。」
+
+           🔴 **这一节跟别的节长得不一样，别照着改**：
+              · 它**不用** [data-bd-sec] 那套"每个直接子元素 = 一行"的留白规则
+                （见 CSS 里 [data-bd-split] 那段：这里要的是**固定高度 + 内部各自滚动**）；
+              · 左列表、右详情是**两个独立滚动容器**。若把滚动交给外层 tabwrap，
+                右栏的 overflow:auto 永不触发 ⇒ 长笔记滚不动（memj 踩过，库内 b15ee951）。
+
+           ⚠️ **搜索只搜标题**（使用者明确说"搜索标题即可"），
+              不搜正文 —— 那需要把每份都读进来，200 份会很慢，且他没要。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'artifacts' },
+          (() => {
+            const all = Array.isArray(reports?.files) ? reports.files : []
+            const q = artQuery.trim().toLowerCase()
+            // ⭐ 显示名优先用正文里的一级标题（后端回的 `title`），没有才退回文件名
+            const shown = all.map((f) => ({
+              ...f,
+              label: String(f.title || '').trim() || String(f.name || '').replace(/\.md$/i, ''),
+            }))
+            const list = q === ''
+              ? shown
+              : shown.filter((f) => f.label.toLowerCase().includes(q) || String(f.name).toLowerCase().includes(q))
+            /** 文件名末尾的 `-YYMMDD` ⇒ 显示成 `10-19`。 */
+            const dayOf = (name) => {
+              const m = /-(\d{2})(\d{2})(\d{2})\.md$/i.exec(String(name || ''))
+              return m ? `${m[2]}-${m[3]}` : ''
+            }
+            const kb = (n) => (n >= 1024 ? `${Math.round(n / 1024)}KB` : `${n || 0}B`)
+            const picked = list.find((f) => f.name === artPick) || null
+
+            return h('div', { 'data-bd-split': '' },
+
+              /* ── 左：搜索 + 列表（只有列表滚）── */
+              h('div', { 'data-bd-side': '' },
+                h('input', {
+                  'data-bd-input': '', type: 'search',
+                  placeholder: '搜标题…',
+                  value: artQuery,
+                  onChange: (e) => setArtQuery(e.target.value),
+                  // 小屏下回车别提交表单（它不是 form，但输入法常把回车当确认）
+                  onKeyDown: (e) => { if (e.key === 'Enter') e.preventDefault() },
+                }),
+                h('div', { 'data-bd-list': '' },
+                  busy === 'reports' && reports === null
+                    ? h('div', { 'data-bd-note': '' }, '读产物清单中…')
+                    : all.length === 0
+                      ? h('div', { 'data-bd-note': '' },
+                        '还没有产物 —— 跑一轮之后，挑中的每条会各写一份 md。')
+                      : list.length === 0
+                        ? h('div', { 'data-bd-note': '' }, `没有标题里带「${artQuery}」的产物。`)
+                        : list.map((f) => h('button', {
+                          key: f.name, type: 'button', 'data-bd-item': '',
+                          'data-on': f.name === artPick ? '' : undefined,
+                          title: f.name,
+                          onClick: () => { if (f.name !== artPick) void openReportFile(f.name) },
+                        },
+                          h('div', { class: 'bd-item-title' }, f.label),
+                          h('div', { class: 'bd-item-meta' },
+                            [dayOf(f.name), kb(f.size)].filter(Boolean).join(' · ')))))),
+
+              /* ── 右：详情（它才是滚动容器，正文渲染成 HTML）── */
+              h('div', { 'data-bd-detail': '' },
+                h('div', { class: 'bd-detail-head' },
+                  h('div', { 'data-bd-grow': '' },
+                    picked
+                      ? h('div', { class: 'bd-detail-file' }, picked.name)
+                      : h('div', { class: 'bd-detail-file' },
+                        all.length ? '左边挑一份' : '还没有产物')),
+                  h('button', {
+                    'data-bd-btn': '', disabled: busy === 'reports',
+                    onClick: () => void loadReports(true),
+                  }, '刷新'),
+                  h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开文件夹')),
+
+                /* 正文：**走 dangerouslySetInnerHTML** —— 内容由本文件的 renderMarkdown
+                   生成，而它**先把整段输入 escapeHtml 了**再插标签 ⇒ 正文里的
+                   `<script>` 只会显示成文字（有探针反证，见 → 失败/踩坑 里那条 XSS）。 */
+                reportFile === null
+                  ? h('div', { 'data-bd-note': '' },
+                    artPick === '' ? '' : '读正文中…')
+                  : h('div', {
+                    'data-bd-md': '',
+                    dangerouslySetInnerHTML: { __html: renderMarkdown(reportFile) },
+                  })))
+          })()),
+
         /* ════════ 七、它的人设（长文本 ⇒ 留保存按钮）════════ */
         /* ════════ 七、它的人设（→ 子导航「提示词」页）════════ */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
@@ -3302,7 +3713,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
            ⚠️ 只影响**后台**模式（前台是在主应用里建会话，不 spawn 子进程）。 */
         renderDshBlock(st, cfg, { draft: dshBinDraft, setDraft: setDshBinDraft, patch }),
 
-        /* ════════ 九、它的地盘（产物与路径 → 子导航「功能设置」页）════════ */
+        /* ════════ 九、它的地盘（产物与路径 → 子导航「功能设置」页）════════
+           🔴 **2026-10-22 改**：这里原来有「看产物」按钮 + 一块内联清单 + 一个裸 pre。
+              使用者要求把"所有报告的查看"**升级成独立的「产物报告」页**
+              （左列表 / 右详情 / 详情渲染）⇒ 这块只留**路径**与**跳转**，不再自己列产物。
+              ⚠️ 「打开产物文件夹」保留在这儿 —— 它是"路径类"操作，和上面两行是一伙的。 */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'settings' },
           h('div', { 'data-bd-h': '' }, '它的地盘'),
           h('div', { 'data-bd-kv': '' },
@@ -3310,27 +3725,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             h('br'),
             `产物目录：${st.reportDir || '（读不到）'}`),
           h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', disabled: busy === 'reports', onClick: onListReports },
-              reports !== null ? '收起清单' : '看产物'),
+            h('button', { 'data-bd-btn': '', onClick: () => setTab('artifacts') }, '去看产物报告'),
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-note': '' },
+                reports === null ? '所有笔记都在「产物报告」那一页：左边列表、右边渲染好正文。'
+                  : `共 ${reports.count} 份笔记 —— 去「产物报告」页看（可搜标题）。`)),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开产物文件夹'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录')),
-          reports !== null
-            ? (reports.files?.length
-              ? h('div', null,
-                  h('div', { 'data-bd-note': '' }, `共 ${reports.count} 份，最近的排前面（点「看」打开内容）：`),
-                  h('div', null, reports.files.map((f) => h('div', { 'data-bd-row': '', key: f.name },
-                    h('div', { 'data-bd-grow': '' },
-                      h('div', { 'data-bd-note': '' }, `${f.name}　${Math.round(f.size / 1024)}KB`)),
-                    h('button', {
-                      'data-bd-btn': '',
-                      onClick: async () => {
-                        try { const r = await jget('/report-file?name=' + encodeURIComponent(f.name)); setReportFile(r?.text || '（空的）') }
-                        catch (e) { setReportFile('读不到：' + String(e?.message ?? e)) }
-                      },
-                    }, '看')))),
-                  reportFile !== null ? h('pre', { 'data-bd-pre': '' }, reportFile) : null)
-              : h('div', { 'data-bd-note': '' }, '还没有产物 —— 跑一轮之后，挑中的每条会各写一份 md。'))
-            : null),
+        ),
       )
     }
 
@@ -3374,6 +3776,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        *    ⚠️ DSH 只读 `inject` / `apply`，多一个字段不影响加载。
        */
       renderDshBlock,
+      /** ⭐ 给探针用（同上）：产物报告的 markdown 渲染器要能离线对着真文件验。 */
+      renderMarkdown,
       /** ⭐ 给探针用（同上）：两种「关注什么」模式的分支要能被离线渲染验证。 */
       renderWatchBlock,
       /**
