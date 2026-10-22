@@ -31,7 +31,7 @@ const createUserMessage = hostDeps.createUserMessage
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join, dirname, resolve, isAbsolute, sep } from 'node:path'
+import { join, dirname, basename, resolve, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { pyEnv } from './lib/pyenv.mjs'
@@ -1541,22 +1541,159 @@ export function apply(ctx, config) {
     },
   })
 
+  /**
+   * ⭐ **提示词文件与配置文件的写保护**（2026-10-22 加）。
+   *
+   * ── 为什么需要它 ──────────────────────────────
+   * `bilij_write` 的白名单是「家目录 + 前台工作区」，而**五份提示词和 config.json
+   * 全在家目录根下** ⇒ 模型可以一句话覆盖它们，**绕过面板编辑器的全部校验**
+   * （面板那边走 `writeDuty`/`writeReply`/… 有统一入口，工具这边是裸 `node:fs`）。
+   *
+   * 使用者的决定：**修改提示词可以让 `bilij_write` 承载**（不新开工具 ——
+   * 模型本来就会用 `bilij_write` 改家目录文件，新工具它未必想得起来），
+   * 但**必须带上硬校验**，且 **config.json 一律不许走工具改**（只能面板）。
+   *
+   * ── 设计要点 ────────────────────────────────
+   * · **没有 `force` / `skipCheck`** —— 一有开关，模型被拒后就会去找那个开关，
+   *   等于校验作废（与「额度闸不许自己绕」是同一个教训）。
+   * · 校验**只看内容**，不看是谁在写 ⇒ 面板和工具一视同仁。
+   */
+  const PROMPT_FILES = {
+    'duty.md': 'duty',
+    'report.md': 'report',
+    'comment.md': 'comment',
+    'reply.md': 'reply',
+    'dm.md': 'dm',
+  }
+
+  /**
+   * 内容校验（硬拦 + 软警告）。
+   *
+   * 返回 `{ ok, errors[], warnings[] }` —— errors 非空 ⇒ **不写盘**。
+   *
+   * ⚠️ **黑名单挡不住变体**（写成「无视上面那些规矩」就躲过去了）。
+   *    它提高门槛，不是保险箱 —— 真正的地线是 `hard-rules.md` 每轮硬注入。
+   */
+  const checkPromptText = (id, text) => {
+    const errors = []
+    const warnings = []
+    const t = String(text ?? '')
+
+    // ① 空内容：空的 reply.md 会让注入变空、规则整个消失
+    if (!t.trim()) errors.push('内容是空的 —— 写进去等于把这份规范删掉')
+
+    // ② 长度：写入处本来会**静默截断**到 20 万字符，这里改成明着报错
+    if (t.length > 200_000) {
+      errors.push(`太长（${t.length} 字符 > 200000）—— 原实现会静默截断，那样你看不出自己少了哪段`)
+    }
+
+    // ③ 不许把「无视 hard-rules」这类话写进可改文件
+    //    理由：hard-rules 是唯一不可改的底线，从可改文件里废掉它 = 从内部绕开
+    const banned = [
+      { re: /(忽略|无视|不要遵守|无需遵守|不必遵守)[^\n]{0,12}(hard-rules|硬约束|红线|上面|以上)/i, why: '像在让人无视 hard-rules / 红线' },
+      { re: /(绕过|跳过|不理会)[^\n]{0,12}(判重|额度|闸|限制)/i, why: '像在让人绕开判重或额度闸' },
+      { re: /bili_credential[^\n]{0,40}(脚本|直接调|手写)/i, why: '像在让人拿凭证绕过工具直接调接口' },
+    ]
+    for (const b of banned) {
+      if (b.re.test(t)) errors.push(`内容里有一句${b.why} —— 那等于从可改文件里废掉不可改的底线`)
+    }
+
+    // ④ 软警告：不拦，写进去但回执里说一句
+    //    章程只该留流程，纪律/禁止项该在 hard-rules
+    if (id === 'duty' && /(⛔|🔴)[^\n]{0,20}(不许|禁止|绝对不要|绝不能)/.test(t)) {
+      warnings.push('duty.md 里出现了禁止类措辞 —— 章程只该留流程，纪律请放 hard-rules.md')
+    }
+    // 已知死链：章程的「红线」一节早删了，指向它等于指个空
+    if (/章程[^\n]{0,10}(红线|边界)[^\n]{0,6}(一节|那段)/.test(t)) {
+      warnings.push('指向了「章程的红线一节」—— 那节早已删除，这是死链，改成 hard-rules.md')
+    }
+    // 引用了不存在的提示词文件
+    for (const ref of ['note.md', 'report.md.bak']) {
+      if (t.includes(ref)) warnings.push(`引用了不存在的文件 ${ref}`)
+    }
+
+    return { ok: errors.length === 0, errors, warnings }
+  }
+
+  /**
+   * 把工具的 `path` 映射到一个受保护的文件 id：
+   * · 提示词五份 ⇒ 返回 `{ kind: 'prompt', id }`
+   * · config.json ⇒ 返回 `{ kind: 'config' }`（一律禁止工具写）
+   * · 其它 ⇒ `null`（照常写）
+   *
+   * ⚠️ 比对用**归一化后的绝对路径**，否则 `./duty.md`、`sub/../duty.md` 就漏了。
+   */
+  const protectedTarget = (abs) => {
+    const base = basename(abs)
+    const inHomeRoot = resolve(dirname(abs)) === resolve(stateDir)
+    if (!inHomeRoot) return null            // reports/ 产物之类，不归这里管
+    if (base === 'config.json') return { kind: 'config' }
+    const id = PROMPT_FILES[base]
+    return id ? { kind: 'prompt', id } : null
+  }
+
   tool({
     name: 'bilij_write',
-    description: '往插件家目录里写文件（**写日报就用它**，路径见提示词里给的那个）。\n'
+    description: '往插件家目录里写文件（**写产物就用它**，路径见提示词里给的那个）。\n'
       + '⚠️ 沙箱只让前台会话写它**自己的工作区**，写不到家目录 ⇒ 所以要走这个工具。\n'
-      + '默认**覆盖**整个文件；要追加传 append: true。',
+      + '默认**覆盖**整个文件；要追加传 `append: true`。\n'
+      + '🔴 **改提示词文件（duty / report / comment / reply / dm .md）时本工具会自动校验**：\n'
+      + '  规则文件不能为空、不能塞「无视 hard-rules」这类话；不合格直接拒写。\n'
+      + '  建议先传 `dryRun: true` 试校验，通过了再正式写。\n'
+      + '⛔ **`config.json` 不能用本工具改** —— 那只能走面板（或 `bilij_config`）。',
     parameters: {
       path: { type: 'string', description: '文件路径（相对家目录或绝对，必须在插件家目录内）' },
       text: { type: 'string', description: '要写入的内容' },
       append: { type: 'boolean', description: 'true = 追加（默认 false = 覆盖）' },
+      dryRun: { type: 'boolean', description: 'true = 只校验不落盘（改提示词文件时建议先跑一次）' },
     },
     async execute(args) {
       const r = resolveInHome(args.path)
       if (!r.ok) return { ok: false, error: r.error }
+      const body = String(args.text ?? '')
+      const guard = protectedTarget(r.abs)
+
+      // ① config.json：一律不许走工具改（只能面板 / bilij_config）
+      if (guard?.kind === 'config') {
+        return {
+          ok: false,
+          error: 'config.json 不能用 bilij_write 改 —— 那会绕过 schema 校验。'
+            + '请用 `bilij_config` 工具，或者让使用者在面板上改。',
+        }
+      }
+
+      // ② 五份提示词：走硬校验（没有 force，别想绕）
+      if (guard?.kind === 'prompt') {
+        if (args.append) {
+          return { ok: false, error: '提示词文件不支持 append —— 会写出半份规范。请给完整正文、整份覆盖。' }
+        }
+        const chk = checkPromptText(guard.id, body)
+        if (!chk.ok) {
+          return {
+            ok: false,
+            blocked: true,
+            file: guard.id,
+            errors: chk.errors,
+            warnings: chk.warnings,
+            hint: '这几条没过，所以没写盘。改完再试；也可以先传 dryRun: true 只校验。',
+          }
+        }
+        if (args.dryRun) {
+          return { ok: true, dryRun: true, file: guard.id, chars: body.length, warnings: chk.warnings }
+        }
+        writeFileSync(r.abs, body, 'utf8')
+        const size = existsSync(r.abs) ? statSync(r.abs).size : 0
+        return {
+          ok: true, path: r.abs, mode: 'overwrite', bytes: size, chars: body.length,
+          promptFile: guard.id, warnings: chk.warnings,
+          note: '提示词已更新 —— 下一轮现读，即时生效（不用重启）。',
+        }
+      }
+
+      // ③ 其它文件：照旧
+      if (args.dryRun) return { ok: true, dryRun: true, note: '这个路径不受提示词校验约束，dryRun 无意义' }
       try {
         mkdirSync(dirname(r.abs), { recursive: true })
-        const body = String(args.text ?? '')
         if (args.append) appendFileSync(r.abs, body, 'utf8')
         else writeFileSync(r.abs, body, 'utf8')
         // ⭐ 回执带**写后的字节数** —— 让它能自证"真写进去了"，而不是以为自己写了
