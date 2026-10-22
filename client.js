@@ -966,7 +966,15 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-md] th,[data-bd-md] td{border:1px solid var(--dsw-alias-border-l2,#0000001a);
   padding:5px 9px;text-align:left;vertical-align:top;}
 [data-bd-md] th{background:var(--dsw-alias-bg-module-platform,#f5f6f7);font-weight:600;}
-[data-bd-md] img{max-width:100%;}
+[data-bd-md] img{max-width:100%;height:auto;border-radius:var(--dsw-radius-sm,8px);}
+/* ⭐ **独占一行的图**（2026-10-22 加）：居中 + 上下留白 + 限高。
+   ⚠️ 限高是为了竖屏截图 —— 产物里的图是从视频里截的，常常 16:9，
+      但也可能是竖屏；不限高会把一屏全占满、往下翻很费劲。
+   ⚠️ 这里要 display:block + margin:auto 才居中：
+      img 默认是 inline，父级 text-align:center 对它生效，
+      但图片下面会多一道行内基线留白（inline 元素的老问题）⇒ 用 block 更干净。 */
+[data-bd-md] .bd-figure{margin:10px 0;text-align:center;}
+[data-bd-md] .bd-figure img{display:block;max-width:100%;max-height:62vh;margin:0 auto;}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -1125,7 +1133,59 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         codes.push(c)
         return `\u0000${codes.length - 1}\u0000`
       })
-      // 链接：只放行 http(s)，其余（javascript: 等）原样当文字 —— 见下面的判据
+      /**
+       * ⭐⭐ **图片**（2026-10-22 加）。
+       *
+       * 🔴 为什么之前"连裂图都没有"：渲染器**根本没有图片语法** ⇒
+       *    ![](img/ep30-144.png) 被当成一段普通文字原样显示。
+       *    （有语法但地址错，才会看到裂图；没有语法就只是一串字符。）
+       *
+       * 🔴🔴 **必须先于"链接"那条规则执行**（2026-10-22 实测踩到）：
+       *    链接的正在表达式是 \[..\]\(..\)，它会把 ![](…) 里的 [..](..) 先吃掉，
+       *    于是得到一个孤零零的 "!" 加一个 <a>（实测输出就是
+       *    `!<a href="https://example.com/a.png">x</a>`）。
+       *    ⭐ 判据：**md 的行内语法里，互相包含的两种必须"更长的先跑"**
+       *      （图片是 ![..](..)，链接是 [..](..)，前者包含后者）。
+       *
+       * ⭐ **src 的三种形态都要认**：
+       *    ① img/x.png 相对路径 —— 产物里的实际写法，改写成我们自己的图片路由
+       *       （正文是塞进页面里的 HTML，浏览器解析相对路径会落到 /api/… 前缀上，
+       *        而那个地址没有路由）；
+       *    ② https://… 外链，原样用；
+       *    ③ data:image/… 内联，原样用。
+       *
+       * 🔴 **安全**：src 里的引号已被 escapeHtml 转成 &quot;，
+       *    所以不可能"闭合属性再插事件"；但仍然**只放行这三种形态**，
+       *    其他（javascript: / file: 等）一律**降级成纯文字**，不生成 <img>。
+       */
+      const imgSrc = (raw) => {
+        const s = String(raw).trim()
+        if (/^https?:\/\//i.test(s)) return s
+        if (/^data:image\//i.test(s)) return s
+        if (/^[a-zA-Z][\w+.-]*:/.test(s)) return null      // 其他协议：不认
+        if (s.startsWith("//")) return null                // 协议相对：不认（会变成外链）
+        /* ⚠️ 相对路径**去掉开头的 ./ 或 /，但保留中间的目录**。
+           原路径可能已经是 img/xxx.png（产物就是这么写的）⇒ 不能再补一个 img/，
+           否则变成 img/img/xxx.png（实测踩过：URL 里出现了两个 img/）。 */
+        const rel = s.replace(/^\.?\//, "")
+        /* 🔴🔴 **路径规则（2026-10-22 改了两次才对，写清楚）**：
+           后端路由是 `/api/<ns>/img/<相对产物目录的路径>`；
+           产物里的写法是 `img/ep30-144.png` —— **它本身就带 img/**（图片就存在 reports/img/ 下）。
+           ⇒ 所以这里**原样保留** rel，拼成 `/api/.../img/img/ep30-144.png`，
+             后端切成 `img/ep30-144.png`、再去 reports 下找 ⇒ 命中。
+           ❌ 第一版我"为了好看"把开头的 img/ 去掉了 ⇒ 后端收到 `ep30-144.png`
+             ⇒ 去 reports 根下找 ⇒ **404（没有这张图）**。
+           ❌ 再往前一版是在这里**没去**、但后端前缀也叫 img ⇒ 拼成 img/img/。
+           ⭐ 判据：**"URL 里的目录层级"必须和"磁盘上的目录层级"一一对应**，
+              不要为了 URL 好看去增删层级 —— 一一对应最不容易错。 */
+        return API + "/img/" + rel
+      }
+      t = t.replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, (whole, alt, src) => {
+        const u = imgSrc(src)
+        if (u === null) return whole                      // 不认识的协议：原样当文字
+        return `<img src="${u}" alt="${alt}" loading="lazy">`
+      })
+      // 链接：只放行 http(s)，其余（javascript: 等）原样当文字
       t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
         (_, txt, href) => `<a href="${href}" target="_blank" rel="noreferrer">${txt}</a>`)
       // 裸 URL（产物里 UP 链接常写成纯文本）
@@ -1237,6 +1297,22 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           continue
         }
         closeList()
+
+        /* ⭐ **整行只有一张图 ⇒ 单独成块，不并进段落**（2026-10-22 加）。
+           🔴 为什么必须单独处理：产物里的图是**独立一行**
+              ![](img/ep30-144.png)，若按普通段落处理，它会和**后面那行说明文字**
+              被 join(" ") 并成一句、塞进同一个 <p>：
+              ① 段落是行内流 ⇒ <img> 是 inline，会跟文字挤在同一行；
+              ② 两行被连成一行 ⇒ 换行丢了。
+           ⭐ 判据：**md 里"占满一整行的块级元素"都要在拼段落之前拦下来**，
+              否则它会被当成行内内容跟邻居粘在一起。
+           ⚠️ 只认"整行就是一个 img"；行内混着文字的仍走普通段落（那是合法的行内图）。 */
+        const soloImg = /^!\[([^\]\n]*)\]\(([^)\s]+)\)$/.exec(t)
+        if (soloImg) {
+          flushPara(); closeList(); closeQuote(); closeTable()
+          out.push(`<p class="bd-figure">${mdInline(t)}</p>`)
+          continue
+        }
 
         // 普通段落行（连续几行合成一段）
         paraBuf.push(t)

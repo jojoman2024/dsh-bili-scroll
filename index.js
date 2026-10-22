@@ -5534,6 +5534,56 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, name, exists, text })
     }
 
+    /**
+     * ⭐ **产物里的图片**（2026-10-22 加）。
+     *
+     * 🔴 为什么必须有这条路由：产物正文里写的是相对路径
+     *    `![第30集 · 02:24](img/ep30-144.png)`，而面板是个网页 ——
+     *    浏览器会把它解析成 `/api/bili-scroll-jojo/img/ep30-144.png`
+     *    （相对当前 API 前缀），**这个地址没人应答** ⇒ 图裂。
+     *    而且正文是走 `dangerouslySetInnerHTML` 塞进去的，
+     *    浏览器**根本读不到本地磁盘** ⇒ 不给路由就只能裂着。
+     *
+     * ⚠️ 支持子目录（产物可能把图放在 `img/` 下，也可能直接放 `reports/` 同级），
+     *    但**必须防路径穿越** —— 见下面的三道闸。
+     * ⚠️ 只放行图片扩展名：这条路由是"给产物配图用"，不该变成任意文件读取。
+     */
+    if (req.method === 'GET' && path.startsWith('/api/bili-scroll-jojo/img/')) {
+      const rel = decodeURIComponent(path.slice('/api/bili-scroll-jojo/img/'.length))
+      // ① 只允许图片扩展名
+      if (!/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(rel)) {
+        return sendJson(res, 400, { ok: false, error: '只给图片' })
+      }
+      // ② 不许 `..`、不许绝对路径、不许盘符（Windows 下 `C:` 会绕过 join）
+      if (rel.includes('..') || rel.startsWith('/') || rel.startsWith('\\') || /^[a-zA-Z]:/.test(rel)) {
+        return sendJson(res, 400, { ok: false, error: '路径不合法' })
+      }
+      // ③ 解析后的真实路径必须还在产物目录里（防止软链/奇怪写法绕过 ②）
+      const root = reportDirFor()
+      const file = resolve(root, rel)
+      if (!file.startsWith(resolve(root) + sep)) {
+        return sendJson(res, 400, { ok: false, error: '路径越界' })
+      }
+      if (!existsSync(file)) return sendJson(res, 404, { ok: false, error: '没有这张图' })
+      const MIME = {
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.bmp': 'image/bmp',
+      }
+      const ext = (file.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase()
+      try {
+        const buf = readFileSync(file)
+        res.writeHead(200, {
+          'Content-Type': MIME[ext] || 'application/octet-stream',
+          'Content-Length': buf.length,
+          // ⚠️ 产物图片是**追加**的（跑一轮多几张），给短缓存、别让用户看到旧图
+          'Cache-Control': 'no-cache',
+        })
+        return res.end(buf)
+      } catch (e) {
+        return sendJson(res, 500, { ok: false, error: String(e?.message ?? e) })
+      }
+    }
+
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
     if (req.method === 'GET' && path === '/api/bili-scroll-jojo/report') {
       const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
