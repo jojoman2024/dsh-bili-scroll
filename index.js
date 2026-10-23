@@ -2193,20 +2193,48 @@ export function apply(ctx, config) {
       const seen = readSeen().get(bvid)
       const alreadyCommented = Boolean(seen) && (seen.kind === '评论' || String(seen.rpid || '') !== '')
       /**
-       * ⭐ **参数名规整（2026-10-23）**
+       * ⭐⭐ **参数名规整（2026-10-23 修了两处，都是真机事故）**
        *
-       * 以前要让模型自己做映射：`rpid` 传 myRpid、`root`/`replyTo` 传 hisRpid ——
-       * 名字和含义对不上，是这次误读事故的一部分。
-       * 现在接受 `myRpid` / `hisRpid` 这两个**跟 `bilij_replies` 返回结构一一对应**的名字，
-       * 在这里规整到内部变量；老的 `rpid` / `root` / `replyTo` 照旧可用（后台那轮还在用）。
+       * ── 🔴 修一：**绝对不能写 `args`** ──────────────────────────
+       *   宿主在调工具前会把参数深冻：
+       *     `exec.arguments = deepFreeze(snapshotJsonValue(exec.arguments))`
+       *     （`@deepseek-ai/dsh-tools/lib/index.js`）
+       *   ⇒ 上一版这里写的是 `args.rpid = …` / `args.root = …`，
+       *     于是**只要模型按新提示词传 `myRpid`/`hisRpid` 就必崩**：
+       *       `Cannot add property rpid, object is not extensible`
+       *   2026-10-22 深夜那轮真机崩了 **5 次**，模型读不懂这个回执、
+       *   只好降级成"不带 id 的发新评论"，把回复变成了刷屏。
+       *   ⇒ 现在**只读 `args`、只写局部变量**。
+       *
+       * ── 🔴 修二：**方向原来是反的** ────────────────────────────
+       *   B站 的语义（`bilibili_api/comment.py` 原文）：
+       *     · `root`   = 「在哪条评论下」= **楼层根** = **我自己那条一级评论** = myRpid
+       *     · `parent` = 「回复哪条」   = **对方那条**               = hisRpid
+       *   而 MCP 的 `bili_reply(rpid, root)` 里 `parent` 直接取了 `rpid`
+       *   ⇒ **`rpid` 就是 hisRpid，`root` 就是 myRpid**。
+       *   上一版把 `myRpid` 塞进 `rpid`、`hisRpid` 塞进 `root`，正好对调
+       *   ⇒ 发出的楼中楼挂在**我自己楼下**，对方收不到通知。
+       *   （实测：传 root=321550113472/rpid=321549340480，B站 落成
+       *     root=321549340480、parent=321549340480 —— root 被服务端纠正，
+       *     parent 照单全收 ⇒ 那条回复根本没回到对方身上。）
+       *
+       * 老参数 `rpid` / `root` / `replyTo` 保留，**按 MCP 原义直通、不做翻转**
+       * （后台那轮 / 老提示词还在用；它们本来就是 B站 语义，翻过来反而错）。
+       * ⚠️ 去重账本的键必须是 **hisRpid** —— `bilij_replies` 就是拿
+       *    `source_id`（= hisRpid）查 `repliedAt` 的，键对不上就摘不掉。
        */
       const _myRpid = String(args.myRpid ?? '').trim()
       const _hisRpid = String(args.hisRpid ?? '').trim()
-      if (_myRpid) args.rpid = Number(_myRpid) || 0
-      if (_hisRpid) {
-        if (!Number(args.root)) args.root = Number(_hisRpid) || 0
-        if (!String(args.replyTo ?? '').trim()) args.replyTo = _hisRpid
-      }
+      const _oldRpid = Number(args.rpid) || 0
+      const _oldRoot = Number(args.root) || 0
+      const _oldReplyTo = String(args.replyTo ?? '').trim()
+
+      /** MCP 的 `rpid`（= B站 的 parent）= **被回复的那条** = hisRpid */
+      const rpid = Number(_hisRpid) || _oldRpid
+      /** MCP 的 `root`（= 楼层根）= **我那条一级评论** = myRpid */
+      const root = Number(_myRpid) || _oldRoot
+      /** 回复账本 / 额度账本的键：**永远是对方那条**（= hisRpid） */
+      const dedupeKey = _hisRpid || _oldReplyTo || (rpid ? String(rpid) : '')
 
       /**
        * ⭐ **这一下是"回别人的楼中楼"还是"发新评论"？**（判据在原有注释里，见下）
@@ -2215,8 +2243,15 @@ export function apply(ctx, config) {
        *    要读它。`const` 有 TDZ ⇒ 定义在它后面会直接
        *    `ReferenceError: Cannot access 'isReply' before initialization`（真会炸）。
        *    （2026-10-19：我第一版就把它留在了原位，是探针的 TDZ 检查抓出来的。）
+       *
+       * 🔴 **2026-10-23 修**：判据必须读**规整后的**变量，不能读 `args.rpid` / `args.replyTo`。
+       *    原来只认老参数名 ⇒ 模型按新提示词传 `hisRpid` 时，
+       *    `isReply` 会被判成 `false` ⇒ 这一下被当成「发新评论」：
+       *      · 撞上 `alreadyCommented` 判重闸（这个 BV 早评论过）⇒ **直接被拦**；
+       *      · 额度记到 `comments` 而不是 `replies`。
+       *    真机症状：模型明明在回楼中楼，却收到"已经评论过了不再重复评论"。
        */
-      const isReply = (Number(args.rpid) || 0) !== 0 || String(args.replyTo ?? '').trim() !== ''
+      const isReply = rpid !== 0 || dedupeKey !== ''
       /**
        * 🔴🔴 **判重闸不能拦「回楼中楼」**（2026-10-19 修，用户反馈）。
        *
@@ -2309,14 +2344,12 @@ export function apply(ctx, config) {
       let r
       try {
         r = await call('bili_reply', {
-          bvid, text: String(args.text ?? ''), rpid: Number(args.rpid) || 0,
-          // ⭐ `root`（2026-10-16）：回**楼中楼**时要带上"楼层根"。
-          //    实测（同年同日，真发+读回+删）：传 `root=parent=rpid` 能正确落在楼中楼；
-          //    传 `root=rpid, parent` 省略**也能**落对 ⇒ 两种都行。
-          //    但从 `bilij_replies` 拿到的是**通知里的 source_id**（他新写的那条），
-          //    它才是"要回的那条"；而 `root` 应当是**楼层根**。
-          //    ⇒ 让调用方显式传，拿不到就退回 rpid（与 MCP 的默认行为一致）。
-          root: Number(args.root) || 0,
+          bvid, text: String(args.text ?? ''), rpid,
+          // ⭐ `root` = 楼层根（我那条一级评论）。回楼中楼时必须带上，
+          //    否则 MCP 会拿 `rpid` 兜底当 root（`actual_root = root || rpid`）
+          //    ⇒ 变成回复我自己那条，对方收不到。
+          //    ⚠️ 两个值都来自上面规整后的变量，**不要再读 args**（它被冻住了）。
+          root,
         })
       } catch (e) {
         // ⚠️ 与 bilij_replies 同理：MCP 不可用时 `call` 会抛，包起来给人话。
@@ -2355,14 +2388,16 @@ export function apply(ctx, config) {
         }
         // ⭐ **记本轮的额度用量**（两种都记，但记在各自的格子里）——
         //    ⚠️ 必须在**真发成功之后**：先记后发的话，发失败也占掉额度。
-        //    ⚠️ 索引键：**回复**用 source_id（`replyTo`，没有就退回 rpid），**新评论**用 BV。
+        //    ⚠️ 索引键：**回复**用对方那条（`dedupeKey` = hisRpid），**新评论**用 BV。
         await markRoundUse(isReply ? 'replies' : 'comments',
-          isReply ? (String(args.replyTo ?? '').trim() || String(Number(args.rpid) || '')) : bvid)
+          isReply ? dedupeKey : bvid)
 
         // ⭐ 回复账本：只在**真回成功**时写 `repliedAt` ⇒ `bilij_replies` 才会把这条摘掉。
-        //    用 `args.replyTo`（= 通知里的 source_id / hisRpid）当键。
-        //    ⚠️ 不写的话，同一条会被反复列出来 ⇒ 可能重复回复同一个人。
-        const rt = String(args.replyTo ?? '').trim()
+        //    🔴 键**必须**是 `hisRpid`（= 通知里的 source_id）——
+        //    `bilij_replies` 就是拿 `d.source_id` 去查 `repliedAt` 的。
+        //    ⚠️ 2026-10-23 修：原来只读 `args.replyTo`，模型传新参数名时它是空的
+        //       ⇒ 账本写不进去 ⇒ **同一批回复下一轮又被列出来**（真机踩过）。
+        const rt = dedupeKey
         if (rt) {
           try {
             const led = readLedger()
@@ -2388,7 +2423,10 @@ export function apply(ctx, config) {
       + '🔁 **已经回过的不会再返回**（去重账本 `replies.json`）。\n'
       + '⭐⭐ **它会把对方说的话也取回来**：看 `他.内容`（真去 B站 评论接口拿的正文，不是通知标题）。\n'
       + '   ⚠️ 若 `他` 是 `null`，说明正文没取到（风控 / 评论已删）—— **那就别回**，别猜他说了什么。\n'
-      + '⭐ 回的时候：`rpid` 传 `我那条.id`，`root` 和 `replyTo` 都传 `他这条.id`。\n'
+      + '⭐ **回的时候照抄这两个字段就行**（名字与返回值一一对应）：\n'
+      + '   `bilij_reply({ bvid, myRpid: <我那条.id>, hisRpid: <他这条.id>, text })`\n'
+      + '   🔴 `hisRpid` **必须传** —— 它既是"回到谁那条下面"，也是去重账本的键；\n'
+      + '      不传的话下一轮还会把同一条列出来（可能重复回同一个人）。\n'
       + '⚠️ 这里**不含 @ 和点赞通知**（只看回复），那是两回事。',
     parameters: {
       all: { type: 'boolean', description: 'true = 连"已回过的"也列出来（默认只给还没回的）' },
@@ -2527,7 +2565,7 @@ export function apply(ctx, config) {
             + '。**对方说了什么看 `他.内容`** —— 那是真去 B站 取回来的正文。'
             + (noContent ? `\n⚠️ 其中 ${noContent} 条「他」是 null（正文没取到，可能风控或评论已删）`  :
                 '') 
-            + '\n回的时候：`rpid` 传 `我那条.id`，`root` 和 `replyTo` 都传 `他这条.id`。'
+            + '\n回的时候照抄：`bilij_reply({ bvid, myRpid: <我那条.id>, hisRpid: <他这条.id>, text })`'
           : `没有待回的（另有 ${others} 条是回复使用者人工评论的，已按规矩忽略）。`,
       }
     },
