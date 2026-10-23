@@ -1800,16 +1800,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         try { localStorage.setItem('bili-scroll-jojo/upgrade-dismissed', at) } catch { /* 存不了就只在本次生效 */ }
       }
       /**
-       * 🥚 **彩蛋用：记住「每条最多发几条」在**输入暗号之前**那个合法值**（2026-10-18）。
-       *
-       * 为什么不能用 `1` 兜底（第一版就是这么写的，被使用者指出来）：
-       *   5299 只是暗号，不该覆盖使用者原来的设置 ——
-       *   他原本填 3，输完暗号就该还是 3，而**不是**被我改成 1。
-       *
-       * ⚠️ 用 ref 而不是 state：它只是"记一下上次的值"，不参与渲染，
-       *    用 state 反而会多一次重渲染、也更容易和 5 秒轮询打架。
+       * ⚠️ 这里原来有一个 `perRoundBeforeEgg` ref —— 给 5299 暗号还原数值用的。
+       *    2026-10-24 暗号去掉了（私信开关直接常显），这个 ref 一并删除。
        */
-      const perRoundBeforeEgg = React.useRef(null)
       const [replyPer, setReplyPer] = React.useState(null)
       // ⭐ dsh 启动器路径的草稿（2026-10-17 加）。
       //    ⚠️ 与其它输入框同理：**不能让 5 秒轮询直接绑 cfg**，否则你打字打到一半会被冲掉。
@@ -3281,8 +3274,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
            *   · `mentionName` 是"发给/ @ 谁"，私信也发给他（`dm.md` 的规矩就是发这个人的）。
            * 只开私信、不开评论时，用户同样需要填这两项 ⇒ 不给展开他就没地方填。
            *
-           * ⚠️ 判据是 `sw('dmNotify')`（私信开关当前是否打开），
-           *    不是 `cfg.dmUnlocked`（那个只管"彩蛋有没有解锁、要不要显示私信开关本身"）。
+           * ⚠️ 判据是 `sw('dmNotify')`（私信开关当前是否打开）。
+           *    （2026-10-24 之前还有一个 `cfg.dmUnlocked` 参与判断 —— 那是暗号解锁机制，
+           *     暗号已去掉，这个字段不再影响任何显示。）
            */
           (sw('autoComment') || sw('dmNotify')) ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-row': '' },
@@ -3299,48 +3293,16 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 value: perRound ?? '',
                 onChange: (e) => setPerRound(e.target.value),
                 /**
-                 * 🥚 **彩蛋：在这里输入 5299 解锁私信通知**（2026-10-18 使用者要求）。
+                 * ⭐ **2026-10-24：原来的 5299 暗号已经去掉**（使用者要求私信开关直接放出来）。
+                 *    这里恢复成一个普通的数字输入框：离开时规整成 1~20 的合法值并落盘。
                  *
-                 * 使用者原话：「私信通知的开关和他的描述，应该是默认隐藏的。
-                 *   只有当用户在每轮最多发几条那里，第一次输入 5299 的时候，才会显示出来，
-                 *   并且就一直显示了，应该有个本地去记这件事的。」
-                 *
-                 * ⚠️ **只在 onBlur 判**，不在 onChange 判：
-                 *    onChange 是逐字符触发的 —— 打 "5299" 会经过 "5" "52" "529"，判早了没用；
-                 *    而且用 onChange 的话，把数字改成 5299 以外的合法值也会反复触发。
-                 *    onBlur 是"输完离开"那一刻，语义正好。
-                 *
-                 * ⚠️ **解锁后立刻回填成正常值**：5299 显然不是"每轮想发 5299 条评论"，
-                 *    那是输入这个暗号的副作用。所以解锁的同时把它改回原来的 1（或当前值），
-                 *    否则配置里会留下一个荒唐的 commentPerRound=5299，
-                 *    真跑一轮时会试图发 5299 条评论。
-                 *    ⭐ 这是这个彩蛋**最容易埋雷**的地方 —— 别忘了。
+                 * （历史：2026-10-18 加过一个彩蛋 —— 在这输 5299 解锁私信开关，
+                 *   解锁后还要把这个荒唐的数字还原成输入前的值，容易埋雷。
+                 *   现在暗号没了，那段逻辑一并删除。）
                  */
                 onBlur: () => {
-                  const raw = String(perRound ?? '').trim()
-                  if (raw === '5299' && !cfg.dmUnlocked) {
-                    /**
-                     * ⭐ 还原成**输入暗号之前那个值**（不是写死 1）。
-                     *    使用者的原话：「输入完 5299 之后，commentPerRound
-                     *    应该回归输入之前的设定才对。」
-                     *    ⇒ 他原本填 3，输完暗号就该还是 3。
-                     *    ⚠️ 兜底顺序：ref 记的 → 盘上 cfg 的 → 最后才 1。
-                     *        （ref 可能是 null：比如页面刚开、还没离开过这个输入框。）
-                     */
-                    const prevRaw = perRoundBeforeEgg.current ?? cfg.commentPerRound
-                    const prev = Math.max(1, Number(prevRaw) || 1)
-                    // ① 解锁（持久化在 config.json，换浏览器也在）
-                    patch({ dmUnlocked: true }, '私信通知')
-                    // ② 把暗号从"条数"里清掉，还原成输入前的值
-                    setPerRound(String(prev))
-                    patch({ commentPerRound: prev }, '每轮几条评论')
-                    note('已解锁「私信通知」—— 往下翻，在「说不说话」最下面', 'good')
-                    return
-                  }
-                  const n = Math.max(1, Number(perRound) || 1)
+                  const n = Math.max(1, Math.min(20, Number(perRound) || 1))
                   setPerRound(String(n))
-                  // ⭐ 记下"这次合法值"，供暗号命中时还原
-                  perRoundBeforeEgg.current = n
                   patch({ commentPerRound: n }, '每轮几条评论')
                 },
               })),
@@ -3447,14 +3409,25 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              * ⇒ 判据：**开关本身就说明了默认状态与独立性**，再解释一遍就是复述；
              *    那几句把一条简短说明撑成了四行。
              */
-          cfg.dmUnlocked ? h(ToggleRow, {
+          /**
+           * ⭐ **2026-10-24：去掉了暗号，这个开关常显。**
+           *
+           * 原设计是个彩蛋：要在「每轮最多发几条」里输 5299 才解锁（`cfg.dmUnlocked`）。
+           * 使用者后来说「直接默认放出来吧，不用输暗号了」—— 功能该被发现，
+           * 藏起来为难的是用户，也没带来任何好处。
+           *
+           * ⚠️ 保留 `dmUnlocked` 这个配置字段不删：老用户盘上可能还是 `true`，
+           *    删了 schema 会让他们的 config.json 多一条未知字段。
+           *    ⇒ 现在它**不再参与任何判断**，只是留着兼容。
+           */
+          h(ToggleRow, {
             label: '私信通知（发给你自己）',
             note: '挑中的视频会「私信」发给你，附视频链接。'
               + '\n条数与收件人「沿用上面『自动评论并 @ 你』那两项」 —— '
               + '所以那个开关关着时，这里的「最多几条」和「发给谁」同样生效。',
             on: sw('dmNotify'),
             onChange: (v) => patch({ dmNotify: v }, '私信通知'),
-          }) : null,
+          }),
 
           h(ToggleRow, {
             label: '回复评论（只回楼中楼）',
