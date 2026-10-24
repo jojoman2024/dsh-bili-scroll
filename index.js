@@ -4309,6 +4309,12 @@ export function apply(ctx, config) {
         return { started: false, why, error: msg }
       }
       const preset = await presetSvc.resolve()
+      // ⚠️ `resolve()` 只回 `{ id, broken? }` —— `broken` 是**激活失败原因**（字符串）。
+      //    坏的预设照样能 resolve 出来（面板要能列出它），但 `mount()` 时会抛。
+      //    这里**只记一条**，不拦：真挂了在 setup 里兜（那里才知道它的后果）。
+      if (preset.broken) {
+        log(`⚠️ 预设 ${preset.id} 当前是坏的（${preset.broken}）—— 这个前台会话可能缺工具`)
+      }
       // ⭐ 模型：面板里选了就用选的；没选就回落到「这个 profile 当前的默认」
       //    （照 memj 的做法取 `agentDefaultModel.currentSelection()`）。
       let selection = { provider: String(cfg.llmProvider || ''), model: String(cfg.llmModel || '') }
@@ -4338,38 +4344,73 @@ export function apply(ctx, config) {
         meta: { cwd: workspace.path, agentPreset: preset.id },
         agentOptions: { provider: selection.provider, model: selection.model },
         /**
-         * 🔒 **绝对防护**（2026-10-25 加）：把这个会话的工具锁成只剩插件自己的。
+         * 🔴🔴 **`setup` 现在【无条件】传**（2026-10-25 修）。
          *
-         * 为什么写在这里而不是"挑个窄预设"：
-         *   `setup` 是**创建窗口**里跑的（agent 还没 publish），
-         *   参数一是**这个 agent 自己的 scope ctx** —— `tools.restrict()` 明确要求
-         *   从 scoped ctx 调（从全局 ctx 调会抛错，它的报错就是说"那会遮蔽所有 agent"）。
-         *   官方自己给子代理做工具过滤也是这么写的（`dsh-subagent` 的
-         *   `applyChildComposition()` 里就一句 `childCtx.tools.restrict(filter)`）。
+         * ── 修之前错在哪 ──────────────────────────────
+         * 原来只在 `absoluteGuard` 开着时才给 `setup`，而**关掉时连 setup 都不给**，
+         * 注释还写着「让会话回到使用者当前默认预设的完整能力」——**那句话是错的**。
          *
-         * ⚠️ 几个实测/读源码确认过的边界（别改坏）：
-         *   ① **只能减，不能加** —— preset 定的那套是上限，这里只往下砍；
-         *   ② **只过滤"继承来的"**（全局层 + 祖先层），**不动 agent 自己那层**；
-         *   ③ 名字写错会**当场抛错**并列出全部合法名字 ⇒ 整个会话**建不出来**。
-         *      所以白名单不能手抄，必须用 `registeredToolNames`（注册处收集的真清单）。
-         *   ④ 名字里**绝不能有 `run_code`**（PTC 的保留传输名，点名就抛错）。
-         *   ⑤ **空数组会锁死一切**（`allow: []` ⇒ 没有任何工具可见）⇒ 必须判空后再传。
+         * `meta.agentPreset` **只是写进 session header 的元数据**，它**不会**触发挂载。
+         * 真正挂载只有一条路：`setup` 里调 `presets.mount(agentCtx, id)`
+         * （官方 `dsh-api-session-controller` 的 `composeAgent()` 就是这么做的）。
+         * ⇒ 不给 setup = **preset 压根不挂** = 会话只有**全局层**。
          *
-         * ⚠️ 关掉开关时**什么都不传**（连 `setup` 都不给）——
-         *    让会话回到"使用者当前默认预设"的完整能力，而不是传个空 filter。
+         * 而 Web 端把 agent 面全禁了（`dsh-web-app/cordis.patch.yml` L430-470 明写：
+         * 「Web surface disables them here and lets each session mount a preset instead」，
+         * 里面就有 `tool-pwsh` / `tool-fs` / `tool-fs-search` / `tool-jobs` 的 `disabled: true`）
+         * ⇒ **不挂 preset 反而更空**，只剩全局层的 `bilij_*`。
+         *
+         * 🔴 **使用者实测发现的就是这个**：关掉绝对防护照样只有 `bilij_*`
+         * —— 不是开关没生效，是**从来没有过 preset 那一层**。
+         *
+         * ── 顺序为什么是「先 mount 再 restrict」──────────
+         * `restrict` 过滤的是**继承面**（全局层 + 所有祖先层）。
+         * preset 的工具挂在**独立 scope** 上，agent 通过 `bindScopeParent` 挂到它下面
+         * ⇒ 对 agent 来说 preset 是**祖先层**，正是 restrict 能过滤的范围。
+         * 先 mount 再 restrict，过滤的才是真实的继承面。
+         * （`view()` 是每次现算 `chainLayers`，所以两种顺序**最终效果相同**，
+         *   但先 mount 更安全：万一 preset 里也注册了同名工具，后挂的会覆盖。）
+         *
+         * ⚠️ 几个读源码确认过的边界（别改坏）：
+         *   ① `presets.mount()` 是 **async**，必须 await（`setup` 允许返回 Promise，
+         *      `dsh-agent-loop` 的 `setupAndPublish` 里就是 `await setup?.(...)`）；
+         *   ② `restrict` **只能减，不能加** —— preset 那套是上限；
+         *   ③ 名字写错会**当场抛错**并列出全部合法名字 ⇒ 整个会话**建不出来**，
+         *      所以白名单不能手抄，必须用 `registeredToolNames`（注册处收集的真清单）；
+         *   ④ 名字里**绝不能有 `run_code`**（PTC 保留传输名，点名即抛错）；
+         *   ⑤ **空数组会锁死一切**（`allow: []` ⇒ 没有任何工具可见）⇒ 判空后再传。
          */
-        ...(cfg.absoluteGuard === false ? {} : {
-          setup: (agentCtx) => {
-            const allow = registeredToolNames.filter((n) => n !== 'run_code')
-            if (allow.length === 0) {
-              // 理论上不会发生（插件自己就注册了 20 个）。真发生了**如实报错**，
-              // 不要静默传空数组 —— 那会让这个会话一个工具都用不了，且原因极难查。
-              throw new Error('绝对防护拿不到工具白名单（registeredToolNames 为空）—— 这不该发生，请报告。')
-            }
-            agentCtx.tools.restrict({ allow })
-            log(`绝对防护已生效：前台会话只放行 ${allow.length} 个插件工具`)
-          },
-        }),
+        setup: async (agentCtx) => {
+          // ① **先挂 preset** —— 与开关无关，这是会话拥有工具的前提。
+          //
+          // ⚠️ 挂载失败（预设坏了）**不能静默吞掉**：那会让这个会话缺一大堆工具，
+          //    表现是"模型说它没有某个工具"，而原因在别处。
+          //    但也**不能直接抛** —— 抛了连这一轮都开不起来。
+          //    ⇒ 记一条日志，让使用者能在面板/日志里看到。
+          // ⚠️ `presetSvc` 是外层已经解析好的那个（上面确认过 `resolve` 存在）。
+          try {
+            await presetSvc.mount(agentCtx, preset.id)
+            log(`前台会话已挂预设 ${preset.id}`)
+          } catch (e) {
+            // 🔴 如实记，别静默：挂不上 = 这个会话的工具面是残缺的。
+            log(`⚠️ 挂预设 ${preset.id} 失败：${e?.message ?? e} —— 这个会话只有全局层工具`)
+          }
+
+          // ② **再按开关决定要不要收窄**。
+          //    注意：这一步现在才"有事可做" —— 挂上 preset 之后才有真实的继承面可砍。
+          if (cfg.absoluteGuard === false) {
+            log('绝对防护：关（会话保留预设的完整能力）')
+            return
+          }
+          const allow = registeredToolNames.filter((n) => n !== 'run_code')
+          if (allow.length === 0) {
+            // 理论上不会发生（插件自己就注册了 20 个）。真发生了**如实报错**，
+            // 不要静默传空数组 —— 那会让这个会话一个工具都用不了，且原因极难查。
+            throw new Error('绝对防护拿不到工具白名单（registeredToolNames 为空）—— 这不该发生，请报告。')
+          }
+          agentCtx.tools.restrict({ allow })
+          log(`绝对防护已生效：前台会话只放行 ${allow.length} 个插件工具`)
+        },
       })
 
       // ③④ 挂工作区 + 设标题 + 提交首轮。整段包 try：失败要**回收会话**，不留孤儿。
