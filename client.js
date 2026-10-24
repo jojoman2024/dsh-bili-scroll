@@ -1737,7 +1737,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       // ⭐ 前台/后台（2026-10-16 加）：决定它跑在一个你看得见的会话里、还是后台子进程
       const [runMode, setRunMode] = React.useState(null)
       // ⚠️ `wsPath` / `wsBusy` 已删（2026-10-18）：随「会话建在哪个目录」那块一起去掉。
-      //    🔴 后端仍然支持 `frontWorkspace`（老配置照旧生效），只是**面板不再提供入口**。
+      //    🔴 后端那个 `frontWorkspace` 设置也**已经彻底删了**（2026-10-25）——
+      //    它既是会话 cwd、又是 `bilij_*` 的读写白名单根，"可配置"等于"白名单能被改"。
+      //    ⇒ 现在固定 `<家>\front-sessions`，`/status` 只回一个 `frontWorkspace`（纯展示）。
       // ⭐ 产物清单（2026-10-16 加：改成每条一份 md，不再是汇总日报）
       const [reports, setReports] = React.useState(null)
       const [reportFile, setReportFile] = React.useState(null)
@@ -2910,11 +2912,10 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
            *   · 「去到那个会话」更是排查时才用。
            * ⇒ 面板只留使用者真正要决定的事。
            *
-           * 🔴 **后端没动**：`cfg.frontWorkspace` / `st.frontWorkspace` /
-           *    `st.lastFrontSessionId` 在 `/status` 里照旧给，
-           *    `POST /config {frontWorkspace}` 也照旧接受 ——
-           *    所以老配置仍然生效，只是**面板不再提供改它的入口**。
-           *    ⚠️ 要恢复入口：把这两块 JSX 加回 `runMode === 'front'` 的分支里即可。
+           * 🔴 **后端那个设置也删了**（2026-10-25）：`cfg.frontWorkspace` 已从 schema /
+           *    DEFAULTS / POST 白名单里移除；`/status` 只回 `frontWorkspace`（纯展示），
+           *    `frontWorkspaceCustom` 已取消。路径固定 `<家>\front-sessions`，**不可配置**。
+           *    （原因：它同时是 `bilij_*` 的读写白名单根 —— 可配置就等于白名单能被改。）
            */
 
 
@@ -4116,6 +4117,26 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           h('div', { 'data-bd-h': '' }, '实验功能'),
           h('div', { 'data-bd-note': '' },
             '这里的开关会改变它的行为边界 —— 打开前先读完说明。'),
+
+          h(ToggleRow, {
+            label: '绝对防护',
+            /*
+             * 🔒 2026-10-25 加，**默认开**。
+             *
+             * ⚠️ 面板是**纯文本**（不渲染 markdown）⇒ 这里不能写星号，守卫会查。
+             * ⚠️ 文案里的「默认开启」必须与 index.js 的 schema 默认值一致 ——
+             *    两处不同步时用户会看到"写着默认开、实际却是关"。
+             * 🔴 说明里必须讲清"关掉会发生什么"，因为这一项**只能由使用者自己改**
+             *    （模型改不了）⇒ 使用者要知道自己在放开什么。
+             */
+            note: '默认开启。开着时：刷B站自己建的那个会话，只能用本插件提供的工具 —— '
+              + '读写文件也只能在插件家目录和它自己的工作区里。'
+              + '关掉则放开限制：那个会话会使用你当前默认预设的全部能力'
+              + '（能读写整个工作区、跑命令、上网等）。'
+              + '⚠️ 这一项只能在这里手动改，模型改不了它。',
+            on: sw('absoluteGuard'),
+            onChange: (v) => patch({ absoluteGuard: v }, '绝对防护'),
+          }),
 
           h(ToggleRow, {
             label: '管理员权限',

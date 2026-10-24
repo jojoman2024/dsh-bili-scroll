@@ -273,17 +273,18 @@ export const Config = !z ? undefined : z.object({
    * ⚠️ 前台模式**不需要** `dshBin` / `headlessProfile` / overlay，那几项只服务 headless 那条路。
    */
   runMode: z.string().default('headless').extra('volatile', true),
-  /**
-   * ⭐ **前台会话的工作区放哪儿**（2026-10-16 加）。
+  /* ⛔ `frontWorkspace` 已于 2026-10-25 **彻底移除**（使用者决定）。
    *
-   * 留空 = 用插件家目录下的 `front-sessions`（默认，向后兼容）。
-   * 非空 = 用使用者选的那个**绝对路径**（面板上的「选择目录」按钮调 DSH 原生
-   *       目录选择器 `ctx.uiWorkspace.pickDirectory()` 填进来）。
-   *
-   * ⚠️ 必须是绝对路径 —— DSH 的 `workspaceRegistry.create()` 会硬校验（memj 真机踩过：
-   *    相对路径报 `Workspace path is not fully qualified`）。
+   * 原本是"前台会话的工作区放哪儿"可配置，默认 `<家>\front-sessions`。
+   * 🔴 为什么删：这个值**同时是 `bilij_read` / `bilij_write` 的读写白名单根**
+   *    （见 `allowedRoots()`）⇒ 把它设成 `C:\` 就等于把整个盘交给模型。
+   *    而它又能被 `bilij_config` 改 —— **"锁的边界"成了"被锁的人能改的东西"**，
+   *    自指漏洞，白名单形同虚设。
+   * ⇒ 现在固定为 `<家>\front-sessions`（见 `frontWorkspacePath()`），**不可配置**。
+   * ⚠️ 老用户 `config.json` 里若还留着这个键，`normalize()` 只按 DEFAULTS 的键挑字段
+   *    ⇒ 不认它，等于自动忽略（不会报错）。
    */
-  frontWorkspace: z.string().default('').extra('volatile', true),
+
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 怎么写：full=写笔记（现状）· off=不写报告（只发评论）—— ⚠️ 2026-10-21 去掉了 `brief`（薄版） */
@@ -310,6 +311,21 @@ export const Config = !z ? undefined : z.object({
    *    ⇒ 做成**显式的、默认关的**开关，让使用者自己决定要不要承担这个风险。
    */
   adminMode: z.boolean().default(false).extra('volatile', true),
+  /**
+   * 🔒 **绝对防护**（2026-10-25 加，**默认开**）。
+   *
+   * 开着：**前台会话**（插件自己建的那个）被限制成**只能看见插件自己的工具**
+   *       （`bilij_*`，由 `ctx.tools.restrict({ allow })` 在该 agent 的 scope 上生效）。
+   * 关着：不限制，会话回到"使用者当前默认预设"的完整能力。
+   *
+   * 🔴🔴 **这个字段只允许使用者从面板改，模型一律改不了** ——
+   *    实现方式是 `bilij_config` 里显式拒绝（见那里的 `LOCKED_BY_PANEL`），
+   *    并**不**依赖它默认是 true。
+   *    为什么必须这样：这是**安全边界本身**。若模型能自己关掉它，
+   *    那就等于"被限制的人手里有这个限制的开关"，防护形同虚设 ——
+   *    与 `frontWorkspace` 那次是同一个病（那个已经彻底删掉了，见上面注释）。
+   */
+  absoluteGuard: z.boolean().default(true).extra('volatile', true),
   /**
    * ⭐ 人设（2026-10-15 改）：**不再从工作区的 AGENTS.md 取**。
    *
@@ -437,8 +453,10 @@ export function apply(ctx, config) {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
     freeformWatch: true, watchNote: '',
-    commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', frontWorkspace: '', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     adminMode: false,
+    /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
+    absoluteGuard: true,
     /** ⭐ 私信通知（2026-10-18）—— 复用 commentPerRound / mentionName，见 schema 里的注释 */
     dmNotify: false,
     /** 🥚 彩蛋解锁标记：输入 5299 后置 true，之后私信那一行就一直在面板上 */
@@ -1165,11 +1183,22 @@ export function apply(ctx, config) {
     try { return JSON.parse(JSON.stringify(v)) } catch { return String(v) }
   }
 
-  const tool = (spec) => ctx.tools.register(defineTool({
-    ...spec,
-    output: textOutput,
-    async execute(args, exec) { return safe(await spec.execute(args, exec)) },
-  }))
+  /**
+   * ⭐ **本插件注册过哪些工具名**（2026-10-25 加，给「绝对防护」的白名单用）。
+   *
+   * 为什么不写死一张常量表：那样**插件以后加工具就漏进白名单**（模型用不了它），
+   * 而改名的工具更糟 —— `restrict()` 遇到未知名字会**直接抛错**，
+   * 表现是"前台会话压根建不出来"。⇒ 从注册处**收集**，永远是真实清单。
+   */
+  const registeredToolNames = []
+  const tool = (spec) => {
+    if (spec?.name && !registeredToolNames.includes(spec.name)) registeredToolNames.push(spec.name)
+    return ctx.tools.register(defineTool({
+      ...spec,
+      output: textOutput,
+      async execute(args, exec) { return safe(await spec.execute(args, exec)) },
+    }))
+  }
 
   tool({
     name: 'bilij_whoami',
@@ -1603,20 +1632,109 @@ export function apply(ctx, config) {
    *    所以现在允许**两个根**：家目录（章程/人设/判重表）+ 前台工作区（产物）。
    *    其余一律拒绝 —— 否则等于给模型开了一个绕过沙箱的任意读写口。
    */
-  /** 允许读写的根（两个）。⚠️ 每次现算（工作区是可配置的）。 */
+  /** 允许读写的根（两个）。⚠️ 每次现算（工作区是固定的，但保留函数形式便于将来再变）。 */
   const allowedRoots = () => [stateDir, frontWorkspacePath()]
 
-  /** 把一个（可能相对的）路径解析成**白名单内**的绝对路径；越界一律拒绝。 */
+  /**
+   * 🔴🔴 **永远不许模型读写的文件**（2026-10-25 加）。
+   *
+   * `bili_credential.json` 里是 B站 的登录态（SESSDATA / bili_jct …）——
+   * 拿到它就能**以使用者身份**发评论、发私信、删东西。
+   * 而它就在**家目录根下**，也就是 `bilij_read` 的白名单里 ⇒ 原本读得到。
+   *
+   * 为什么这不是"多此一举的保险"（这条是实打实的攻击链）：
+   *   模型要发评论走的是 `bilij_reply`（插件代劳，不用它碰凭证）；
+   *   但一旦凭证进了**上下文**，它就可能被写进产物报告、贴进评论区、
+   *   或者拿去"自己想办法"绕过工具 —— 而评论/字幕/简介都是外部可控输入，
+   *   等于**给提示注入开了一条直通凭据的路**。
+   *
+   * ⚠️ 与"沙箱"的区别：沙箱挡的是破坏，读是放行的；这里挡的是**读取本身**。
+   * ⚠️ 插件自己**不经过这里**读凭证（`hasCredential()` / `loadCredential()` 直接读盘），
+   *    所以扫码登录、取字幕、发评论全都不受影响 —— 被挡的只有"模型伸手来拿"。
+   */
+  const SECRET_FILES = new Set(['bili_credential.json'])
+
+  /**
+   * 把一个（可能相对的）路径解析成**白名单内**的绝对路径；越界一律拒绝。
+   *
+   * 🔴🔴 **越界回执的写法很要紧**（2026-10-25 改）——
+   *    这不只是"报个错"，它决定模型**接下来还干不干活**。
+   *
+   * 原来的回执是：`只允许读写这两个目录里的东西（A 或 B），不接受：C`
+   * 问题在于它**没有告诉模型"那我现在还能做什么"**。实测里模型遇到这种"看起来不像
+   *   我能解决的问题"会倾向于**收尾/放弃整轮**（把"这条路不通"读成"任务做不了"）。
+   *
+   * ⇒ 现在回执里必须带四样（缺一不可）：
+   *   ① `bounded: true` —— 这是**策略边界**，不是工具坏了 / 路径写错了语法；
+   *   ② `allowedRoots` —— 到底能读哪儿，让它自己就能改对；
+   *   ③ `hint` —— **明确说"换个范围内的路径继续"**，而不是"算了"；
+   *   ④ `doNotConclude` —— 直接写死"不要因此结束这一轮"。
+   *
+   * ⚠️ 但**不能**说"去用别的工具绕过它"（比如"用 pwsh 读吧"）：
+   *    那等于教模型绕过沙箱，与"绝对防护"的整个目的相反。
+   *    所以 hint 只说"在这个边界内继续"，不说"换条路"。
+   *
+   * ⚠️ 边界**由代码判**，不看开关：`absoluteGuard` 关着时这里的边界也不变 ——
+   *    它约束的是"这个工具能碰哪些路径"，不是"这个会话能用哪些工具"。
+   */
   const resolveInHome = (p) => {
     const raw = String(p ?? '').trim()
-    if (raw === '') return { ok: false, error: '路径是空的' }
+    if (raw === '') {
+      return {
+        ok: false,
+        error: '路径是空的。',
+        bounded: false,
+        hint: '给一个路径再试：可以写相对家目录的（如 `duty.md`），也可以写绝对路径。',
+      }
+    }
     const roots = allowedRoots()
     // 相对路径按**第一个根**（家目录）解析（章程/判重表都在那儿）
     const abs = resolve(isAbsolute(raw) ? raw : join(roots[0], raw))
     // ⚠️ 用 `root + sep` 比对：防止 `/x/home-evil` 冒充 `/x/home` 的兄弟
     const hit = roots.find((r) => { const rr = resolve(r); return abs === rr || abs.startsWith(rr + sep) })
+
+    /**
+     * 🔒 **凭证拦截**（在"是否越界"之后判 —— 因为它**本来就在**白名单里）。
+     *
+     * ⚠️ 三个必须这样写的点：
+     * ① 用**归一化后的绝对路径**取 basename ⇒ `./bili_credential.json`、
+     *    `sub/../bili_credential.json` 都会被解析成同一个路径，漏不掉；
+     * ② **转小写比对** —— Windows 的文件系统大小写不敏感，
+     *    `BILI_CREDENTIAL.JSON` 能打开同一个文件，直接比原串会被绕过；
+     * ③ 放在这里（而不是只在 `bilij_read` 里）⇒ **读写两条路一起挡**，
+     *    不依赖每个工具都记得检查一遍（那种"记得就拦、忘了就漏"最危险）。
+     */
+    if (SECRET_FILES.has(basename(abs).toLowerCase())) {
+      return {
+        ok: false,
+        error: '这是登录凭证（B站 登录态），不由 AI 读取。',
+        /**
+         * ⚠️ 这里**不是** `bounded` —— 那条说的是"范围边界，换个路径就行"，
+         *    而这个是**绝对禁止**，换路径、换写法都不行。
+         *    分两个字段是为了让模型能分清"我改一下再试"与"这条路永远不通"。
+         */
+        forbidden: true,
+        hint: '想知道登录状态用 `bilij_whoami`（只回昵称和 mid，不吐 token）；'
+          + '要发评论/私信有 `bilij_reply` / `bilij_send_dm`，都不需要你碰凭证。',
+        doNotConclude: '这只是"这个文件不给你看"，不影响这一轮继续做别的 —— 不要因此结束整轮。',
+      }
+    }
+
     if (!hit) {
-      return { ok: false, error: `只允许读写这两个目录里的东西（${roots.join(' 或 ')}），不接受：${abs}` }
+      return {
+        ok: false,
+        // 保留原来那句（它信息最全），但补上下面的结构化字段。
+        error: `这个路径不在可读写范围内：${abs}`,
+        /**
+         * ⭐ 给模型看的三个字段 —— 目的是让它在**同一轮里换个正确路径继续**，
+         *    而不是把"越界"读成"任务失败"然后收尾。
+         */
+        bounded: true,
+        allowedRoots: roots,
+        hint: '这是本工具固定的范围（家目录 + 前台会话的工作区），不是故障、也不用重试同一个路径。'
+          + '换成这两个目录里的路径再来一次即可，这一轮可以继续往下做。',
+        doNotConclude: '不要因为这一次越界就结束整轮或跳过剩下的步骤。',
+      }
     }
     return { ok: true, abs }
   }
@@ -1624,14 +1742,19 @@ export function apply(ctx, config) {
   tool({
     name: 'bilij_read',
     description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 回复细则 reply.md / 判重表 seen.md / 产物 reports/*.md …）。\n'
-      + '⭐ **刷一轮读章程就用它** —— 前台会话的工作区是另一个目录，普通文件工具**读不到**家目录里的章程。',
+      + '⭐ **刷一轮读章程就用它** —— 前台会话的工作区是另一个目录，普通文件工具**读不到**家目录里的章程。\n'
+      + '🔒 **只能读两个地方**：插件家目录、以及刷B站自己那个会话的工作区。\n'
+      + '   ⛔ **`bili_credential.json` 读不到** —— 那是登录凭证，永远不对 AI 开放。\n'
+      + '   越界时回执里会带 `allowedRoots` —— 换个范围内的路径继续就行，**不要因此结束这一轮**。',
     parameters: {
       path: { type: 'string', description: '文件路径：相对家目录（如 `duty.md`）或绝对路径，都行' },
       maxChars: { type: 'number', description: '最多回多少字符（默认 60000，防止一次读爆上下文）' },
     },
     async execute(args) {
       const r = resolveInHome(args.path)
-      if (!r.ok) return { ok: false, error: r.error }
+      // ⚠️ 越界时 `r` 上带着 bounded / allowedRoots / hint / doNotConclude —— **要一起回给模型**，
+      //    只回 `error` 会让它以为"工具坏了"，然后倾向于收尾（这正是本次要治的）。
+      if (!r.ok) return { ok: false, ...r }
       if (!existsSync(r.abs)) {
         // ⚠️ 列一下家里有什么，省得它瞎猜（如实报错，而不是让它猜一个路径）
         let listing = []
@@ -1803,7 +1926,10 @@ export function apply(ctx, config) {
       + '🔴 **改提示词文件（duty / report / comment / reply / dm / persona .md）时本工具会自动校验**：\n'
       + '  规则文件不能为空、不能塞「无视 hard-rules」这类话；不合格直接拒写。\n'
       + '  建议先传 `dryRun: true` 试校验，通过了再正式写。\n'
-      + '⛔ **`config.json` 不能用本工具改** —— 那只能走面板（或 `bilij_config`）。',
+      + '⛔ **`config.json` 不能用本工具改** —— 那只能走面板（或 `bilij_config`）。\n'
+      + '🔒 **只能写两个地方**：插件家目录、以及刷B站自己那个会话的工作区。\n'
+      + '   ⛔ **`bili_credential.json` 也写不了** —— 那是登录凭证，永远不对 AI 开放。\n'
+      + '   越界时回执里会带 `allowedRoots` —— 换个范围内的路径继续就行，**不要因此结束这一轮**。',
     parameters: {
       path: { type: 'string', description: '文件路径（相对家目录或绝对，必须在插件家目录内）' },
       text: { type: 'string', description: '要写入的内容' },
@@ -1820,7 +1946,8 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       const r = resolveInHome(args.path)
-      if (!r.ok) return { ok: false, error: r.error }
+      // ⚠️ 越界时把 bounded / allowedRoots / hint / doNotConclude 一起回给模型（同 bilij_read）
+      if (!r.ok) return { ok: false, ...r }
       const body = String(args.text ?? '')
       const guard = protectedTarget(r.abs)
 
@@ -2690,10 +2817,34 @@ export function apply(ctx, config) {
   tool({
     name: 'bilij_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
-      + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`',
+      + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`\n'
+      + '🔒 有几个字段**只能由使用者在面板上改**，本工具会直接拒绝（目前是 `absoluteGuard` 绝对防护）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
-      if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) saveCfg(args.patch)
+      if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) {
+        // 🔒 **只能由使用者从面板改的字段**（2026-10-25 加）。
+        //
+        // 🔴 为什么要在工具层拦：`bilij_config` 是**配置唯一的模型侧写入口**
+        //    （面板走 `POST /config`、`bilij_setup` 只写 pythonPath ——
+        //     这两处模型都摸不到）。不拦这里，模型就能自己关掉自己的防护。
+        //
+        // ⚠️ 报错要**说清是权限问题**，别让模型以为"参数写错了"然后换个写法重试；
+        //    也别在提示里透露"怎样才能改"。
+        const LOCKED_BY_PANEL = {
+          absoluteGuard: '绝对防护',
+        }
+        const blocked = Object.keys(args.patch).filter((k) => k in LOCKED_BY_PANEL)
+        if (blocked.length > 0) {
+          return {
+            ok: false,
+            error: `${blocked.map((k) => `「${LOCKED_BY_PANEL[k]}」(${k})`).join('、')} 只能由使用者在面板上改，工具改不了。`,
+            hint: '这一项是安全边界，不属于模型可调范围。要改请让使用者在「实验功能」页手动切换。',
+            blockedFields: blocked,
+            config: cfg,
+          }
+        }
+        saveCfg(args.patch)
+      }
       return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow() }
     },
   })
@@ -4009,25 +4160,25 @@ export function apply(ctx, config) {
    *   ④ sessionTitle.rename + agent.followup    设标题 + 提交首轮
    */
 
-  /* ─────────────── 前台会话的工作区（2026-10-16 加，可配置） ───────────────
+  /* ─────────────── 前台会话的工作区（固定：`<家>\front-sessions`） ───────────────
    *
-   * ⭐ **为什么做成可配置**（使用者要求）：起初是硬编码的 `<家>\front-sessions`，
-   *    但"会话工作区放哪儿"是使用者的地盘 —— 有人想放统一的地方、有人想放别的盘。
-   *    ⇒ 给一个配置项 `frontWorkspace`，**默认空 = 用家目录下的 `front-sessions`**（向后兼容）；
-   *      非空就用他选的那个目录（由面板上的「选择目录」按钮调用 DSH 原生目录选择器填入）。
+   * 🔴🔴 **这里原来可配置，2026-10-25 已彻底固定下来**（使用者决定）。
+   *
+   * 为什么必须固定（不是"图省事"，是安全边界）：
+   *   `frontWorkspacePath()` 同时被两处用 ——
+   *     ① 前台会话的 cwd（DSH 的沙箱可写根）
+   *     ② **`bilij_read` / `bilij_write` 的读写白名单根**（见 `allowedRoots()`）
+   *   所以它一旦可配置，就等于"**白名单的边界可以被改**"；
+   *   而改它的口子不止面板（面板那个入口早就删了），还有 `bilij_config` ——
+   *   模型自己就能把它设成 `C:\`，于是两个文件工具对整个盘开放。
+   *   ⇒ 锁的边界不能是被锁的人能改的东西。**固定成常量。**
    *
    * ⚠️ **必须是绝对路径**（DSH 的 `workspaceRegistry.create()` 会做 `isAbsolute` 硬校验，
    *    相对路径报 `Workspace path is not fully qualified` —— memj 真机踩过）。
    * ⚠️ 目录**必须先建**（`create()` 会 realpath，不存在抛 ENOENT）。
    */
   const FRONT_WS_DEFAULT = 'front-sessions'
-  const frontWorkspacePath = () => {
-    const custom = String(cfg.frontWorkspace || '').trim()
-    if (custom !== '') return custom
-    return join(stateDir, FRONT_WS_DEFAULT)
-  }
-  /** 使用者有没有自己指定过（面板据此显示"用默认/用自定义"）。 */
-  const frontWorkspaceIsCustom = () => String(cfg.frontWorkspace || '').trim() !== ''
+  const frontWorkspacePath = () => join(stateDir, FRONT_WS_DEFAULT)
 
   /**
    * ⭐⭐ **"后台那一轮还在跑吗"**（2026-10-16 加 —— 面板顶部那个绿标就是它）。
@@ -4186,6 +4337,39 @@ export function apply(ctx, config) {
         sessionId,
         meta: { cwd: workspace.path, agentPreset: preset.id },
         agentOptions: { provider: selection.provider, model: selection.model },
+        /**
+         * 🔒 **绝对防护**（2026-10-25 加）：把这个会话的工具锁成只剩插件自己的。
+         *
+         * 为什么写在这里而不是"挑个窄预设"：
+         *   `setup` 是**创建窗口**里跑的（agent 还没 publish），
+         *   参数一是**这个 agent 自己的 scope ctx** —— `tools.restrict()` 明确要求
+         *   从 scoped ctx 调（从全局 ctx 调会抛错，它的报错就是说"那会遮蔽所有 agent"）。
+         *   官方自己给子代理做工具过滤也是这么写的（`dsh-subagent` 的
+         *   `applyChildComposition()` 里就一句 `childCtx.tools.restrict(filter)`）。
+         *
+         * ⚠️ 几个实测/读源码确认过的边界（别改坏）：
+         *   ① **只能减，不能加** —— preset 定的那套是上限，这里只往下砍；
+         *   ② **只过滤"继承来的"**（全局层 + 祖先层），**不动 agent 自己那层**；
+         *   ③ 名字写错会**当场抛错**并列出全部合法名字 ⇒ 整个会话**建不出来**。
+         *      所以白名单不能手抄，必须用 `registeredToolNames`（注册处收集的真清单）。
+         *   ④ 名字里**绝不能有 `run_code`**（PTC 的保留传输名，点名就抛错）。
+         *   ⑤ **空数组会锁死一切**（`allow: []` ⇒ 没有任何工具可见）⇒ 必须判空后再传。
+         *
+         * ⚠️ 关掉开关时**什么都不传**（连 `setup` 都不给）——
+         *    让会话回到"使用者当前默认预设"的完整能力，而不是传个空 filter。
+         */
+        ...(cfg.absoluteGuard === false ? {} : {
+          setup: (agentCtx) => {
+            const allow = registeredToolNames.filter((n) => n !== 'run_code')
+            if (allow.length === 0) {
+              // 理论上不会发生（插件自己就注册了 20 个）。真发生了**如实报错**，
+              // 不要静默传空数组 —— 那会让这个会话一个工具都用不了，且原因极难查。
+              throw new Error('绝对防护拿不到工具白名单（registeredToolNames 为空）—— 这不该发生，请报告。')
+            }
+            agentCtx.tools.restrict({ allow })
+            log(`绝对防护已生效：前台会话只放行 ${allow.length} 个插件工具`)
+          },
+        }),
       })
 
       // ③④ 挂工作区 + 设标题 + 提交首轮。整段包 try：失败要**回收会话**，不留孤儿。
@@ -5456,9 +5640,9 @@ export function apply(ctx, config) {
       seenFile,
       // ⭐ 前台模式：最近一次跑出来的会话 id（面板拿它做「去到会话」跳转）
       runMode: cfg.runMode,
-      // ⭐ 前台工作区（2026-10-16）：面板要显示"现在用哪个目录"与"是默认还是自定义"
+      // ⭐ 前台工作区（2026-10-16）：面板要显示"现在用哪个目录"
+      //    ⚠️ `frontWorkspaceCustom` 已于 2026-10-25 删除 —— 它固定了，没有"自定义"这回事了。
       frontWorkspace: frontWorkspacePath(),
-      frontWorkspaceCustom: frontWorkspaceIsCustom(),
       // ⭐ 产物目录（每条一份 md 写在这里）
       reportDir: reportDirFor(),
       // ⭐⭐ **后台那一轮还在跑吗**（面板顶部那个绿标）——
@@ -5577,7 +5761,9 @@ export function apply(ctx, config) {
         'commentPerRound', 'mentionName', 'mentionInComment',
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
-        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'frontWorkspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
+        'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
+        // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
+        'absoluteGuard',
         'personaEnabled', 'personaMaxChars',
         'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
@@ -5607,22 +5793,10 @@ export function apply(ctx, config) {
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.floor(Number(patch.replyPerRound) || 1))
       if ('commentPerRound' in patch) patch.commentPerRound = Math.max(1, Math.floor(Number(patch.commentPerRound) || 1))
       if ('personaMaxChars' in patch) patch.personaMaxChars = Math.max(500, Math.min(Number(patch.personaMaxChars) || 8000, 100000))
-      // ⭐ **前台工作区要校验**（2026-10-16）：必须是绝对路径，且**能建出来**
-      //    —— 因为 DSH 的 `create()` 会 realpath，路径不存在会抛 ENOENT（memj 真机踩过）。
-      //    在这里**当场**报错，比让使用者等到跑一轮才发现要好。
-      if ('frontWorkspace' in patch) {
-        const raw = String(patch.frontWorkspace ?? '').trim()
-        if (raw === '') {
-          patch.frontWorkspace = ''            // 空 = 用默认（家目录下的 front-sessions）
-        } else if (!isAbsolute(raw)) {
-          return sendJson(res, 400, { ok: false, error: `工作区必须是**绝对路径**（DSH 会校验）：${raw}` })
-        } else {
-          try { mkdirSync(raw, { recursive: true }) } catch (e) {
-            return sendJson(res, 400, { ok: false, error: `这个目录建不出来：${raw}（${e?.message ?? e}）` })
-          }
-          patch.frontWorkspace = raw
-        }
-      }
+      // ⛔ `frontWorkspace` 的校验与落盘已于 2026-10-25 整段删除 ——
+      //    那个设置已经不存在了（它既是会话 cwd、又是 `bilij_*` 的读写白名单根，
+      //    可配置就等于"白名单能被改"，见 `frontWorkspacePath()` 那段注释）。
+      //    ⇒ 现在它不在 POST 白名单里，传上来也会被忽略。
       saveCfg(patch)
       log(`设置已更新：${JSON.stringify(patch)}`)
       return sendJson(res, 200, { ok: true, config: cfg })
