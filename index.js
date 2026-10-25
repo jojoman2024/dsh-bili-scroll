@@ -878,21 +878,34 @@ export function apply(ctx, config) {
      *   不等就查 ⇒ 一律返回 null ⇒ 每条都报"落点未核实"，
      *   自检等于白做（而且是**假阴性**：看着像没落到，其实落对了）。
      *   ⚠️ 间隔不能太密：B站 评论接口有风控（约 100~180 次请求出 -352）。
+     *
+     * 🔴🔴 **2026-10-25 二次修：`ps=30` 太小，导致"永远查不到"**。
+     *   原来固定 `ps=30` ⇒ 只扫**最近 30 条**楼中楼。
+     *   而热门楼动辄 60~80 条回复（实测「凡瑞孚」那楼 60+、「AR丶陌言」那楼 80+），
+     *   新发的回复排在 30 条之外 ⇒ **每次探测都 miss** ⇒ 满屏"落点未核实"。
+     *   表现出来像被限流，其实**根本没限流，是查错了范围**。
+     *   ⇒ 现在 `ps=50`（接口上限附近），查不到再翻第二页。
      */
-    const delays = [0, 1500, 2500]
+    const delays = [0, 1800, 3000]
+    const fetchPage = async (cand, pn) => {
+      try {
+        const j = await biliGet(
+          `https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${aid}&root=${cand}&ps=50&pn=${pn}`, cookie)
+        return Array.isArray(j?.data?.replies) ? j.data.replies : []
+      } catch { return [] }
+    }
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt] > 0) await new Promise(res => setTimeout(res, delays[attempt]))
       // 先按"我们以为的楼层根"查；查不到再拿它自己当根试一次（覆盖 root 被服务端纠正的情况）
       for (const cand of [String(rootId || ''), String(newRpid)].filter(Boolean)) {
-        try {
-          const j = await biliGet(
-            `https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${aid}&root=${cand}&ps=30`, cookie)
-          const list = Array.isArray(j?.data?.replies) ? j.data.replies : []
+        for (const pn of [1, 2]) {
+          const list = await fetchPage(cand, pn)
+          if (!list.length) break          // 这一页空了，后面更不会有
           const hit = list.find(x => String(x.rpid) === String(newRpid))
           if (hit) {
             return { root: String(hit.root ?? cand), parent: String(hit.parent ?? 0) }
           }
-        } catch { /* 换下一个候选 */ }
+        }
       }
     }
     return null
@@ -3156,6 +3169,32 @@ export function apply(ctx, config) {
         try {
           detail = await fetchReplyDetail(c.bvid, c.hisRpid, cookie)
         } catch { /* 单条失败不影响其它 */ }
+        /**
+         * ⭐⭐⭐ **这条到底该用哪种回法**（2026-10-25 改）。
+         *
+         * 旧判据「`myRpid` 在不在插件白名单里」**是错的**：
+         * `myRpid` 这里是通知里的 `target_id`（对方那条一级评论），
+         * 只要回复是冲着一级评论去的，它**永远不在白名单** ⇒ 一律给 `replyToRpid`
+         * ⇒ 实测连着 3 条楼中楼全被前置校验拒掉，白跑三轮。
+         *
+         * ✅ 现在**直接问 B站**：`hisRpid` 这条本身是不是楼中楼？
+         *    · 是（有 root/parent）⇒ 用 `myRpid + hisRpid`；
+         *    · 不是 ⇒ 它本身就是一级评论 ⇒ 用 `replyToRpid`；
+         *    · 探不出来 ⇒ 退回老判据（总能发一次，发歪还有前置校验兜）。
+         */
+        let howTo
+        if (detail && (detail.root || detail.parent)) {
+          const itsRoot = String(detail.root || detail.parent || c.myRpid || '')
+          howTo = itsRoot
+            ? `bilij_reply({ bvid: '${c.bvid}', myRpid: '${itsRoot}', hisRpid: '${c.hisRpid}', text })`
+            : `bilij_reply({ bvid: '${c.bvid}', replyToRpid: '${c.hisRpid}', text })`
+        } else if (detail) {
+          howTo = `bilij_reply({ bvid: '${c.bvid}', replyToRpid: '${c.hisRpid}', text })`
+        } else {
+          howTo = (wideOpen && !mine.has(c.myRpid))
+            ? `bilij_reply({ bvid: '${c.bvid}', replyToRpid: '${c.hisRpid}', text })`
+            : `bilij_reply({ bvid: '${c.bvid}', myRpid: '${c.myRpid}', hisRpid: '${c.hisRpid}', text })`
+        }
         if (i < collected.length - 1) await new Promise(res => setTimeout(res, 200))
         out.push({
           bvid: c.bvid,
@@ -3174,9 +3213,7 @@ export function apply(ctx, config) {
           //    （即别人回复的是模型手动发的评论）。那种情况没有可靠的"楼层根"，
           //    ⇒ 改用 `replyToRpid` 回（落在对方那条下面），**不要**传 myRpid。
           在插件评论下: mine.has(c.myRpid) || undefined,
-          howToReply: (wideOpen && !mine.has(c.myRpid))
-            ? `bilij_reply({ bvid: '${c.bvid}', replyToRpid: '${c.hisRpid}', text })`
-            : `bilij_reply({ bvid: '${c.bvid}', myRpid: '${c.myRpid}', hisRpid: '${c.hisRpid}', text })`,
+          howToReply: howTo,
           mid: c.mid,
           时间: c.时间,
           已回过: c.已回过,
