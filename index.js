@@ -806,16 +806,30 @@ export function apply(ctx, config) {
     if (!rpid || !cookie) return null
     const aid = await bvidToAid(bvid, cookie)
     if (!aid) return null
-
+    /**
+     * ⭐ **2026-10-25 加：顺带把 `root` / `parent` 取回来**。
+     *
+     * 为什么：`bilij_reply` 发完要做**落点自检** —— B站 的回复接口
+     * 写错位置**不会报错**（服务端会静默纠正成它认为对的样子，照回 success）。
+     * ⇒ 只有读回 `root`/`parent` 才知道它到底挂在哪。
+     *
+     * ⚠️ 这两个字段是**可选**的：老调用方（`bilij_replies` 取正文）只看 内容/昵称/时间，
+     *    多两个字段不影响它们；缺的时候就是 `undefined`，自检那边会当成"未核实"。
+     */
     // ① 单条详情
     try {
       const j = await biliGet(`https://api.bilibili.com/x/v2/reply/detail?type=1&oid=${aid}&root=${rpid}`, cookie)
       const root = j?.data?.root
       if (root?.content?.message) {
+        // 目标评论可能在 `root.replies[]` 里（楼中楼的情况）
+        const inList = Array.isArray(root.replies) ? root.replies.find(x => String(x.rpid) === String(rpid)) : null
+        const self = inList || root
         return {
-          内容: String(root.content.message),
-          昵称: root.member?.uname || '',
-          时间: Number(root.ctime) || 0,
+          内容: String(self.content?.message || root.content.message),
+          昵称: self.member?.uname || root.member?.uname || '',
+          时间: Number(self.ctime || root.ctime) || 0,
+          root: inList ? (inList.root ?? root.rpid) : (root.root ?? root.rpid),
+          parent: inList ? (inList.parent ?? root.rpid) : (root.parent ?? 0),
         }
       }
     } catch { /* 换下一种 */ }
@@ -830,10 +844,57 @@ export function apply(ctx, config) {
           内容: String(hit.content.message),
           昵称: hit.member?.uname || '',
           时间: Number(hit.ctime) || 0,
+          root: hit.root ?? rpid,
+          parent: hit.parent ?? 0,
         }
       }
     } catch { /* 落空 */ }
 
+    return null
+  }
+
+  /**
+   * ⭐⭐⭐ **落点探测：知道新 rpid 和楼层根，直接读回它挂在哪**（2026-10-25 加）
+   *
+   * ── 为什么不能用 `fetchReplyDetail`（真机验证过）─────────
+   *   `reply/detail?root=<新rpid>` 和 `reply/reply?root=<新rpid>` 对**楼中楼回复**
+   *   都取不到 —— 它们要的是**楼层根**，不是"回复本身那条的 id"。
+   *   ⇒ 两条路都返回 null ⇒ 自检永远报"落点未核实"，**等于白做**。
+   *   （实测：发出去的 rpid=321794936848 / root=321792360672，
+   *     只有 `reply/reply?root=321792360672` 才找得到它。）
+   *
+   * ── 正解 ───────────────────────────────────────────
+   *   刚发出去的那条该挂在哪，调用方**本来就知道** ⇒ 直接拿那个 root 去列表里按 rpid 找。
+   *
+   * @returns {{root:string,parent:string}|null}  读不到返回 null
+   */
+  const probeReplyLanding = async (bvid, newRpid, rootId, cookie) => {
+    if (!newRpid || !cookie) return null
+    const aid = await bvidToAid(bvid, cookie)
+    if (!aid) return null
+    /**
+     * 🔴 **必须重试几次**（2026-10-25 实测）。
+     *   刚发出去的那条**不会立刻出现在评论列表里** —— 实测要等 3~5 秒。
+     *   不等就查 ⇒ 一律返回 null ⇒ 每条都报"落点未核实"，
+     *   自检等于白做（而且是**假阴性**：看着像没落到，其实落对了）。
+     *   ⚠️ 间隔不能太密：B站 评论接口有风控（约 100~180 次请求出 -352）。
+     */
+    const delays = [0, 1500, 2500]
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt] > 0) await new Promise(res => setTimeout(res, delays[attempt]))
+      // 先按"我们以为的楼层根"查；查不到再拿它自己当根试一次（覆盖 root 被服务端纠正的情况）
+      for (const cand of [String(rootId || ''), String(newRpid)].filter(Boolean)) {
+        try {
+          const j = await biliGet(
+            `https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${aid}&root=${cand}&ps=30`, cookie)
+          const list = Array.isArray(j?.data?.replies) ? j.data.replies : []
+          const hit = list.find(x => String(x.rpid) === String(newRpid))
+          if (hit) {
+            return { root: String(hit.root ?? cand), parent: String(hit.parent ?? 0) }
+          }
+        } catch { /* 换下一个候选 */ }
+      }
+    }
     return null
   }
 
@@ -1071,6 +1132,39 @@ export function apply(ctx, config) {
 
   const seenCount = () => readSeen().size
 
+  /**
+   * ⭐⭐ **「不判重」总闸**（2026-10-25 加）—— 一处实现，四处共用。
+   *
+   * —— 它解决什么问题 ——
+   * 使用者明确说"不要判重、全都给我看"时（例：要翻某个 UP 主的全部投稿），
+   * 现在的 `bilij_user_videos` 依然会**把判重表里有的剔掉** ⇒
+   * 实测：该号 `total: 6` 却只回了 **1** 条，另外 5 条被静默吞掉。
+   * ⚠️ 最坑的是**看起来像"他只有这一个视频"**（`skippedSeen` 藏在回执角落里）。
+   *
+   * —— 语义（与 `bilij_reply` 的 force/repeat 完全一致，别各搞一套）——
+   *   · **管理员权限关着** ⇒ `force` 一律降级成 `false`，判重照旧；
+   *   · **管理员权限开着 + 传了 force:true** ⇒ **不读判重表**，原样全给。
+   *
+   * 🔴 为什么必须挂管理员权限：判重表是防"白读字幕、白烧 token"的最后一道闸，
+   *    让它变成模型自己就能随手关掉的东西，等于把闸拆了。
+   *    ⚠️ 所以这里**不接受** `absoluteGuard` 那个开关来代偿 —— 那是另一套边界。
+   */
+  const resolveForce = (wantForce) => {
+    const admin = cfg.adminMode === true
+    const force = admin && wantForce === true
+    /** 想用但没权限 ⇒ 回执里说实话，否则模型会以为是参数没写对而反复重试 */
+    const note = (!admin && wantForce === true)
+      ? '⚠️ 你传了 force，但**「管理员权限」是关着的** ⇒ 参数被忽略，判重表照旧生效。'
+        + '要豁免得让使用者在面板「实验功能」里打开那个开关。'
+      : ''
+    return { admin, force, note }
+  }
+
+  /** `force` 参数的标准描述 —— 四个工具共用同一句话，免得行为一样说法不一样 */
+  const FORCE_DESC = '不判重：**不读判重表**，把结果原样全给（默认 false = 照常剔掉看过的）。'
+    + '⚠️ 两种情况下会被降级成 false：①「管理员权限」关着；②使用者没在对话里明确让你不判重。'
+    + '传了但没权限时，回执里的 `forceIgnored` 会明说。'
+
   /* ─────────────── 账号表 accounts.md（2026-10-18 加） ───────────────
    *
    * ⭐ **它解决什么问题**：使用者说「关注 AIGC深一度 这个 UP 主」时，
@@ -1223,6 +1317,7 @@ export function apply(ctx, config) {
       num: { type: 'number', description: '返回几条（默认取设置里的「看多少条」，最大 50）' },
       order: { type: 'string', description: 'totalrank=综合 / click=播放 / pubdate=最新 / dm=弹幕（不填用设置里的）' },
       days: { type: 'number', description: '只看最近几天（0/不填 = 不过滤；不填时用设置里的值）' },
+      force: { type: 'boolean', description: FORCE_DESC },
     },
     async execute(args) {
       const order = String(args.order || cfg.searchOrder || 'totalrank')
@@ -1255,8 +1350,10 @@ export function apply(ctx, config) {
         let obj = r
         if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON 就算了 */ } }
         const all = Array.isArray(obj?.videos) ? obj.videos : []
-        const seen = readSeen()
-        const fresh = all.filter((v) => v?.bvid && !seen.has(v.bvid))
+        // ⭐ 不判重（2026-10-25 加）：开了管理员权限且本人明确要求时，**整条跳过判重表**
+        const { force, note } = resolveForce(args.force)
+        const seen = force ? null : readSeen()
+        const fresh = force ? all.filter((v) => v?.bvid) : all.filter((v) => v?.bvid && !seen.has(v.bvid))
         const skipped = all.length - fresh.length
         const size = poolAdd(fresh)              // ⚠️ 只把**新鲜的**并入池
         const target = poolTarget()
@@ -1265,6 +1362,8 @@ export function apply(ctx, config) {
           // ⭐ 把"已看过的"从本次结果里**剔掉**，模型根本看不到它们 ⇒ 不会再去读
           videos: fresh,
           skippedSeen: skipped,
+          ...(force ? { forceApplied: true } : {}),
+          ...(note ? { forceIgnored: note } : {}),
           // ⚠️ 这几个字段是**插件加的**（MCP 不返回它们）—— 给模型判断"够不够"
           poolCount: size,
           poolTarget: target,
@@ -1340,6 +1439,7 @@ export function apply(ctx, config) {
       num: { type: 'number', description: '返回几条（默认取设置里的「每次搜取回几条」，最大 50）' },
       order: { type: 'string', description: 'pubdate=最新（默认）/ click=播放 / stow=收藏' },
       keyword: { type: 'string', description: '在该 UP 主的视频里再按关键词过滤（可省）' },
+      force: { type: 'boolean', description: FORCE_DESC },
     },
     async execute(args) {
       /**
@@ -1442,8 +1542,20 @@ export function apply(ctx, config) {
         let obj = r
         if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON 就算了 */ } }
         const all = Array.isArray(obj?.videos) ? obj.videos : []
-        const seen = readSeen()
-        const fresh = all.filter((v) => v?.bvid && !seen.has(v.bvid))
+        /**
+         * ⭐ 不判重（2026-10-25 加）—— **这个工具最需要它**。
+         *
+         * 🔴 实测的事故：使用者说"直接去看我的视频"，该号 **6 个投稿**，
+         *    其中 5 个已进判重表 ⇒ 这里把 5 个剔掉，只回 **1 条**，
+         *    而 `total: 6` 与实际 `count: 1` **并排放着也不显眼** ⇒
+         *    表现成"他就只有这一个视频"。连续踩了三次。
+         *
+         * ⚠️ 默认**仍然是判重**（使用者定的：要显式 force 才全给）——
+         *    因为这条路在"随机刷一轮"里也会被调，那时候判重是对的、有用的。
+         */
+        const { force, note } = resolveForce(args.force)
+        const seen = force ? null : readSeen()
+        const fresh = force ? all.filter((v) => v?.bvid) : all.filter((v) => v?.bvid && !seen.has(v.bvid))
         const skipped = all.length - fresh.length
         const size = poolAdd(fresh)
         const target = poolTarget()
@@ -1451,6 +1563,8 @@ export function apply(ctx, config) {
           ...(obj && typeof obj === 'object' ? obj : { raw: r }),
           videos: fresh,
           skippedSeen: skipped,
+          ...(force ? { forceApplied: true } : {}),
+          ...(note ? { forceIgnored: note } : {}),
           /**
            * ⭐ **把"这个 uid 是怎么来的"一并回给模型**（2026-10-18）。
            * 为什么必要：使用者要的是"报出你选了谁" ——
@@ -2157,18 +2271,23 @@ export function apply(ctx, config) {
     parameters: {
       reset: { type: 'boolean', description: 'true = 清空重来（一般不用）' },
       num: { type: 'number', description: '最多列几条（默认 50）' },
+      force: { type: 'boolean', description: FORCE_DESC },
     },
     async execute(args) {
       if (args.reset) { poolStart(); return { ok: true, reset: true, count: 0, target: poolTarget(), enough: false } }
       if (candidatePool === null) return { ok: true, count: 0, target: poolTarget(), enough: false, list: [], hint: '还没搜过 —— 先调 bilij_search' }
-      const seen = readSeen()
+      // ⭐ 不判重（2026-10-25 加）：把池子里**所有**捞到过的列出来，含已看过
+      const { force, note } = resolveForce(args.force)
+      const seen = force ? null : readSeen()
       // ⭐ 池子里本身就**不含**看过的（`bilij_search` 入池前已滤），这里再滤一次纯属兜底
-      const all = [...candidatePool.values()].filter((v) => !seen.has(v.bvid))
+      const all = [...candidatePool.values()].filter((v) => force || !seen.has(v.bvid))
       const num = Math.max(1, Math.min(Number(args.num) || 50, 200))
       return {
         ok: true,
         count: all.length,
         target: poolTarget(),
+        ...(force ? { forceApplied: true } : {}),
+        ...(note ? { forceIgnored: note } : {}),
         // ⭐ 这就是"够不够"的判据 —— 让模型**不用自己估**
         enough: all.length >= poolTarget(),
         list: all.slice(0, num).map((v) => ({
@@ -2216,6 +2335,17 @@ export function apply(ctx, config) {
   tool({
     name: 'bilij_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
+      + '⭐⭐⭐ **三种情形，参数各不相同 —— 先认清你要哪一种**：\n'
+      + '   ① **发一条新的一级评论**（在视频下面留言，不针对任何人）\n'
+      + '      ⇒ 只给 `bvid` + `text`，**两个 id 都不要传**。\n'
+      + '   ② **回某个人的一级评论**（他发了条评论，你在他下面接话）\n'
+      + '      ⇒ 给 `replyToRpid` = **他那条评论的 id**（`bilij_comments` 返回的 `rpid` 就能直接用）。\n'
+      + '      ⚠️ 这时**不要**传 `myRpid` / `hisRpid` —— 那两个是情形③专用的。\n'
+      + '   ③ **回自己那栋楼里的楼中楼**（有人回复了插件发的那条评论）\n'
+      + '      ⇒ 给 `myRpid` + `hisRpid`，两个照抄 `bilij_replies` 的返回值。\n'
+      + '   🔴 **最常见的事故**：想回某个人的一级评论，却只传了 `hisRpid`（没传 `myRpid`）\n'
+      + '      ⇒ 插件没有楼层根可依，B站 会把这条落成**一条新的一级评论**，对方收不到通知。\n'
+      + '      要回一级评论请用 `replyToRpid`。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
       + '除非本人当场让你发（那时传 force: true）。\n'
       + '🔁 判重：**只有"真评论过"才会被拦**（已发成功的会记进 `seen.md`；再发同一个 BV 被拦，要硬发传 `repeat: true`）。\n'
@@ -2236,15 +2366,19 @@ export function apply(ctx, config) {
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
+      // ⭐⭐⭐ 2026-10-25 新增：**回某人的「一级评论」**专用
+      //    这是本工具第三种用法，前面一直没有参数能表达它 ⇒ 模型只能退化成"发新评论"。
+      replyToRpid: { type: 'string', description: '⭐ 回某个人的**一级评论**时用：他那条评论的 id（`bilij_comments` 返回的 `rpid` 直接填这儿）。⚠️ 与 myRpid/hisRpid 互斥，别混用。' },
       // ⭐ 新名字（2026-10-23）：跟 bilij_replies 的返回结构一一对上，模型不用再自己映射
       myRpid: { type: 'string', description: '⭐ 回楼中楼时用：`bilij_replies` 返回的 `我那条.id`（我那条评论的 id）' },
       hisRpid: { type: 'string', description: '⭐ 回楼中楼时用：`bilij_replies` 返回的 `他这条.id`（对方那条回复的 id）—— 等价于同时填 root 和 replyTo' },
       // 老名字保留（后台那轮 / 老提示词还在用）
-      rpid: { type: 'number', description: '【旧】要回复的评论 id（0/不填 = 发新评论）；建议改用 myRpid' },
-      root: { type: 'number', description: '【旧】楼层根评论 id；建议改用 hisRpid' },
+      rpid: { type: 'number', description: '【旧】要回复的评论 id（0/不填 = 发新评论）；建议改用 replyToRpid 或 hisRpid' },
+      root: { type: 'number', description: '【旧】楼层根评论 id；建议改用 myRpid' },
       replyTo: { type: 'string', description: '【旧】去重键；建议改用 hisRpid' },
       force: { type: 'boolean', description: '本人当场让你发的 ⇒ 传 true：同时越过「自动评论关着」与「本轮额度已满」两道闸（账照记）' },
-      repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
+      // 🔴 2026-10-25 修：这里原来**连着写了两遍 repeat**（重复的对象字面量属性），
+      //    后一个把前一个覆盖掉 —— 行为上没差，但它是坏味道，也瞒过了 code review。
       repeat: { type: 'boolean', description: '明知判重表里已有还硬发（默认 false = 被拦）' },
     },
     async execute(args) {
@@ -2261,17 +2395,19 @@ export function apply(ctx, config) {
        *      那种写法漏一处就是一个静默漏洞）。
        * ⚠️ 顺带把"被降级"这件事**告诉模型**（回执里带 `overridden`），
        *    否则它会以为是参数没写对、反复重试。
+       *
+       * ⭐ 2026-10-25：降级逻辑**搬到 `resolveForce` 里去了**（见文件上半部分），
+       *    因为 `bilij_search` / `bilij_user_videos` / `bilij_candidates` 也要同一个闸。
+       *    这里改成调它 —— 语义一字未变，只是**只有一份实现**。
        */
-      const admin = cfg.adminMode === true
-      const wantForce = args.force === true
+      const { admin, force, note: forceNote } = resolveForce(args.force)
       const wantRepeat = args.repeat === true
-      const force = admin && wantForce
       const repeat = admin && wantRepeat
       /** 想用但没权限时，往回执里塞一句实话（别让它蒙在鼓里） */
-      const authorityNote = (!admin && (wantForce || wantRepeat))
-        ? '⚠️ 你传了 force/repeat，但**「管理员权限」是关着的** ⇒ 参数被忽略，三道闸照样生效。'
-          + '要豁免得让使用者在面板「实验功能」里打开那个开关。'
-        : ''
+      const authorityNote = (!admin && wantRepeat)
+        ? (forceNote ? forceNote + '（`repeat` 同理，也被忽略了。）' : '')
+          + '⚠️ 你传了 repeat，但**「管理员权限」是关着的** ⇒ 参数被忽略，三道闸照样生效。'
+        : forceNote
 
       /**
        * 🔴 **准入闸要跟着 `mentionInComment` 走**（2026-10-19 改）。
@@ -2288,7 +2424,7 @@ export function apply(ctx, config) {
         return {
           ok: false,
           blocked: true,
-          overridden: (!admin && (wantForce || wantRepeat)) || undefined,
+          overridden: (!admin && (args.force === true || wantRepeat)) || undefined,
           hint: needsMention
             ? '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要通知谁」。'
             : '要发评论得先开着「自动评论并 @ 你」（当前「评论里 @ 人」是关的，所以不用填名字）。'
@@ -2352,16 +2488,47 @@ export function apply(ctx, config) {
        */
       const _myRpid = String(args.myRpid ?? '').trim()
       const _hisRpid = String(args.hisRpid ?? '').trim()
+      const _replyToRpid = String(args.replyToRpid ?? '').trim()
       const _oldRpid = Number(args.rpid) || 0
       const _oldRoot = Number(args.root) || 0
       const _oldReplyTo = String(args.replyTo ?? '').trim()
 
-      /** MCP 的 `rpid`（= B站 的 parent）= **被回复的那条** = hisRpid */
-      const rpid = Number(_hisRpid) || _oldRpid
-      /** MCP 的 `root`（= 楼层根）= **我那条一级评论** = myRpid */
+      /**
+       * ⭐⭐⭐ **2026-10-25 修：第三种情形 —— 回某个人的「一级评论」**
+       *
+       * ── 为什么必须单独开一条路（真机事故）─────────────────
+       *   `bilij_reply` 原来只认「新评论」和「楼中楼」两种，**没有"回他的一级评论"这个口子**。
+       *   模型想接某人的话时，手上只有 `bilij_comments` 给的 `rpid`，
+       *   而工具里唯一能塞它的地方是 `hisRpid` ⇒ 就只传了 `hisRpid`、没传 `myRpid`。
+       *   而 `root` 只从 `myRpid` 取 ⇒ **root = 0** ⇒ MCP 里
+       *   `actual_root = root if root != 0 else rpid` 走兜底 ⇒ `root = parent = 他那条`
+       *   ⇒ B站 把这条落成**一条新的一级评论**，对方**收不到任何通知**，
+       *      而工具回执是 `success`。
+       *   实测症状：一整轮十来条"回复"，全变成了视频下的一级评论。
+       *
+       * ── 语义映射 ─────────────────────────────────────
+       *   · 情形① 发新评论        ⇒ rpid=0, root=0
+       *   · 情形② 回他的一级评论  ⇒ rpid=**他那条**, root=0   ← 本次新增
+       *   · 情形③ 回楼中楼        ⇒ rpid=他那条,  root=我那条
+       *
+       *   ⚠️ 情形② 与③ 在 MCP 那一侧**只差 root 传不传 0**，所以这里必须
+       *      把 `_replyToRpid` 单独记着，绝不能被 `myRpid` 合并掉。
+       */
+      const isReplyToTop = _replyToRpid !== '' && !_myRpid
+
+      /** MCP 的 `rpid`（= B站 的 parent）= **被回复的那条** */
+      const rpid = Number(_hisRpid) || Number(_replyToRpid) || _oldRpid
+      /**
+       * MCP 的 `root`（= 楼层根）= **我那条一级评论**。
+       *
+       * 🔴🔴 **2026-10-25 确认：回别人一级评论时 root 必须是 0，要原样传下去。**
+       *    MCP 那边 `actual_root = root if root != 0 else rpid` 会把 0 兜底成 rpid，
+       *    落成 `root = parent = 他那条` —— 这正是 B站 「回一级评论」的正确形态。
+       *    ⚠️ 别"好心"把它补成 rpid，那样反而会变成楼中楼挂错位置。
+       */
       const root = Number(_myRpid) || _oldRoot
-      /** 回复账本 / 额度账本的键：**永远是对方那条**（= hisRpid） */
-      const dedupeKey = _hisRpid || _oldReplyTo || (rpid ? String(rpid) : '')
+      /** 回复账本 / 额度账本的键：**永远是对方那条**（= hisRpid / replyToRpid） */
+      const dedupeKey = _hisRpid || _replyToRpid || _oldReplyTo || (rpid ? String(rpid) : '')
 
       /**
        * ⭐ **这一下是"回别人的楼中楼"还是"发新评论"？**（判据在原有注释里，见下）
@@ -2379,6 +2546,100 @@ export function apply(ctx, config) {
        *    真机症状：模型明明在回楼中楼，却收到"已经评论过了不再重复评论"。
        */
       const isReply = rpid !== 0 || dedupeKey !== ''
+
+      /**
+       * ⭐ **这一下到底是哪一种？**（落点自检、提示词、记账都要读它）
+       *   · `'comment'`      发新评论
+       *   · `'replyTop'`     回某个人的一级评论（2026-10-25 新增）
+       *   · `'replyThread'`  回楼中楼
+       *
+       * 🔴🔴 **判定顺序很要紧（探针抓到的）**：
+       *   「楼中楼」的**必要条件是 root 非 0**（root = 我那条一级评论）。
+       *   若只按"给没给 hisRpid"判 ⇒ 只给 hisRpid、没给 myRpid 时会被判成 `replyThread`，
+       *   可 `root` 偏偏是 0 ⇒ 落点自检拿 `wantRoot = '0'` 去比 ⇒ **永远报假告警**；
+       *   更糟的是：标成"回楼中楼"会让人以为落点没错，而 B站 那边它就是**一条一级评论**。
+       *   ⇒ 现在：**没有 root 就不是楼中楼**，如实归类成 `replyTop`。
+       */
+      const replyKind = (root !== 0)
+        ? 'replyThread'
+        : (rpid !== 0 ? 'replyTop' : 'comment')
+
+      /** ⚠️ 参数冲突要说出来，别默默纠错（同时给 replyToRpid 和 myRpid 是自相矛盾的） */
+      const conflictNote = (_replyToRpid && _myRpid && _replyToRpid !== _hisRpid)
+        ? `⚠️ 你同时传了 \`replyToRpid\` 和 \`myRpid\`（两个是互斥的）。`
+          + `已按**楼中楼**处理（root=myRpid）。若你本来是想回他那条一级评论，`
+          + `下次只传 \`replyToRpid\`、**不要**传 \`myRpid\`。`
+        : ''
+      /** 楼中楼给了 hisRpid 却没给 myRpid —— 这是本次事故的原型，必须提醒 */
+      const missingRootNote = (_hisRpid && !_myRpid && root === 0)
+        ? `⚠️ 你传了 \`hisRpid\` 但没传 \`myRpid\` ⇒ 没有楼层根，**这条会落成一级评论**。`
+          + `想回某人的一级评论，用 \`replyToRpid\` 更清楚；想回楼中楼，两个都要传。`
+        : ''
+
+      /**
+       * 🔴🔴🔴 **前置校验：这个 rpid 到底是一级评论还是楼中楼？**（2026-10-25 加）
+       *
+       * ── 为什么必须前置 ──────────────────────────────────
+       *   以前只在**发完之后**探测落点，发现错了也已经发出去了、删不掉。
+       *   实测事故：把**根评论的 rpid** 当成"对方那条"传进 `replyToRpid`
+       *   ⇒ 回复全部挂到根评论下面、对方收不到通知，而且**同一栋楼里堆了好几条**。
+       *   那批只能靠事后重发补救，评论区已经留下痕迹。
+       *
+       * ── 查什么 ─────────────────────────────────────────
+       *   拿 `rpid` 去问 B站：这条评论**有没有父级**（是不是楼中楼）、它的根是谁。
+       *     · 它是**楼中楼**，而调用方按「回一级评论」来发 ⇒ 🔴 **拒绝**，
+       *       并告诉他"这是楼中楼，要回它得给 myRpid"；
+       *     · 它**查不到**（12006 没有该评论）⇒ 🔴 **拒绝** —— 说明 rpid 给错了，
+       *       发出去也只会挂到奇怪的地方。
+       *
+       * ⚠️ **查不到 ≠ 一定错**：可能刚发出还没进索引。
+       *   所以只拦"明确查得到、且和用法矛盾"的情况；
+       *   查不到时给一个**宽容的提示**（`rpidUnverified`），不直接拒 ——
+       *   否则刚发完就想补一句的场景会被误伤。
+       * 🔴 但**12006（没有该评论）要拒** —— 那是 "id 根本不对"，不是"还没同步"。
+       */
+      let rpidUnverified = ''
+      if (isReply && rpid !== 0 && replyKind === 'replyTop') {
+        try {
+          const probe = await fetchReplyDetail(bvid, String(rpid), credCookie())
+          if (probe && (probe.parent || probe.root)) {
+            // 它本身是楼中楼 —— 不能当作"一级评论"来回
+            const itsRoot = probe.root || probe.parent
+            return {
+              ok: false,
+              blocked: true,
+              rpidIsNested: true,
+              error: `\`${rpid}\` **本身是一条楼中楼**（它的楼层根是 \`${itsRoot}\`），`
+                + '所以不能拿它当"一级评论"来 `replyToRpid` —— 那样会被挂到根评论下面，'
+                + '对方收不到通知。',
+              hint: `要回这条楼中楼，请改成：`
+                + `\`bilij_reply({ bvid, myRpid: '${itsRoot}', hisRpid: '${rpid}', text })\`。`
+                + '⚠️ **这次没有发出任何东西**，改完参数再发就行。',
+            }
+          }
+        } catch (e) {
+          /**
+           * ⚠️ 探测**抛错**（12006 / 风控 / 网络）：
+           *   · 12006（没有该评论）⇒ **硬拒** —— id 给错了，发出去必然挂歪；
+           *   · 其它错（风控）⇒ 放行但留痕，别因为接口抖动把整条功能锁死。
+           */
+          const msg = String(e?.message ?? e)
+          if (/12006|没有该评论/.test(msg)) {
+            return {
+              ok: false,
+              blocked: true,
+              rpidNotFound: true,
+              error: `\`${rpid}\` 在 \`${bvid}\` 下**查不到这条评论**（B站 回 12006）。`,
+              hint: '🔴 多半是 rpid 用错了：'
+                + '回**楼中楼**要传楼中楼自己的 rpid（`bilij_replies` 的 `他这条.id`），'
+                + '不是根评论的 rpid；也可能是这条评论已被删除。'
+                + '⚠️ **这次没有发出任何东西**。',
+            }
+          }
+          rpidUnverified = `（前置校验跳过：探测报错「${msg.slice(0, 40)}」，按原样发）`
+        }
+      }
+
       /**
        * 🔴🔴 **判重闸不能拦「回楼中楼」**（2026-10-19 修，用户反馈）。
        *
@@ -2405,7 +2666,7 @@ export function apply(ctx, config) {
           ok: false,
           blocked: true,
           duplicate: true,
-          overridden: (!admin && (wantForce || wantRepeat)) || undefined,
+          overridden: (!admin && (args.force === true || wantRepeat)) || undefined,
           seenAt: seen.at,
           seenKind: seen.kind || '（旧记录·评论）',
           hint: `\`${bvid}\` **已经评论过**了（${seen.at}${seen.rpid ? '，rpid ' + seen.rpid : ''}），不再重复评论。`
@@ -2452,7 +2713,7 @@ export function apply(ctx, config) {
           ok: false,
           blocked: true,
           quotaExceeded: true,
-          overridden: (!admin && (wantForce || wantRepeat)) || undefined,
+          overridden: (!admin && (args.force === true || wantRepeat)) || undefined,
           kind: isReply ? 'reply' : 'comment',
           used: quota.used,
           limit: quota.limit,
@@ -2537,6 +2798,142 @@ export function apply(ctx, config) {
             writeLedger(led)
           } catch { /* 记账失败不该让"已发出的评论"变成失败 */ }
         }
+
+        /**
+         * ⭐⭐⭐ **落点自检**（2026-10-25 新增，针对这次的一级评论事故）。
+         *
+         * ── 为什么非有不可 ──────────────────────────────────
+         *   B站 的回复接口**写错位置不报错**：root/parent 传错时服务端会**静默纠正**
+         *   成它认为合理的样子，接口照回 `success: true`。
+         *   ⇒ **`success` 只代表「写进去了」，不代表「落到你想落的地方」**。
+         *   这次一整轮"回复"全变成一级评论，就是因为没人读回来核。
+         *
+         * ── 怎么做 ─────────────────────────────────────────
+         *   拿到新 rpid 后读 `reply/detail` 看它的 `root` / `parent`：
+         *     · 情形②（回一级评论）：应当 `root === parent === 他那条`
+         *     · 情形③（回楼中楼）  ：应当 `root === 我那条`、`parent === 他那条`
+         *   对不上 ⇒ 回执里塞 `落点异常`，**明说它落成了什么**。
+         *
+         * ⚠️ 只**报告**、不回滚：评论删不掉，硬失败会让模型以为没发出去而重试（更糟）。
+         * ⚠️ 读不到就标 `落点未核实` —— **不算失败**，别吓唬模型。
+         */
+        const extra = []
+        if (conflictNote || missingRootNote) {
+          extra.push([conflictNote, missingRootNote].filter(Boolean).join('\n'))
+        }
+        if (isReply && replyKind !== 'comment') {
+          const newRpid = (rec && typeof rec === 'object' && (rec.rpid_str || rec.rpid)) || ''
+          if (newRpid) {
+            let note
+            try {
+              // ⚠️ 用 `probeReplyLanding` 而不是 `fetchReplyDetail` ——
+              //    后者要的是"楼层根"，喂新 rpid 进去永远取不到（真机验证过，见该函数注释）
+              const got = await probeReplyLanding(bvid, String(newRpid), String(rpid), credCookie())
+              if (got) {
+                const gotRoot = got.root
+                const gotParent = got.parent
+                const wantParent = String(rpid)
+                const wantRoot = replyKind === 'replyThread' ? String(root) : String(rpid)
+                /**
+                 * 🟢 **落点到底算不算对**（2026-10-25 修误报）。
+                 *
+                 * 真实事故：用 `replyToRpid` 去回**别人的楼中楼**时，B站 会把它
+                 * 挂成 `root=那条一级评论 / parent=对方`。而这里原来要求
+                 * `replyTop` 分支 `gotRoot === gotParent` —— **那种情况永远不成立**
+                 * ⇒ 明明回对了，却每条都报「落点异常」，白白吓人一跳
+                 * （实测：连发 7 条全部误报，还差点去重发）。
+                 *
+                 * ✅ 正确的判据只有一条：**parent 是不是我要回的那个人**。
+                 *    · `replyThread`：再加"根也一致"（必须有楼层根，否则对方收不到通知）；
+                 *    · `replyTop`（用 replyToRpid 回）：`parent` 对上就算对 ——
+                 *      此时 root 是那条评论所在的楼，**不要求等于 parent**。
+                 */
+                const okLanding = gotParent === wantParent && (replyKind === 'replyThread'
+                  ? gotRoot === wantRoot
+                  : true)
+                /**
+                 * 🔴🔴 **硬校验**（2026-10-25 使用者要求）：
+                 * 落点不对 / 核实不了 ⇒ **一律拒绝**（`ok:false` + `landingFailed:true`），
+                 * 不再只是塞一句聊天式的提醒。
+                 *
+                 * 为什么必须硬起来：以前只是把提示写进 `落点` 字段，模型**扫一眼就过去了**，
+                 * 结果一整天发出一批"挂在根评论下面、对方根本收不到通知"的回复
+                 * （实测：同一个人被回了两次，都变成自言自语）。
+                 * ⇒ 落不落得准是**这条回复成不成立**的问题，不该由模型自觉判断。
+                 *
+                 * ⚠️ 两种都算失败：
+                 *   ① `落点异常`（parent 对不上）—— 挂错位置了；
+                 *   ② `落点未核实`（探测取不到）—— **核实不了就等于没核实**，
+                 *      实测这类有一半是真的没挂上（被吞审 / 还在同步）。
+                 */
+                if (!okLanding) {
+                  return {
+                    ...(typeof rec === 'object' && rec ? rec : {}),
+                    ok: false,
+                    landingFailed: true,
+                    blocked: true,
+                    落点: '❌ 落点异常',
+                    error: `回复发出去了，但**落点不对**：本来要回 \`${wantParent}\`，`
+                      + `实际落成 root=\`${gotRoot}\` / parent=\`${gotParent}\`。`,
+                    hint: '🔴 **这条按失败处理，别当成功记账**。'
+                      + '先回去确认 rpid 到底是"对方那条的 id"还是"根评论的 id" —— '
+                      + '**回楼中楼要用楼中楼自己的 rpid，不是根评论的**。'
+                      + '⚠️ 已经发出去这条**不要补发**（会变成第二条），'
+                      + '去评论区确认实际挂在哪儿，再决定是否重发。',
+                  }
+                }
+                note = (replyKind === 'replyTop' && gotRoot !== gotParent)
+                  ? '✅ 落点已核实：回在了对方评论下面（挂在他所在的那层楼里，属正常）'
+                  : '✅ 落点已核实：回在了对方评论下面'
+              } else {
+                /**
+                 * 🔴 **核实不了 = 不通过**（同上，2026-10-25 改成硬校验）。
+                 * 以前这里只写一句"可能还在同步"，模型当"没问题"就往下走了。
+                 */
+                return {
+                  ...(typeof rec === 'object' && rec ? rec : {}),
+                  ok: false,
+                  landingFailed: true,
+                  blocked: true,
+                  落点: '❌ 落点未核实',
+                  error: '回复发出去了，但**落点核实不了**（评论列表里找不到这条：可能被吞审，或还在同步）。',
+                  hint: '🔴 核实不了就当没核实过。**别补发**；'
+                    + '等几十秒后重新调 `bilij_comments` 去确认它到底在不在、挂在谁下面。'
+                    + '实在确认不了，就当这条没发成，如实告诉使用者。',
+                }
+              }
+            } catch (e) {
+              /**
+               * 🔴 探测接口**报错**也是硬失败（2026-10-25）。
+               * 核实不了 ⇏ 回对了。别让"风控报错"变成"那就当它成功吧"。
+               */
+              return {
+                ...(typeof rec === 'object' && rec ? rec : {}),
+                ok: false,
+                landingFailed: true,
+                blocked: true,
+                落点: '❌ 落点未核实（探测报错）',
+                error: `回复发出去了，但落点探测出错：${e?.message ?? e}`,
+                hint: '🔴 **别当成功、别补发**。等一会儿用 `bilij_comments` 去评论区确认'
+                  + '它到底在不在、挂在谁下面，再决定下一步。',
+              }
+            }
+            if (note) extra.push(note)
+          }
+        }
+        // ⚠️ MCP 回来的多是 **JSON 字符串**，只给对象塞字段会落到空气里
+        if (extra.length) {
+          const note = extra.join('\n')
+          if (typeof rec === 'object' && rec) {
+            rec.落点 = note
+          } else if (typeof r === 'string' && r.trim().startsWith('{')) {
+            try {
+              const o = JSON.parse(r)
+              o.落点 = note
+              r = JSON.stringify(o)
+            } catch { /* 不是 JSON 就算了，别因此让发货失败 */ }
+          }
+        }
       }
       return r
     },
@@ -2554,11 +2951,121 @@ export function apply(ctx, config) {
       + '   `bilij_reply({ bvid, myRpid: <我那条.id>, hisRpid: <他这条.id>, text })`\n'
       + '   🔴 `hisRpid` **必须传** —— 它既是"回到谁那条下面"，也是去重账本的键；\n'
       + '      不传的话下一轮还会把同一条列出来（可能重复回同一个人）。\n'
-      + '⚠️ 这里**不含 @ 和点赞通知**（只看回复），那是两回事。',
+      + '⚠️ 这里**不含 @ 和点赞通知**（只看回复）—— 看 @ 用 `mode: "mentions"`。\n'
+      + '⭐⭐⭐ **`all: true` 是"全都要"档**（2026-10-25 修）：\n'
+      + '   默认只说"回复插件自己那条评论"的；而**你手动回复别人**（用 `replyToRpid`）之后\n'
+      + '   收到的回复，默认**看不见** —— 会让人误以为"没人回我"。\n'
+      + '   ⇒ **每轮查回复都传 `all: true`**，它会把白名单也放开，凡是回复/@ 一律列出。\n'
+      + '   回的时候照 `howToReply` 抄：不在插件评论下的那些，它给的是 `replyToRpid` 写法。\n'
+      + '⭐⭐ `mode` **三种查法**（2026-10-25 加）：\n'
+      + '   · `"replies"`（默认）谁回复了**插件发的那条评论** ⇒ 回它们用 `myRpid`+`hisRpid`；\n'
+      + '   · `"mentions"` 谁 **@ 了**使用者 ⇒ 这些人**不是**在回插件那条，\n'
+      + '     要回就用 `bilij_reply({ bvid, replyToRpid: <他这条.id>, text })`（**不要**传 myRpid）；\n'
+      + '   · `"mine"` 我这轮**回过谁**（按人去重）⇒ 用来避免同一个人连着回两次。',
     parameters: {
-      all: { type: 'boolean', description: 'true = 连"已回过的"也列出来（默认只给还没回的）' },
+      all: {
+        type: 'boolean',
+        description: '⭐ `true` = **放开白名单 + 连已回过的也列**：不去问"这条是不是在插件评论下面"，'
+          + '凡是收到的**回复和 @ 通知全给你**（模型手动回复别人后收到的回复，也在这里）。'
+          + '默认 false = 只列"回复插件自己那条评论"的、且只列还没回过的。'
+          + '⚠️ 每一轮查回复时**都该传 true**，否则会漏掉别人对插件手动评论的回复。',
+      },
+      mode: {
+        type: 'string',
+        enum: ['replies', 'mentions', 'mine'],
+        description: '查哪一类：replies（默认，谁回了插件那条）／mentions（谁 @ 了使用者）／mine（我这轮回过谁）',
+      },
     },
     async execute(args) {
+      const mode = String(args.mode ?? 'replies').trim() || 'replies'
+
+      /**
+       * ⭐⭐⭐ **`mode: 'mine'` —— 我这轮回过谁**（2026-10-25 加）。
+       *
+       * 为什么需要：`replies` 模式只回答"谁回了我"，**不回答"我刚回过谁"**。
+       * 于是模型没有手段自查"这个人我是不是刚回过" ⇒ 容易对同一个人连着回两条。
+       * ⚠️ 只读账本、**不调 B站** ⇒ 不会触发风控。
+       */
+      if (mode === 'mine') {
+        const led = readLedger()
+        const rows = Object.entries(led.replies || {})
+          .filter(([, v]) => v && v.repliedAt)
+          .map(([rpidKey, v]) => ({
+            bvid: v.bvid || '',
+            他这条: { id: rpidKey },
+            昵称: v.user || '',
+            mid: v.mid || 0,
+            回过: v.repliedAt,
+            轮次: v.roundId || '',
+          }))
+          .sort((a, b) => String(b.回过).localeCompare(String(a.回过)))
+        const byMid = new Map()
+        for (const r of rows) if (r.mid) byMid.set(r.mid, (byMid.get(r.mid) || 0) + 1)
+        return {
+          ok: true,
+          mode,
+          count: rows.length,
+          我回过的: rows.slice(0, 50),
+          同一个人回过两次以上的: [...byMid.entries()].filter(([, n]) => n > 1)
+            .map(([mid, n]) => ({ mid, 次数: n })),
+          hint: rows.length
+            ? `账本里共 ${rows.length} 条回复记录。**同一个人别连着回两次** —— 拉锯比不回更烦人。`
+            : '账本里没有回复记录（这一轮还没回过谁）。',
+        }
+      }
+
+      /**
+       * ⭐⭐⭐ **`mode: 'mentions'` —— 谁 @ 了使用者**（2026-10-25 加）。
+       *
+       * ── 为什么要单开一档 ──────────────────────────────
+       *   `replies` 只覆盖"在我那条评论下回复"的通知，**@ 通知完全看不到**。
+       *
+       * ── 回的时候用哪个参数（关键区别）─────────────────
+       *   · `replies` 回来的人 ⇒ 他在**我那条评论下面**回 ⇒ `myRpid` + `hisRpid`
+       *   · `mentions` 里的人  ⇒ 他**自己另发了一条评论并 @ 我** ⇒ 那是**一级评论**
+       *     ⇒ 必须用 `bilij_reply({ bvid, replyToRpid })`，**不能传 myRpid**。
+       *   这条区别就是这次事故的根，所以在返回值里**明写** `howToReply`。
+       */
+      if (mode === 'mentions') {
+        let raw
+        try {
+          raw = await call('bili_received_at_and_likes', {})
+        } catch (e) {
+          return {
+            ok: false,
+            error: `拿不到 @ 通知：${e?.message ?? e}`,
+            hint: '可能 MCP 没起来、或 B站 登录过期 —— **别硬试**。',
+          }
+        }
+        let obj = raw
+        if (typeof obj === 'string') { try { obj = JSON.parse(obj) } catch { /* 非 JSON */ } }
+        const atItems = Array.isArray(obj?.at?.items) ? obj.at.items : (Array.isArray(obj?.at) ? obj.at : [])
+        const out = atItems.map(it => {
+          const d = it.item || {}
+          const rpid = String(d.source_id || d.target_id || it.id || '')
+          const bvid = (/(BV[0-9A-Za-z]{10})/.exec(String(d.uri || d.native_uri || '')) || [])[1] || ''
+          return {
+            bvid,
+            谁: it.user?.nickname || d.title || '',
+            mid: it.user?.mid || 0,
+            他这条: { id: rpid },
+            时间: d.at_time || it.at_time || 0,
+            howToReply: bvid && rpid
+              ? `bilij_reply({ bvid: '${bvid}', replyToRpid: '${rpid}', text })`
+              : '（缺 bvid 或 id，先别回）',
+          }
+        }).filter(x => x.bvid && x.他这条.id)
+        return {
+          ok: true,
+          mode: 'mentions',
+          count: out.length,
+          待回: out,
+          hint: out.length
+            ? `有 ${out.length} 条 @。🔴 这些人是在**评论里 @ 了使用者**，回的时候用 \`replyToRpid\`（见每条的 howToReply），**不要传 myRpid**。`
+            : '没有新的 @ 通知。',
+        }
+      }
+
       // ⚠️ **必须包 try**：MCP 子进程没起来 / 登录过期时 `call` 会**抛异常**，
       //    而工具抛异常在那一轮里是个难看的失败。其它工具都返回结构化错误，这里也照做。
       //    （2026-10-16 探针实测：沙箱里没 venv ⇒ `MCP 子进程退出（code=1）` 直接抛出来。）
@@ -2589,6 +3096,20 @@ export function apply(ctx, config) {
         if (v.kind === '评论' && /^\d+$/.test(String(v.rpid || ''))) mine.add(String(v.rpid))
       }
 
+      /**
+       * ⭐⭐ **`all: true` ⇒ 放开白名单，@ 和回复全都要**（2026-10-25 使用者要求）。
+       *
+       * 🔴 修的问题：原来那句 `if (!mine.has(myRpid)) continue` 是**无条件的** ——
+       *    意思是"只认插件自己发的那条评论收到的回复"。于是模型**手动**用
+       *    `replyToRpid` 回的评论（本轮就发了 60 多条）下面的回复**一条都进不来**，
+       *    被静默记进 `others` ⇒ 表现成"没人回复我"，**但使用者明明看见有人回**。
+       *
+       * ⇒ 现在：`all:true` 不只是"连已回过的也列"，而是**连白名单也放开** ——
+       *    凡是收到的回复/@ 通知，**一律先列出来**，让模型自己判断要不要回。
+       *    ⚠️ 默认（`all` 不传）仍是老的保守口径，避免刷一轮时被无关通知淹没。
+       */
+      const wideOpen = args.all === true
+
       const led = readLedger()
       const collected = []
       let others = 0
@@ -2598,7 +3119,9 @@ export function apply(ctx, config) {
         const myRpid = String(d.target_id || '')
         // 🔴 白名单过滤放在**这一层** —— 不满足的**根本不返回给模型**。
         //    理由：让它先看到再靠提示词"别回"，迟早会漏（自家注释里那条「别递再劝」的教训）。
-        if (!mine.has(myRpid)) { others++; continue }
+        // ⭐ `all:true` 时**不筛**（见上面 wideOpen 的说明）：全都要，让模型自己判断。
+        if (!wideOpen && !mine.has(myRpid)) { others++; continue }
+        if (wideOpen && !mine.has(myRpid)) others++   // 只计数，不跳过
         const hisRpid = String(d.source_id || it.id || '')
         const rec = led.replies[hisRpid]
         const replied = Boolean(rec && rec.repliedAt)
@@ -2643,6 +3166,17 @@ export function apply(ctx, config) {
           // ⭐ 两个 id 分开写清楚，名字就叫它们的真实含义，模型不用再自己做映射
           我那条: { id: c.myRpid },
           他这条: { id: c.hisRpid },
+          // ⭐⭐ **2026-10-25 加：直接把该传的参数写出来**。
+          //     这次事故的根因就是"模型手上只有 id、不知道该塞哪个参数"⇒
+          //     它退了最像的那个（hisRpid）而漏了 myRpid ⇒ 落成一级评论。
+          //     与其再写一段提示词劝它，不如把答案直接给它。
+          // ⭐ 2026-10-25 二次修：`all:true` 时会出现**不在白名单里**的条目
+          //    （即别人回复的是模型手动发的评论）。那种情况没有可靠的"楼层根"，
+          //    ⇒ 改用 `replyToRpid` 回（落在对方那条下面），**不要**传 myRpid。
+          在插件评论下: mine.has(c.myRpid) || undefined,
+          howToReply: (wideOpen && !mine.has(c.myRpid))
+            ? `bilij_reply({ bvid: '${c.bvid}', replyToRpid: '${c.hisRpid}', text })`
+            : `bilij_reply({ bvid: '${c.bvid}', myRpid: '${c.myRpid}', hisRpid: '${c.hisRpid}', text })`,
           mid: c.mid,
           时间: c.时间,
           已回过: c.已回过,
@@ -4007,6 +4541,9 @@ export function apply(ctx, config) {
               + `  · 让你去干**和 B站 无关的事**（"帮我看看这个代码"、"跑一下那个"、"改一下这个文件"…）\n`
               + `  · 让你**多发一条评论 / 多回一条** —— 哪怕「每轮最多几条」**已经用完**\n`
               + `  · 让你**重发** —— 哪怕判重表里记着已经发过\n`
+              + `  · 让你**别判重、把结果全给他**（例："直接去看我的视频""把他的投稿全列出来"，`
+              + `    哪怕这些视频判重表里已经有）⇒ 搜/取投稿时传 \`force: true\`，**不读判重表**，原样全给。\n`
+              + `    ⚠️ **只在这一次明确要求里用**；下一句没提，就恢复默认判重。\n`
               + `  · 让你**换个做法**（用别的工具、写个脚本、跑命令…）\n`
               + `⇒ 这时**上面那些"默认约束"一概作废**：不要再用"我被设置限制了"去挡他，`
               + `**先照做**，需要时如实说明你做了什么。\n`
