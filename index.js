@@ -4937,22 +4937,24 @@ export function apply(ctx, config) {
          * 🔴 **使用者实测发现的就是这个**：关掉绝对防护照样只有 `bilij_*`
          * —— 不是开关没生效，是**从来没有过 preset 那一层**。
          *
-         * ── 顺序为什么是「先 mount 再 restrict」──────────
-         * `restrict` 过滤的是**继承面**（全局层 + 所有祖先层）。
-         * preset 的工具挂在**独立 scope** 上，agent 通过 `bindScopeParent` 挂到它下面
-         * ⇒ 对 agent 来说 preset 是**祖先层**，正是 restrict 能过滤的范围。
-         * 先 mount 再 restrict，过滤的才是真实的继承面。
-         * （`view()` 是每次现算 `chainLayers`，所以两种顺序**最终效果相同**，
-         *   但先 mount 更安全：万一 preset 里也注册了同名工具，后挂的会覆盖。）
+         * ── 顺序：先 mount 再 guard ──────────
+         * mount 必须在前面 —— 它是会话拥有工具的前提，跟开关无关。
+         * 之后按开关决定要不要加 guard（**不是 restrict**，原因见下面那段）。
          *
-         * ⚠️ 几个读源码确认过的边界（别改坏）：
-         *   ① `presets.mount()` 是 **async**，必须 await（`setup` 允许返回 Promise，
-         *      `dsh-agent-loop` 的 `setupAndPublish` 里就是 `await setup?.(...)`）；
-         *   ② `restrict` **只能减，不能加** —— preset 那套是上限；
-         *   ③ 名字写错会**当场抛错**并列出全部合法名字 ⇒ 整个会话**建不出来**，
-         *      所以白名单不能手抄，必须用 `registeredToolNames`（注册处收集的真清单）；
-         *   ④ 名字里**绝不能有 `run_code`**（PTC 保留传输名，点名即抛错）；
-         *   ⑤ **空数组会锁死一切**（`allow: []` ⇒ 没有任何工具可见）⇒ 判空后再传。
+         * 🔴🔴 **这里曾经写错过一次，留作教训**：
+         * 上一版写的是「preset 的工具挂在独立 scope 上，agent 通过 bindScopeParent
+         * 挂到它下面 ⇒ 对 agent 来说 preset 是祖先层，正是 restrict 能过滤的范围」。
+         * **这句是错的**（当时靠字段名推断，没读 PresetTree 的构造函数）。
+         * 实测：开着绝对防护，新会话照样能用预设的全部工具。
+         * ⇒ 真正的层次关系见下面 ② 那段的长注释。
+         *
+         * ⚠️ 几条读源码确认过的边界（别改坏）：
+         *   ① presets.mount() 是 **async**，必须 await（setup 允许返回 Promise，
+         *      dsh-agent-loop 的 setupAndPublish 里就是 await setup?.(...)）；
+         *   ② **白名单只能从注册处收集**（registeredToolNames），不要手抄常量表 ——
+         *      手抄会漏以后新增的工具；
+         *   ③ 名字里**绝不能有 run_code**（PTC 保留传输名）；
+         *   ④ **空白名单必须抛错**，不能静默放行 —— 那等于防护整个失效，且原因极难查。
          */
         setup: async (agentCtx) => {
           // ① **先挂 preset** —— 与开关无关，这是会话拥有工具的前提。
@@ -4971,7 +4973,28 @@ export function apply(ctx, config) {
           }
 
           // ② **再按开关决定要不要收窄**。
-          //    注意：这一步现在才"有事可做" —— 挂上 preset 之后才有真实的继承面可砍。
+          //
+          // 🔴🔴 **2026-10-25 二次修：`restrict` 在这里结构上无效，改用 `guard`。**
+          //
+          // 实测：改完之后**开着**绝对防护，新会话照样能用预设的全部工具。
+          // 日志证明代码确实跑了（「绝对防护已生效：前台会话只放行 20 个插件工具」），
+          // 但限制落空。查 `dsh-tools` 源码后确认原因：
+          //
+          //   · `presets.mount(agentCtx, id)` 里 `new PresetTree(ctx)` 用的是 **agentCtx**
+          //     ⇒ preset 的插件是在 **agent 自己那一层**加载的，
+          //       它们的工具注册进 `own` 层，**不是**祖先层；
+          //   · 而 `view(scope)` 里明确写着：
+          //       `for (const layer of layers) { if (layer === own) continue; ... }`
+          //       `if (own !== void 0) for (... of own.tools) visible.set(...)`  ← 不过滤
+          //     ⇒ **own 层的工具无条件可见**，restrict 的 `admits()` 只作用于 inherited。
+          //
+          // ⚠️ 而官方 `composeAgent()` 也是 `presets.mount(agentCtx, id)`，但它**不做 restrict**
+          //    ⇒ 官方从来没撞上这个组合，所以这不是 DSH 的 bug，是**我们这套用法**的边界。
+          //
+          // `guard` 走的是执行时检查（`guardReason(exec)` 沿 `chainLayers` 逐层查），
+          // **不参与 visible 计算** ⇒ 不受 own 层豁免影响。
+          // 代价：工具**看得见**但调不动（restrict 是连 schema 都看不到）。
+          // ⇒ 所以 `prompts/hard-rules.md` 的「五之三」专门讲这件事，避免模型逐个去试。
           if (cfg.absoluteGuard === false) {
             log('绝对防护：关（会话保留预设的完整能力）')
             return
@@ -4979,11 +5002,20 @@ export function apply(ctx, config) {
           const allow = registeredToolNames.filter((n) => n !== 'run_code')
           if (allow.length === 0) {
             // 理论上不会发生（插件自己就注册了 20 个）。真发生了**如实报错**，
-            // 不要静默传空数组 —— 那会让这个会话一个工具都用不了，且原因极难查。
+            // 不要静默放行 —— 那等于防护整个失效，且原因极难查。
             throw new Error('绝对防护拿不到工具白名单（registeredToolNames 为空）—— 这不该发生，请报告。')
           }
-          agentCtx.tools.restrict({ allow })
-          log(`绝对防护已生效：前台会话只放行 ${allow.length} 个插件工具`)
+          const allowSet = new Set(allow)
+          agentCtx.tools.guard((exec) => {
+            if (allowSet.has(exec.name)) return undefined
+            // ⚠️ 这段话**模型会看到**，所以：说清是什么、说清该用什么、明说别绕。
+            //    只写"不允许"会让它当成故障去反复重试（实测过的老毛病）。
+            return `绝对防护开着：这个会话只能用刷B站自己的工具，${exec.name} 不在可用范围里。`
+              + '换别的工具也是同一道闸，不用试。'
+              + '搜视频/读字幕/读评论/写产物/发评论都有对应的 bilij_ 工具，用那些把活干完。'
+              + '真需要更大能力，在报告里说清需要什么，让使用者自己决定要不要关。'
+          })
+          log(`绝对防护已生效：前台会话只放行 ${allow.length} 个插件工具（guard 模式）`)
         },
       })
 
