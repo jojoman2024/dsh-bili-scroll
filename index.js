@@ -3133,6 +3133,136 @@ export function apply(ctx, config) {
     },
   })
 
+  /* ─────────────── bilij_del_comment：删评论（2026-10-26 加） ───────────────
+   *
+   * ⭐ **为什么另开一个工具、而不是塞进 `bilij_act`**
+   *   它跟 `bilij_act` 那几个动作性质完全不同：
+   *     · `bilij_act` 是"对内容表态"（点赞/收藏/弹幕），错了能撤；
+   *     · **删评论不可撤销**，而且删的是**别人的内容**。
+   *   ⇒ 单独一个工具，`confirm` 是**必填**，不给默认值。
+   *
+   * 🔴 **为什么走插件自己的 HTTP、而不走 MCP**（这条很关键，别改回去）
+   *   · **MCP 侧根本没有删评论的工具** —— 28 个里搜 `delete/del/remove`，
+   *     只有两处 `os.remove(tmp_cover)`（删临时封面），跟评论无关；
+   *   · 而 `vendor/bilibili-mcp` **不能改**（用户装插件时会被整份重铺，库里 `cbba9982`）。
+   *
+   * ⚠️ **注意这里有处不对称**（2026-10-26 真机实测出来的）：
+   *   · **发评论必须走 MCP** —— 自己发 HTTP 会被阿瓦隆隐藏（`state:17`，别人看不到）。
+   *     原因：`bilibili_api` 的 `send_comment` 会带 `statistics:{appId:100,platform:5}`
+   *     和 `gaia_source:"main_web"`，还会做 **wbi 签名**；手写 HTTP 缺了这些。
+   *   · **删评论走 HTTP 没问题** —— 实测删完另一个账号确实看不到了，
+   *     `reply/detail` 返回 `code:12006`。删除是"管理已有内容"，不吃那套风控。
+   */
+
+  /** B站 删评论的错误码 → 人话 */
+  const DEL_CODE_HINT = (code) => {
+    if (code === 0) return ''
+    if (code === -101) return 'B站 说没登录（凭证过期）⇒ 让使用者重新扫码。'
+    if (code === -111) return 'csrf 校验失败 ⇒ 也是登录态问题。'
+    if (code === -403) return '**权限不足** —— 只有评论作者本人、或者该评论区所属的 UP 主能删。'
+    if (code === -404) return '这条评论不存在（可能已经被删了）。'
+    if (code === 12002) return '评论区已关闭。'
+    if (code === 12022) return '这条评论**已经被删除了**（幂等，不算失败）。'
+    return `B站 返回错误：code=${code}`
+  }
+
+  tool({
+    name: 'bilij_del_comment',
+    description: '🔴 **删除一条评论**（不可撤销）。只用于「使用者本人明确要求清理评论区」的场合。\n'
+      + '⚠️ **必须传 `confirm: true`** —— 不传直接拒，防止误删。\n'
+      + '⚠️ 权限：只有**评论作者本人**、或**该视频的 UP 主**能删。\n'
+      + '⚠️ 删完会自动回读校验，回执里 `verified:true` 才算真删掉。\n'
+      + '⭐ 只是想「不回某条评论」不需要删它 —— 删是最后手段。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号' },
+      rpid: { type: 'string', description: '要删的**评论** id（`bilij_comments` 返回的 rpid）' },
+      confirm: { type: 'boolean', description: '⭐ 必填 `true`：确认真的要删（不可撤销）' },
+    },
+    async execute(args) {
+      const bvid = String(args.bvid ?? '').trim()
+      const rpid = String(args.rpid ?? '').trim()
+      if (!bvid) return { ok: false, error: '缺少 bvid。' }
+      if (!rpid) return { ok: false, error: '缺少 rpid（要删哪条评论）。' }
+      /**
+       * 🔴 **`confirm` 必须是显式的 `true`**。
+       *    不设默认值、不接受 "yes"/1 —— 这个动作不可撤销，宁可多问一次。
+       */
+      if (args.confirm !== true) {
+        return {
+          ok: false,
+          needConfirm: true,
+          error: '删除评论**不可撤销**，必须显式传 `confirm: true` 才会执行。',
+          hint: `确认要删 ${bvid} 下的评论 ${rpid}，就把 \`confirm\` 传成 true 再调一次。`,
+        }
+      }
+      const cookie = credCookie()
+      if (!cookie) {
+        return { ok: false, error: '还没登录 B站 —— 没有凭证，删不了评论。', hint: '让使用者在面板里扫码登录。' }
+      }
+      const meta = await bvidMeta(bvid, cookie)
+      if (!meta?.aid) {
+        return { ok: false, error: `拿不到 ${bvid} 的视频信息（视频可能被删了，或者登录过期）。` }
+      }
+
+      const r = await biliPost(
+        'https://api.bilibili.com/x/v2/reply/del',
+        { type: 1, oid: meta.aid, rpid },
+        cookie,
+      )
+      const code = Number(r?.code)
+      // ⚠️ 12022 = 已经被删了 —— 幂等，当成功
+      const okNow = code === 0 || code === 12022
+      if (!okNow) {
+        return {
+          ok: false,
+          code,
+          message: r?.message ?? '',
+          error: DEL_CODE_HINT(code) || `B站 返回 code=${code}`,
+          rpid,
+        }
+      }
+
+      /**
+       * ⭐ **回读校验**（2026-10-26 真机验过这条判据）。
+       *    只看 `code:0` 不够 —— 必须**再查一次**确认它真的没了。
+       *    已删的评论用 `reply/detail` 查会返回 `code:12006`（没有该评论）。
+       */
+      let verified = false
+      let verifyNote = ''
+      try {
+        const d = await biliGet(
+          `https://api.bilibili.com/x/v2/reply/detail?type=1&oid=${meta.aid}&root=${encodeURIComponent(rpid)}`,
+          cookie,
+        )
+        const c = Number(d?.code)
+        if (c === 12006 || c === -404) {
+          verified = true
+        } else if (c === 0 && d?.data?.root) {
+          // ⚠️ 还能查到 ⇒ 可能只是自己被隐藏了，或者删除没生效
+          verified = false
+          verifyNote = '删除接口返回成功，但**这条评论还能查到** —— 可能没真删掉，去评论区看一眼。'
+        } else {
+          verified = true           // 查不到根对象也算没了
+        }
+      } catch {
+        verifyNote = '回读校验失败（网络/接口问题）—— 删除请求已发，但**没验到结果**，去评论区确认一下。'
+      }
+
+      return {
+        ok: true,
+        code,
+        message: r?.message ?? '',
+        bvid,
+        rpid,
+        title: meta.title,
+        deleted: true,
+        verified,
+        ...(code === 12022 ? { note: '这条之前就已经被删过了（幂等）。' } : {}),
+        ...(verifyNote ? { verifyNote } : {}),
+      }
+    },
+  })
+
   tool({
     name: 'bilij_replies',
     description: '⭐ **看谁回复了「插件自己发的那条评论」** —— 想回评论时先调这个。\n'
