@@ -4587,13 +4587,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       }, '✕')),
                     h('div', { 'data-bd-note': '', 'data-bd-sheetnote': '' },
                       `${cleanResult.title || ''} —— 共 ${cleanResult.total} 条一级评论，`
-                      + `带 @ 的 ${cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
+                      + `带 @ 的 ${cleanResult.hasAtCount ?? cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
                       + `跳过 ${cleanResult.skipped} 条（白名单 / 插件自己）。`
-                      /* ⭐ 关键词筛掉了多少（2026-10-26 加）——
-                       * 没有这一项时，用户填了筛选看到"待处理 0"会以为插件坏了，
-                       * 实际是"关键词把全部筛掉了"。必须让他看见。 */
+                      /* ⭐ 关键词额外捞到多少（2026-10-26）——
+                       * 🔴 关键词是**额外捞取**、不是过滤：带 @ 的永远全保留，
+                       *    它只是把"本来没 @ 但命中"的也加进来。
+                       *    ⇒ 文案不能说"筛掉"，那会让用户以为结果变少了。 */
                       + (cleanResult.kwActive
-                        ? `关键词筛掉 ${cleanResult.kwFilteredOut ?? 0} 条`
+                        ? `关键词额外捞到 ${cleanResult.kwExtra ?? 0} 条`
                           + `（昵称「${cleanResult.kwUname || '空'}」/ 内容「${cleanResult.kwMessage || '空'}」）。`
                         : '')
                       + `现在显示 ${Math.min(cleanShown, (cleanResult.items || []).length)} / ${(cleanResult.items || []).length} 条。`),

@@ -4283,6 +4283,27 @@ export function apply(ctx, config) {
   }
 
   /**
+   * ⭐ **按昵称查白名单**（2026-10-26 加，MCP 拿不到 mid 的兜底）。
+   *
+   * 🔴 为什么需要它：评论走 MCP 的 `bili_comments`，它**只返回 6 个字段**、
+   *    **没有 mid** ⇒ 没法按 mid 精确查白名单。
+   *    而白名单文件里同时存了 `names: { mid: uname }` ⇒ 反查一下昵称，
+   *    命中就跳过。
+   *
+   * ⚠️ **代价：同名会误跳**（两个不同 mid 用了同一个昵称）。
+   *    但比"拿不到 mid 就整个失效"强 —— 白名单失效意味着每轮都白跑一遍。
+   * ⚠️ 插件自己那条也按昵称兜一手（`bili_comments` 里能看到自己的昵称）。
+   */
+  const inWhitelistByName = (uname) => {
+    const u = String(uname || '').trim()
+    if (!u) return false
+    const wl = readWhitelist()
+    if (Object.values(wl.names || {}).includes(u)) return true
+    // 插件自己的昵称（凭证里没有昵称，只能靠 names 里存的；这里退一步不比）
+    return false
+  }
+
+  /**
    * 扫描：拉一级评论，按「带 @」筛出候选。
    *
    * ⭐ **增量模式（2026-10-26 加）**：`x/v2/reply?sort=0` 是**按时间倒序**，
@@ -4300,77 +4321,159 @@ export function apply(ctx, config) {
     const meta = await bvidMeta(bvid, credCookie())
     if (!meta?.aid) return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `拿不到 ${bvid} 的视频信息（视频被删了 / 登录过期）。` }
 
-    const all = []
-    const incremental = Number(sinceTime) > 0
-    let scannedPages = 0
-    let newestCtime = 0
-    let hitOld = false
-    // ⚠️ `bili_comments` 只给热门几十条、**没有翻页参数** ⇒ 这里自己打 HTTP 翻页读
-    //    （读接口不吃风控，实测 `x/v2/reply?sort=0&pn=N` 正常）
+    /**
+     * 🔴🔴 **走 MCP 的 `bili_comments`，不要自己手写 HTTP**（2026-10-26 大改）。
+     *
+     * ── 我错在哪（留住教训，别改回去）──────────────────────────
+     *   我原来自己拼 `GET /x/v2/reply?type=1&oid=…&sort=0&pn=N`，结果：
+     *
+     *      自己写的：/x/v2/reply        → HTTP 412 / code=-412 "request was banned"
+     *      MCP 走的：/x/v2/reply/main   → code=0，数据正常
+     *
+     *    同一秒、同一个 IP、同一份 Cookie，**一个被拒一个正常** ——
+     *    根本不是"风控"，是**我用错了接口**。我却连着三次归因风控，
+     *    还带着使用者一起怀疑网络。这条错误值得记住：
+     *    **B站 侧已经有现成能用的通路（MCP/`bilibili_api`），先用它，别自己拼。**
+     *
+     * ── 换过来之后的好处 ──────────────────────────────────
+     *    · 鉴权、wbi 签名、cookie 刷新都由 `bilibili_api` 处理，我不再操心
+     *    · `bili_comments` 内部**自己翻页**（page_index 递增，直到 num 满或没有更多）
+     *    · 出错时它返回 `count: 0`（异常被它吞了），所以**不能只看 count**：
+     *      这里额外判断"视频真有评论但拿到 0"⇒ 如实报错，别让用户以为没人评论
+     *
+     * ⚠️ **代价（必须记住）**：`bili_comments` 的返回**只有 6 个字段**
+     *      `{ rpid, user, content, like, reply_count, time }`
+     *    —— **没有 `mid`，也没有 `content.members`**。所以：
+     *      · 判断"带 @"只能看**正文里有没有 @**
+     *      · 白名单（按 mid）在这里拿不到 mid ⇒ 靠 `user`（昵称）兜底匹配
+     */
     const cookie = credCookie()
-    // 增量模式最多翻 5 页（新的都在前面）；全量最多翻 30 页
-    const maxPages = incremental ? 5 : 30
-    for (let pn = 1; pn <= maxPages; pn++) {
-      let j
-      try {
-        j = await biliGet(
-          `https://api.bilibili.com/x/v2/reply?type=1&oid=${meta.aid}&sort=0&pn=${pn}&ps=20`,
-          cookie,
-        )
-      } catch (e) {
-        // ⚠️ 已经拿到部分就照用（增量模式下这是正常的：前面几页已经够了）
-        if (all.length) break
-        return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `拉评论失败（第 ${pn} 页）：${e?.message ?? e}` }
-      }
-      const reps = Array.isArray(j?.data?.replies) ? j.data.replies : []
-      if (!reps.length) break
-      scannedPages = pn
-      for (const x of reps) {
-        const ct = Number(x.ctime) || 0
-        if (ct > newestCtime) newestCtime = ct
-        // ⭐ 增量：这条比"上次扫到的时间"还早 ⇒ 后面的都更早，可以停
-        if (incremental && ct <= Number(sinceTime)) { hitOld = true; continue }
-        all.push(x)
-      }
-      if (hitOld) break
-      // 防风控（读也一样有频率限制）
-      await new Promise((r) => setTimeout(r, 800))
+    const incremental = Number(sinceTime) > 0
+    // 增量模式少拿点（新的都在前面）；全量按 500 上限拿
+    const wantNum = incremental ? 60 : 500
+
+    let rec
+    try {
+      const raw = await call('bili_comments', { bvid, num: wantNum })
+      rec = raw
+      if (typeof rec === 'string') { try { rec = JSON.parse(rec) } catch { /* 保持原样 */ } }
+    } catch (e) {
+      return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `取评论失败（MCP）：${e?.message ?? e}` }
     }
+    const list = Array.isArray(rec?.comments) ? rec.comments : []
+    /**
+     * ⚠️ **`count: 0` 有两种含义**，必须分辨：
+     *    · 真的没评论
+     *    · `bili_comments` 内部异常被 `except: break` 吞掉（它不报错，只给空列表）
+     * ⇒ 用视频的**评论总数**（`meta` 里没有，但可以用 stat）粗判：
+     *    这里退一步 —— 拿到 0 条就把"可能是接口失败"讲清楚，别假装"没评论"。
+     */
+    if (!list.length) {
+      return {
+        ok: false,
+        total: 0,
+        items: [],
+        scannedPages: 0,
+        newestCtime: 0,
+        error: '取到 0 条评论。可能是这个视频真的没有评论，'
+          + '也可能是 B站 接口那边失败了（MCP 的 bili_comments 会把异常吞掉、直接返回空列表）。'
+          + '再点一次「扫描」试试；一直这样就用 bilij_comments 单独验一下。',
+      }
+    }
+
+    let newestCtime = 0
+    const all = []
+    for (const x of list) {
+      const ct = Number(x.time) || 0
+      if (ct > newestCtime) newestCtime = ct
+      if (incremental && ct <= Number(sinceTime)) continue
+      all.push(x)
+    }
+    const scannedPages = 1
 
     const items = []
     const kwActive = (() => {
       const split = (s) => String(s || '').split(/\s+/).filter(Boolean)
       return split(cfg.cleanKwUname).length > 0 || split(cfg.cleanKwMessage).length > 0
     })()
-    let kwFilteredOut = 0
+    let kwExtra = 0        // 靠关键词额外捞进来的（本来没 @ 的）
+    let hasAtCount = 0     // 带 @ 的条数
     for (const x of all) {
-      const ct = x.content || {}
-      const mems = Array.isArray(ct.members) ? ct.members : []
-      // ⭐ 使用者的判据：**带 @ 的一级评论就算**（不看 @ 在开头还是结尾）
-      if (!mems.length) continue
-      const mem = x.member || {}
-      const msg = String(ct.message || '')
-      const uname = String(mem.uname || '')
       /**
-       * ⭐ **关键词筛选**（2026-10-26）。
-       * 没设关键词 ⇒ `matchBotKeywords` 返回 `active:false, hit:true` ⇒ 全部通过。
-       * 设了 ⇒ 只留命中的；被筛掉的**计数**报给面板，让用户知道筛掉了多少。
+       * ⚠️ **字段名按 MCP `bili_comments` 的返回**（2026-10-26）：
+       *    `{ rpid, user, content, like, reply_count, time }`
+       *    —— 不是 B站 原始 JSON 的 `member.uname` / `content.message`。
+       *    ⚠️ 也**没有 `mid`、没有 `content.members`**（MCP 侧只挑这 6 个字段）。
+       */
+      const msg = String(x.content || '')
+      const uname = String(x.user || '')
+      /**
+       * 🔴🔴 **「带 @」只能看正文里有没有 @**（2026-10-26）。
+       *
+       * 原来的判断是 `content.members` 非空。两个原因都不能用了：
+       *   ① MCP 的返回里**根本没有 members 字段**
+       *   ② 就算有也不可靠 —— 实测 4 条正文含 `@茄子舅舅` 的评论里，
+       *      `members` 只有 2 条有值（另 2 条是空的）。
+       *
+       * ⇒ 改成**看正文**：出现 `@xxx` 形式就算带 @。
+       *   宽一点（正文里孤零零一个 @ 符号也会命中），但**宁可多收、不可漏收**
+       *   —— 漏一条就是那条机器人留言永远留在评论区。
+       */
+      const hasAt = /@[^\s@]/.test(msg)
+      /**
+       * 🔴🔴 **候选判据 = 「带 @」 OR 「命中关键词」**（2026-10-26 按使用者澄清重做）。
+       *
+       * 使用者原话：
+       *   「应该是 + 或的逻辑啊。就是用 @ 筛选一波，然后没有 @ 的里面，
+       *    再把所有命中关键词的也筛出来。」
+       *
+       * ⇒ 关键词是**额外补充的捞取条件**，不是"过滤条件"。两层：
+       *    ① 带 @ 的 —— **无条件全要**（这是主体，弹幕/留言里 @ 了人的）
+       *    ② 没 @ 的 —— 只有**命中关键词**才额外要（昵称命中 or 正文命中）
+       *
+       * ⚠️ **我上一版写错了**：做成了"必须命中关键词"，于是
+       *   `带@ AND 命中关键词` ⇒ 关键词没覆盖到的机器人全被丢掉 ⇒
+       *   **加了筛选反而更少**（使用者原话：「加了筛选反而搜到的结果更少了」）。
+       *   现在的写法保证「加筛选只会变多、不会变少」：
+       *   没设关键词 ⇒ 所有带 @ 的照旧；设了 ⇒ 带 @ 的 + 额外命中的。
        */
       const kw = matchBotKeywords(uname, msg)
-      if (!kw.hit) { kwFilteredOut++; continue }
+      let take = false
+      let why = ''
+      if (hasAt) { take = true; why = 'hasAt'; hasAtCount++ }
+      else if (kw.active && kw.hit) { take = true; why = 'kw'; kwExtra++ }
+      if (!take) continue
       items.push({
         rpid: String(x.rpid),
-        mid: String(mem.mid || ''),
+        /**
+         * ⚠️ MCP 返回里**没有 mid** ⇒ 这里留空。
+         *    白名单因此只能按**昵称**兜底匹配（见下面的 whitelisted）。
+         *    ⚠️ 这是 MCP 接口的固有限制；要按 mid 精确判就得改 vendor（不能动）。
+         */
+        mid: '',
         uname,
         message: msg,
-        at: mems.map((m) => ({ mid: String(m.mid || ''), uname: String(m.uname || '') })),
+        /** MCP 不给 members ⇒ 空数组（不再拿它做判断，只留给"搬进楼"时拼文本用） */
+        at: [],
         like: Number(x.like) || 0,
-        rcount: Number(x.rcount) || 0,
-        ctime: Number(x.ctime) || 0,
-        state: Number(x.state) || 0,
-        /** 插件自己发的、或已在白名单里的 ⇒ 标出来，界面上好区分 */
-        isSelf: String(mem.mid || '') === selfMid(),
-        whitelisted: inWhitelist(mem.mid),
+        rcount: Number(x.reply_count) || 0,
+        ctime: Number(x.time) || 0,
+        state: 0,
+        /** 插件自己发的 ⇒ 按**昵称**判断（拿不到 mid） */
+        isSelf: false,
+        /**
+         * 🔴 白名单**按昵称兜底**（2026-10-26）。
+         * MCP 不给 mid ⇒ 用 `user`（昵称）去比白名单里存过的名字。
+         * 代价：同名会误跳（但总比"按 mid 拿不到 mid"直接失效强）。
+         */
+        whitelisted: inWhitelistByName(uname),
+        /**
+         * ⭐ **这条是怎么被选中的**（2026-10-26）：
+         *   · `'hasAt'` —— 带 @（主体，无条件要）
+         *   · `'kw'`    —— 本来没 @，靠关键词额外捞进来的
+         * 面板上要区分显示 —— 后者是"关键词的额外收获"，用户能看出筛选起了什么作用。
+         */
+        pickedBy: why,
       })
     }
     return {
@@ -4382,38 +4485,50 @@ export function apply(ctx, config) {
       scannedPages,
       newestCtime,
       incremental,
-      /** ⭐ 关键词筛选信息（面板据此显示"被关键词筛掉 N 条"） */
+      /**
+       * ⭐ 关键词信息（2026-10-26 改成"额外捞取"语义）：
+       *   · `kwActive`  —— 用户到底设了关键词没有
+       *   · `hasAtCount` —— 带 @ 的条数（主体）
+       *   · `kwExtra`   —— 靠关键词**额外**捞进来的条数（本来没 @）
+       * ⚠️ 不再有 `kwFilteredOut` —— 关键词现在**不会筛掉任何东西**，
+       *    它只会让候选变多。原来那个名字会误导（用户以为"被筛掉了"）。
+       */
       kwActive,
-      kwFilteredOut,
+      hasAtCount,
+      kwExtra,
     }
   }
 
   /**
-   * ⭐ **关键词筛选**（2026-10-26 加，使用者要求：
-   *    「用户可以自己设置对于用户昵称和评论的关键词设置（分别做），去筛选机器人。
-   *      可以输入多个，以空格分隔。」）。
+   * ⭐ **关键词匹配**（2026-10-26 加，语义按使用者澄清重做）。
    *
-   * ── 语义（这几个决定都会影响使用者看到的结果，写清楚）──────────────
-   *   ① **两个维度分开匹配**：昵称关键词只打昵称，正文关键词只打正文。
-   *      不交叉 —— 否则「在昵称里写了"养鱼"，正文里提到养鱼也被删」这种误伤没法避免。
-   *   ② **两个维度之间是"或"**：命中任意一个就算机器人。
-   *      （用户要么按昵称找、要么按内容找，两边都能捞到才符合直觉。）
-   *   ③ **同一维度内是"或"**：写了多个词，命中任一即可。
-   *   ④ **子串匹配、不区分大小写**：中文没有"词"的边界，
+   * 🔴🔴 **它不是"过滤器"，是"额外捞取条件"**。使用者原话：
+   *    「应该是 + 或的逻辑啊。就是用 @ 筛选一波，然后没有 @ 的里面，
+   *     再把所有命中关键词的也筛出来。」
+   *    ⇒ 候选 = **带 @ 的** ∪ **命中关键词的**
+   *    ⇒ 关键词**永远不会让结果变少**，只会变多。
+   *
+   * ⚠️ 我第一版写成了"必须命中关键词"（交集），导致
+   *    「加了筛选反而搜到的结果更少了」—— 那版是错的，已改。
+   *
+   * ── 匹配细节 ──────────────────────────────────────────
+   *   ① 昵称关键词只打昵称、正文关键词只打正文，**不交叉**
+   *      （否则"昵称里写了养鱼、正文提到养鱼也被删"这种误伤没法避免）。
+   *   ② 两个维度之间是"或"：命中任一就算命中。
+   *   ③ 同一维度内也是"或"：多个词命中任一即可。
+   *   ④ **子串匹配、不区分大小写**：中文没有"词"边界，
    *      「大肥鱼」要能命中「林的大肥鱼」。
-   *   ⑤ **某一维度留空 = 该维度不限制**（不是"谁都不匹配"）。
-   *   ⑥ **两个都留空 = 完全不过滤**，保留老的「凡是带 @ 就处理」行为。
+   *   ⑤ 两个都空 ⇒ `active:false, hit:false`（调用方据此走"只处理带 @"的老逻辑）。
    *
    * @returns {{active:boolean, hit:boolean, byUname:boolean, byMessage:boolean}}
-   *   `active` 表示"用户到底有没有设置筛选"（全空就是 false）
+   *   `active` = 用户设了关键词没有；`hit` = 这条命中了没有
    */
   const matchBotKeywords = (uname, message) => {
     const split = (s) => String(s || '').split(/\s+/).map((x) => x.trim().toLowerCase()).filter(Boolean)
     const kwU = split(cfg.cleanKwUname)
     const kwM = split(cfg.cleanKwMessage)
     if (!kwU.length && !kwM.length) {
-      // 没设筛选 ⇒ 全部通过（active:false，调用方据此不显示"被筛掉"）
-      return { active: false, hit: true, byUname: false, byMessage: false }
+      return { active: false, hit: false, byUname: false, byMessage: false }
     }
     const u = String(uname || '').toLowerCase()
     const m = String(message || '').toLowerCase()
@@ -4843,7 +4958,9 @@ export function apply(ctx, config) {
           待处理: pending.length,
           跳过_白名单或自己: sc.items.length - pending.length,
           /** ⭐ 关键词筛选状态（2026-10-26）：没设就 false */
-          关键词筛选: sc.kwActive ? `已启用，筛掉 ${sc.kwFilteredOut} 条` : '未设置（带 @ 的都算）',
+          关键词: sc.kwActive
+            ? `已启用 —— 带 @ 的 ${sc.hasAtCount} 条全部保留，另外靠关键词多捞到 ${sc.kwExtra} 条`
+            : '未设置（只按"带 @"）',
           将分几批: `${Math.ceil(pending.length / (Number(cfg.cleanBatchSize) || 30))} 批（每批 ${Number(cfg.cleanBatchSize) || 30} 条）`,
           清单: pending.slice(0, 50).map((it) => ({
             rpid: it.rpid, 作者: it.uname, mid: it.mid, at谁: it.at.map((a) => a.uname),
@@ -8632,12 +8749,19 @@ export function apply(ctx, config) {
         bvid,
         title: sc.title,
         total: sc.total,
+        /** ⚠️ 现在是"入选总条数"（带 @ 的 + 关键词额外捞的），不只是带 @ 的 */
         withAt: sc.items.length,
         pending: pending.length,
         skipped: sc.items.length - pending.length,
-        /** ⭐ 关键词筛选状态（面板据此显示"被关键词筛掉 N 条"） */
+        /**
+         * ⭐ 关键词信息（2026-10-26，语义 = "额外捞取"不是"过滤"）：
+         *   · kwActive  —— 设了关键词没有
+         *   · hasAtCount —— 带 @ 的（主体，全部保留）
+         *   · kwExtra   —— 靠关键词额外捞到的（本来没 @）
+         */
         kwActive: sc.kwActive,
-        kwFilteredOut: sc.kwFilteredOut,
+        hasAtCount: sc.hasAtCount,
+        kwExtra: sc.kwExtra,
         kwUname: String(cfg.cleanKwUname || ''),
         kwMessage: String(cfg.cleanKwMessage || ''),
         items: sc.items.map((it) => ({
@@ -8647,6 +8771,8 @@ export function apply(ctx, config) {
           willPost: buildMovedText(it),
           isSelf: it.isSelf, whitelisted: it.whitelisted,
           state: it.state,
+          /** ⭐ 'hasAt' = 带 @（主体） / 'kw' = 关键词额外捞的 */
+          pickedBy: it.pickedBy,
         })),
       })
     }
