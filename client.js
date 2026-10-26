@@ -644,17 +644,6 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-logline][data-bd-lv="step"]>[data-bd-logmsg]{color:#60a5fa;}
 [data-bd-logline][data-bd-lv="info"]>[data-bd-logmsg]{color:#d1d5db;}
 
-/* ════════ 多行输入（2026-10-26 加，收纳楼文案用）════════
- * 复用 [data-bd-input] 的边框/圆角/字号，只补多行特有的几条。
- */
-[data-bd-textareawrap]{display:flex;flex-direction:column;gap:6px;width:100%;}
-[data-bd-textarea]{resize:vertical;min-height:84px;max-height:240px;
-  /* ⚠️ 多行要 line-height 才好看，且 padding 上下对称 */
-  line-height:20px;padding:8px 10px;
-  font-family:inherit;white-space:pre-wrap;word-break:break-word;}
-[data-bd-textareafoot]{display:flex;align-items:center;gap:8px;}
-[data-bd-textareafoot]>[data-bd-note]{flex:1 1 0%;min-width:0;margin:0;}
-
 [data-bd-confirm]{position:fixed;inset:0;z-index:60;display:flex;
   align-items:center;justify-content:center;padding:16px;
   background:rgba(0,0,0,.38);}
@@ -2272,16 +2261,33 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         if (c.cleanBvid) setCleanDraft(String(c.cleanBvid))
         if (c.cleanKwUname) setCleanKwUname(String(c.cleanKwUname))
         if (c.cleanKwMessage) setCleanKwMessage(String(c.cleanKwMessage))
-        /**
-         * ⭐ 收纳楼文案（2026-10-26）。
-         * ⚠️ **配置里是空串时，要显示"出厂默认"而不是空框** ——
-         *    否则用户会以为文案没了，一打开面板就是一片空白。
-         *    ⇒ 用后端给的 `cleanFloorTextDefault` 填进去。
-         *    ⚠️ 但**不写回配置**（配置保持空串 = "用默认"），
-         *       所以这里只 setState，不 patch。
-         */
-        setCleanFloorText(String(c.cleanFloorText || st?.cleanFloorTextDefault || ''))
       }, [st?.config])
+
+      /**
+       * ⭐ **收纳楼文案的初值**（2026-10-26，独立一个 effect）。
+       *
+       * 使用者要求：「你应该把默认值直接填进去，处理应该跟提示词那块是一样的。」
+       * ⇒ 跟 `PromptDoc` 一样：输入框里**直接就是当前生效的内容**，
+       *    配置空串时就是出厂默认，不是空白 + placeholder。
+       *
+       * 🔴 为什么不能塞进上面那个 `cfgInited` 里：
+       *    `cfgInited` 一旦置 true 就不再执行，而 `cleanFloorTextDefault`
+       *    与 `config` 虽是同一个 `/status` 返回、**但字段到达顺序不能假定**。
+       *    万一 `config` 先到、`cleanFloorTextDefault` 还是 undefined，
+       *    就会灌一个空串进去然后永久锁死 ⇒ 输入框永远空白。
+       * ⇒ 单独一个 effect，**只在"真的拿到值"之后才上锁**。
+       *
+       * ⚠️ 上锁之后不再干预（否则你打字打到一半会被冲掉 —— 这个坑踩过多次）。
+       */
+      const floorTextInited = React.useRef(false)
+      React.useEffect(() => {
+        if (floorTextInited.current) return
+        const eff = String(st?.config?.cleanFloorText || '')
+        const def = String(st?.cleanFloorTextDefault || '')
+        if (eff) { setCleanFloorText(eff); floorTextInited.current = true; return }
+        // 配置是空 ⇒ 用出厂默认；但**默认值还没到就再等等**，别灌空串锁死
+        if (def) { setCleanFloorText(def); floorTextInited.current = true }
+      }, [st?.config?.cleanFloorText, st?.cleanFloorTextDefault])
 
       React.useEffect(() => {
         if (applyingRemote.current) { applyingRemote.current = false; return }
@@ -4766,12 +4772,28 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               label: '收纳楼文案',
               note: '新建收纳楼时用的正文。留空则用出厂默认。改这个不会影响已经建好的楼。',
               stack: true,
-              children: h('div', { 'data-bd-textareawrap': '' },
+              /* ⚠️ 这里**不能用 `data-bd-sub`**（2026-10-26 修）：
+                 `[data-bd-sub] > *` 会给每个直接子元素加 16px 上下 padding + 下边框，
+                 而外层 `Field`（`data-bd-field`）作为折叠加的直接子元素**已经吃过一份行样式**
+                 ⇒ 两份叠加 ⇒ 变成"上 32 / 下 16"那种不齐（库里那条 trap 讲的就是这个）。
+                 ⇒ 用**纯内联的竖排容器**：不加任何视觉词汇，只是把三块竖着排开。 */
+              children: h('div', {
+                style: { display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' },
+              },
                 h('textarea', {
                   'data-bd-input': '',
-                  'data-bd-textarea': '',
+                  'data-bd-persona': '',
                   rows: 4,
-                  placeholder: st.cleanFloorTextDefault || '【收纳楼】这里收纳本视频下机器人代发的留言…',
+                  placeholder: '【收纳楼】这里收纳本视频下机器人代发的留言…',
+                  /**
+                   * ⭐ **默认值直接填进去**（2026-10-26 使用者要求：
+                   *    「你应该把默认值直接填进去，处理应该跟提示词那块是一样的。」）
+                   *
+                   * 提示词那块（`PromptDoc`）的做法是：`value: draft`，而 `draft` 由后端
+                   * 给的"当前生效内容"灌进来（配置空串时后端就给默认文案）。
+                   * ⇒ 这里同样：`cleanFloorText` 的初值 = `cfg.cleanFloorText || 默认`，
+                   *    所以在输入框里**看得到默认文案**，而不是空白 + placeholder。
+                   */
                   value: cleanFloorText,
                   onInput: (e) => setCleanFloorText(e.target.value),
                   onBlur: () => {
@@ -4779,20 +4801,26 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     if (v !== String(cfg.cleanFloorText || '')) patch({ cleanFloorText: v }, '收纳楼文案')
                   },
                 }),
-                h('div', { 'data-bd-textareafoot': '' },
-                  h('span', { 'data-bd-note': '', 'data-bd-noteonly': '' },
-                    `${String(cleanFloorText || '').length} / 1000 字`
-                    + (String(cleanFloorText || '').trim() ? '' : '（留空 = 用出厂默认）')),
+                /* ⭐ 按钮组跟「提示词」那几块**完全同一套**（`data-bd-foot` + 普通 `data-bd-btn`），
+                   不再用 `data-bd-mini` —— 那个是自创的小号样式，全插件只有这里用，看着不统一。 */
+                h('div', { 'data-bd-foot': '' },
                   h('button', {
                     'data-bd-btn': '',
-                    'data-bd-mini': '',
+                    // ⭐ 已经是默认值时禁用（跟 PromptDoc 的「已是默认」一个逻辑）
+                    disabled: !String(cleanFloorText || '').trim()
+                      || String(cleanFloorText).trim() === String(st.cleanFloorTextDefault || '').trim(),
                     onClick: () => {
-                      // ⭐ 从后端拿默认值（前端不抄一份）
                       const d = String(st.cleanFloorTextDefault || '')
                       setCleanFloorText(d)
                       patch({ cleanFloorText: '' }, '收纳楼文案')   // 空串 = 用默认
                     },
-                  }, '恢复默认'))),
+                  }, (String(cleanFloorText || '').trim() === String(st.cleanFloorTextDefault || '').trim())
+                    ? '已是默认' : '恢复默认'),
+                  h('span', { 'data-bd-note': '' }, `${String(cleanFloorText || '').length} 字符`)),
+                h('div', { 'data-bd-note': '' },
+                  '⚠️ 只在「新建」收纳楼时用到；已经建好的楼不会变。',
+                  h('br'),
+                  '留空保存 = 回到出厂默认（不会发一条空评论）。')),
             }),
 
             // ── 操作按钮 ──
