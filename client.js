@@ -4352,14 +4352,37 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               }),
             }),
 
+            /* ⭐ **自动整理 = 独立开关**（2026-10-26 使用者要求：
+             *    「还是给他单独开关吧，关闭时折叠间隔的设置。打开时可以设置间隔。」）
+             * ⇒ 关着时**间隔输入框不渲染**（折叠），打开才出现。 */
             h(ToggleRow, {
-              label: '每 5 分钟自动整理',
-              note: '默认关闭。开着且填了目标视频时，后台每 5 分钟跑一轮：'
+              label: '自动整理',
+              note: '默认关闭。打开后会定期跑一轮（间隔在下面设）：'
                 + '扫描 → 把带 @ 的机器人留言搬到收纳楼 → 删掉原留言。'
                 + '⚠️ 这一套会真的删评论，且不可撤销 —— 建议先手动「扫描」看几轮清单再开。',
               on: sw('cleanEnabled'),
-              onChange: (v) => patch({ cleanEnabled: v }, '每 5 分钟自动整理'),
+              onChange: (v) => patch({ cleanEnabled: v }, '自动整理'),
             }),
+
+            /* ⭐ **间隔只在「自动整理」开着时出现**（折叠）。
+             * 🔴 `0` = 不自动清理（开关留着便于随时恢复）。
+             * 🔴 计时语义写进说明：**上一轮跑完之后才开始计时**，
+             *    不是"每 N 分钟准时启动一次" —— 必须让使用者看见，
+             *    否则他会以为"设了 5 分钟就该每 5 分钟看到一次动静"。 */
+            sw('cleanEnabled') ? h(Field, {
+              label: '整理间隔（分钟）',
+              note: '默认 5 分钟。填 0 = 不自动清理（但保留上面的开关状态）。'
+                + '⚠️ 计时是「上一轮跑完之后」才开始算 —— 不是每 N 分钟准时启动一次。'
+                + '所以一轮如果跑了 3 分钟，下一轮在它结束后再过 5 分钟才开，不会叠加。',
+              children: h('input', {
+                'data-bd-input': '',
+                type: 'number',
+                min: '0',
+                max: '1440',
+                value: String(cfg.cleanIntervalMin ?? 5),
+                onChange: (e) => patch({ cleanIntervalMin: Number(e.target.value) }, '整理间隔'),
+              }),
+            }) : null,
 
             h(Field, {
               label: '每轮最多处理几条',

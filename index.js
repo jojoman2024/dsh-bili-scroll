@@ -304,16 +304,35 @@ export const Config = !z ? undefined : z.object({
   /**
    * ⭐ **面板折叠开关**（2026-10-26 加，使用者要求「关闭时相关选项折叠」）。
    * ⚠️ 它**只管界面**：关着时面板上那些输入框/按钮不渲染，
-   *    但**不影响** `cleanEnabled`（那个才是"每 5 分钟自动跑"的开关）。
+   *    但**不影响** `cleanEnabled`（那个才是"自动跑"的开关）。
    *    两个分开是有意的 —— 你可以只想手动扫一次、不想开自动。
    */
   cleanUiOpen: z.boolean().default(false).extra('volatile', true),
-  /** 是否开启「每 5 分钟自动整理」—— 默认关 */
+  /** 是否开启自动整理 —— 默认关 */
   cleanEnabled: z.boolean().default(false).extra('volatile', true),
+  /**
+   * ⭐ **自动整理的间隔（分钟）**，默认 5（2026-10-26 加，使用者要求可配置）。
+   *
+   * 🔴 **`0` = 不自动清理**（等同关掉自动，但保留开关状态便于恢复）。
+   * 🔴 **计时语义：上一轮【处理完成】之后才开始计时**，不是"每 N 分钟准时启动一次"。
+   *    ⇒ 一轮如果跑了 3 分钟，那下一轮是在「结束时刻 + N 分钟」才开，
+   *      **不会叠加**、也不会追赶。
+   *    这是使用者明确要求的：「5 分钟间隔指的是前一次处理完成后才计时 5 分钟，
+   *    不是 5 分钟就启动一次。」
+   */
+  cleanIntervalMin: z.number().default(5).extra('volatile', true),
   /** 每轮最多处理几条（⚠️ 每条约 2 次写请求，调大会 -509） */
   cleanPerRound: z.number().default(5).extra('volatile', true),
   /** 上次成功执行的时间戳（增量扫描用） */
   cleanLastScanAt: z.number().default(0).extra('volatile', true),
+  /**
+   * ⭐ **上一轮自动整理【结束】的时刻**（2026-10-26 加，给"完成后计时"用）。
+   *    调度判据：`now - cleanLastRunEndAt >= intervalMin * 60_000`。
+   *    ⚠️ 与 `cleanLastScanAt` 不是一回事：那个是"上次成功扫描"，
+   *    这个是"上一轮整轮跑完"（含失败结束）—— 调度必须用后者，
+   *    否则一轮跑很久时会被立刻再触发一次。
+   */
+  cleanLastRunEndAt: z.number().default(0).extra('volatile', true),
   /**
    * ⭐⭐ **管理员权限**（2026-10-17 加，面板「实验功能」页里的那个开关）。
    *
@@ -476,6 +495,7 @@ export function apply(ctx, config) {
     freeformWatch: true, watchNote: '',
     commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
     cleanBvid: '', cleanEnabled: false, cleanPerRound: 5, cleanLastScanAt: 0, cleanUiOpen: false,
+    cleanIntervalMin: 5, cleanLastRunEndAt: 0,
     adminMode: false,
     /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
     absoluteGuard: true,
@@ -6421,6 +6441,78 @@ export function apply(ctx, config) {
    */
   const nowHHMM = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 
+  /**
+   * ⭐ **自动评论区整理：正在跑吗**（2026-10-26 加）。
+   *
+   * 作用有两个，缺一不可：
+   *   ① **防重入** —— 一轮可能跑几十秒（每条 1.5 秒间隔 + 建楼），
+   *      期间 tick 会再来好几次，不能每次都起一轮；
+   *   ② **实现"完成后计时"的一半** —— 跑着的时候直接跳过，
+   *      跑完在 `.finally` 里把「结束时刻」写进 `cleanLastRunEndAt`，
+   *      下一次判据就是「结束时刻 + 间隔」。
+   *
+   * ⚠️ 这是**进程内变量**：宿主重启后归 false（正确 —— 重启后本来就没有在跑的轮次）。
+   */
+  let cleanRunning = false
+
+  /**
+   * ⭐ **自动评论区整理的一跳**（2026-10-26 加）。
+   *
+   * 🔴 **为什么必须单独一个函数、不能塞进 `tick()` 末尾**
+   *    `tick()` 开头有一条 `if (!cfg.peakValley) return` ——
+   *    峰谷关着就直接返回了，而**评论区整理跟峰谷毫无关系**
+   *    （使用者可能压根不开峰谷，只想整理评论）。
+   *    ⇒ 塞进 tick 末尾会导致"峰谷关着时永远不自动整理"，而且**不报错**。
+   *    （这个 bug 我写的时候真踩了，探针发现的：fetch 一次都没被调用。）
+   *
+   * 🔴 **计时语义：上一轮【跑完】之后才开始计时**（使用者明确要求：
+   *    「5 分钟间隔指的是前一次处理完成后才计时 5 分钟，不是 5 分钟就启动一次」）。
+   *    ⇒ 判据用 `cleanLastRunEndAt`（整轮结束时刻），**不是**"上次启动时刻"。
+   *    这样一轮跑 3 分钟时，下一轮在「结束 + 5 分钟」才开，不会叠加或追赶。
+   *
+   * 🔴 `cleanIntervalMin === 0` ⇒ **不自动清理**（开关留着，便于随时恢复）。
+   *
+   * ⚠️ 三道闸缺一不可：① 开关开着 ② 间隔 > 0 ③ 填了目标视频
+   * ⚠️ `cleanRunning` 防重入：一轮还没跑完时，后面的 tick 一律跳过
+   *    —— 这本身就实现了一半的"完成后计时"。
+   */
+  const cleanTick = () => {
+    try {
+      if (cfg.cleanEnabled !== true) return
+      const intervalMin = Number(cfg.cleanIntervalMin)
+      const hasTarget = String(cfg.cleanBvid || '').trim() !== ''
+      if (!Number.isFinite(intervalMin) || intervalMin <= 0 || !hasTarget) return
+      if (cleanRunning) return
+      const lastEnd = Number(cfg.cleanLastRunEndAt) || 0
+      if (Date.now() - lastEnd < intervalMin * 60_000) return
+
+      cleanRunning = true
+      /**
+       * ⚠️ **不 await**（这是同步的节拍函数，不能让一轮跑 30 秒卡住它）；
+       *    但**必须自己兜住 rejection**（定时器里外冒的异常会杀宿主）。
+       */
+      Promise.resolve()
+        .then(() => runCommentClean(String(cfg.cleanBvid).trim(), Number(cfg.cleanPerRound) || 5))
+        .then((r) => {
+          if (r?.ok) {
+            saveCfg({ cleanLastScanAt: Date.now() })
+            log(`自动整理完成：扫到 ${r.scanned} 条，处理 ${r.todo} 条，成功 ${r.done}，失败 ${r.failed}`)
+          } else {
+            log(`自动整理失败（已兜住）：${r?.error ?? '未知'}`)
+          }
+        })
+        .catch((e) => log(`自动整理抛错（已兜住）：${e?.stack ?? e}`))
+        .finally(() => {
+          cleanRunning = false
+          // ⭐ **计时起点 = 这一刻**（整轮结束），不是启动时刻
+          saveCfg({ cleanLastRunEndAt: Date.now() })
+        })
+    } catch (e) {
+      log(`自动整理这一跳出错（已兜住）：${e?.stack ?? e}`)
+      cleanRunning = false
+    }
+  }
+
   const tick = () => {
     try {
       if (!cfg.peakValley) return
@@ -6478,9 +6570,20 @@ export function apply(ctx, config) {
   }
 
   try {
-    const timer = setInterval(tick, 60_000)
+    /**
+     * ⚠️ 一个 60 秒节拍同时驱动**两件互不相干的事**：
+     *    · `tick()`      —— 刷B站那一轮（受峰谷/时间点/每日上限约束）
+     *    · `cleanTick()` —— 评论区自动整理（只受它自己的开关+间隔约束）
+     * 🔴 这两件**必须分开调**：`tick()` 开头有 `if (!cfg.peakValley) return`，
+     *    把清理塞进它后面会导致"峰谷关着时永远不自动整理"（这是真踩过的 bug）。
+     */
+    const beat = () => {
+      try { tick() } catch (e) { log(`tick 抛错（已兜住）：${e?.message ?? e}`) }
+      try { cleanTick() } catch (e) { log(`cleanTick 抛错（已兜住）：${e?.message ?? e}`) }
+    }
+    const timer = setInterval(beat, 60_000)
     timer.unref?.()                                    // 别因为这个定时器让进程不肯退出
-    ctx.effect(() => () => clearInterval(timer), 'bili-duty: 谷时定时器')
+    ctx.effect(() => () => clearInterval(timer), 'bili-duty: 谷时 + 评论区整理 定时器')
   } catch (e) { log(`定时器没起来：${e?.message ?? e}`) }
 
   /* ─────────────── HTTP（设置页用） ─────────────── */
@@ -7430,8 +7533,8 @@ export function apply(ctx, config) {
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
         'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
-        // 评论区整理（2026-10-26）：目标视频 / 开关 / 每轮上限
-        'cleanBvid', 'cleanEnabled', 'cleanPerRound', 'cleanLastScanAt', 'cleanUiOpen',
+        // 评论区整理（2026-10-26）：目标视频 / 开关 / 间隔 / 每轮上限
+        'cleanBvid', 'cleanEnabled', 'cleanIntervalMin', 'cleanPerRound', 'cleanLastScanAt', 'cleanLastRunEndAt', 'cleanUiOpen',
         // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
         'absoluteGuard',
         'personaEnabled', 'personaMaxChars',
@@ -7461,7 +7564,16 @@ export function apply(ctx, config) {
         patch.cleanBvid = m ? m[1] : String(patch.cleanBvid || '').trim()
       }
       if ('cleanPerRound' in patch) patch.cleanPerRound = Math.max(1, Math.min(Math.floor(Number(patch.cleanPerRound) || 5), 50))
+      /**
+       * ⭐ 间隔（分钟）：**`0` 是合法值**（表示不自动清理），不要用 `|| 5` 兜掉。
+       *    上限给 1440（一天）—— 再大就没意义了，还会让"看起来没在跑"。
+       */
+      if ('cleanIntervalMin' in patch) {
+        const n = Number(patch.cleanIntervalMin)
+        patch.cleanIntervalMin = Number.isFinite(n) ? Math.max(0, Math.min(Math.floor(n), 1440)) : 5
+      }
       if ('cleanLastScanAt' in patch) patch.cleanLastScanAt = Math.max(0, Number(patch.cleanLastScanAt) || 0)
+      if ('cleanLastRunEndAt' in patch) patch.cleanLastRunEndAt = Math.max(0, Number(patch.cleanLastRunEndAt) || 0)
       // ⭐ **两个"每轮几条"的额度：只保证 >= 1，不设上限**（2026-10-16 改）。
       //    原来给 replyPerRound 夹了 1..10、commentPerRound 干脆没夹。
       //    使用者要求去掉上限（"大于 1 即可"）—— 想回多少条是他自己的事。
