@@ -4108,6 +4108,64 @@ export function apply(ctx, config) {
     }
     writeJson(floorFile, all)
   }
+  /**
+   * ⭐ **失败账本**（2026-10-26 加，使用者要求
+   *    「每一步都要有回执，失败重试，失败记录并跳过」）。
+   *
+   * ⚠️ **使用者选的是"只记录、不跳过"**（他明确选了 C）：
+   *    失败项**下一轮照样重试** —— 因为绝大多数失败是偶发的
+   *    （`-509` 限流、网络抖动、MCP 临时卡住），跳过反而让它们永远烂在那儿。
+   *    这份账本的作用是**"事后能查、能看见"**，不是"拉黑"。
+   *
+   * 结构：`{ "<BV号>": { "<原rpid>": { step, code, error, tries, at, text, uname } } }`
+   *   · `step`  —— 失败发生在哪一步：build（建楼）/ move（发楼中楼）/ del（删原评论）
+   *   · `tries` —— 累计试了几次（跨轮次累加，用来判断"老是它失败"）
+   *
+   * ⚠️ 成功后**要把这条从账本里删掉**，否则账本会越积越多、看不出"现在还有哪些是坏的"。
+   */
+  const failFile = join(stateDir, 'comment-failures.json')
+  const readFails = () => {
+    const j = readJson(failFile, null)
+    return (j && typeof j === 'object' && !Array.isArray(j)) ? j : {}
+  }
+  const listFails = (bvid) => {
+    const all = readFails()
+    const one = all[String(bvid || '').trim()]
+    return (one && typeof one === 'object') ? one : {}
+  }
+  /** 记一条失败（跨轮次累加 tries） */
+  const markFail = (bvid, item, step, code, error, text) => {
+    const all = readFails()
+    const k = String(bvid || '').trim()
+    const cur = (all[k] && typeof all[k] === 'object') ? all[k] : {}
+    const id = String(item?.rpid || '')
+    if (!id) return
+    const prev = cur[id] || {}
+    cur[id] = {
+      step: String(step),
+      code: code == null ? null : Number(code),
+      error: String(error || ''),
+      tries: (Number(prev.tries) || 0) + 1,
+      firstAt: Number(prev.firstAt) || Date.now(),
+      at: Date.now(),
+      text: String(text || item?.message || '').slice(0, 400),
+      uname: String(item?.uname || ''),
+    }
+    all[k] = cur
+    writeJson(failFile, all)
+  }
+  /** 成功后清掉这条失败记录 */
+  const clearFail = (bvid, rpid) => {
+    const all = readFails()
+    const k = String(bvid || '').trim()
+    const cur = all[k]
+    if (!cur || typeof cur !== 'object') return
+    if (!cur[String(rpid)]) return
+    delete cur[String(rpid)]
+    if (Object.keys(cur).length === 0) delete all[k]
+    writeJson(failFile, all)
+  }
+
   const readWhitelist = () => {
     const j = readJson(whitelistFile, null)
     if (!j || typeof j !== 'object') return { mids: [], names: {} }
@@ -4276,47 +4334,158 @@ export function apply(ctx, config) {
   }
 
   /**
+   * ⭐ **带重试的调用**（2026-10-26 加，使用者要求「失败重试」）。
+   *
+   * 🔴 **只对"偶发"错误重试，永久性的直接放弃** ——
+   *    对一个"权限不足"重试 3 次只是白白多打 3 次接口、还可能招来风控。
+   *
+   * @param {() => Promise<any>} fn    真正干活的函数
+   * @param {(e:any)=>boolean} retryable  判断这个错值不值得再试
+   * @param {number[]} delaysMs        每次重试前等多久
+   * @returns {Promise<{ok:boolean, value?:any, error?:string, tries:number}>}
+   */
+  const withRetry = async (fn, retryable, delaysMs = [1500, 3000, 6000]) => {
+    let lastErr = ''
+    for (let i = 0; i <= delaysMs.length; i++) {
+      try {
+        return { ok: true, value: await fn(), tries: i + 1 }
+      } catch (e) {
+        lastErr = String(e?.message ?? e)
+        const canRetry = retryable(e)
+        if (!canRetry || i === delaysMs.length) return { ok: false, error: lastErr, tries: i + 1 }
+        log(`第 ${i + 1} 次失败（${lastErr}），${delaysMs[i] / 1000} 秒后重试`)
+        await new Promise((s) => setTimeout(s, delaysMs[i]))
+      }
+    }
+    return { ok: false, error: lastErr, tries: delaysMs.length + 1 }
+  }
+
+  /** 这个 B站 错误码值不值得重试（-509 限流 / -352 风控 / 网络类） */
+  const codeRetryable = (code) => {
+    const c = Number(code)
+    if (c === -509 || c === -352 || c === -412) return true   // 限流 / 风控
+    if (c === -500 || c === -502 || c === -503 || c === -504) return true // 服务端抖动
+    // 其余（-403 权限 / -101 登录 / 12022 已删 / -404 不存在）都不值得再试
+    return false
+  }
+
+  /**
    * 处理一条：**先发**（搬到收纳楼）→ 校验 → **再删**原评论。
-   * @returns {Promise<{ok:boolean, movedRpid?:string, deleted?:boolean, error?:string}>}
+   *
+   * 🔴 **每一步都有回执、都重试、失败都记账**（2026-10-26 使用者要求：
+   *    「应该要建楼、留言、删除，每一步都要有回执，失败重试，失败记录并跳过」）。
+   *    按他后来选的 C 方案：**只记录、不跳过**（失败项下一轮照样重试）。
+   *
+   * 🔴 **防重复搬运**：如果上一轮"发成功了但删失败"，原评论还在 ⇒
+   *    这一轮会再扫到它、再搬一次 ⇒ **楼里出现两条一样的**。
+   *    ⇒ 记账里若显示上一步是 `del` 失败、且**已经记过 movedRpid**，
+   *      这一轮就**跳过搬运、直接重试删除**。这是"先发后删"必须配的补丁。
+   *
+   * @param {object} item  { rpid, uname, message, at, ... }
+   * @param {string} bvid
+   * @param {string} floorRpid
+   * @returns {Promise<{ok:boolean, movedRpid?:string, deleted?:boolean, text?:string, error?:string, step?:string, skippedMove?:boolean}>}
    */
   const moveOne = async (item, bvid, floorRpid) => {
     const text = buildMovedText(item)
-    let sent
-    try {
-      // ⚠️ **必须走 MCP**：自己发 HTTP 会被阿瓦隆隐藏（见本节开头 ①）
-      sent = await call('bili_reply', {
-        bvid,
-        text,
-        rpid: Number(floorRpid),        // ＝ parent：回在收纳楼下面
-        root: Number(floorRpid),        // ＝ root：楼层根也是收纳楼
-      })
-    } catch (e) {
-      return { ok: false, error: `搬到收纳楼失败（MCP）：${e?.message ?? e}` }
-    }
-    // MCP 回的是 JSON 文本
-    let rec = sent
-    if (typeof rec === 'string') { try { rec = JSON.parse(rec) } catch { /* 保持原样 */ } }
-    const movedRpid = rec?.rpid != null ? String(rec.rpid) : ''
-    const sentOk = rec?.success !== false && rec?.ok !== false && rec?.code !== -1
-    if (!sentOk) {
-      return { ok: false, error: `搬到收纳楼失败：${rec?.message ?? rec?.error ?? '返回不明确'}` }
+
+    /* ── ① 搬运（发楼中楼）─────────────────────────────────
+     * 先查账：上一轮是不是"已经搬过一次、只是删失败"？
+     * 那种情况不能再搬（否则楼里重复），直接进删除。 */
+    const knownFail = listFails(bvid)[String(item.rpid)] || {}
+    const alreadyMoved = knownFail.step === 'del' ? String(knownFail.movedRpid || '') : ''
+    let movedRpid = alreadyMoved
+    let skippedMove = false
+
+    if (!movedRpid) {
+      const sendOnce = async () => {
+        // ⚠️ **必须走 MCP**：自己发 HTTP 会被阿瓦隆隐藏（见本节开头 ①）
+        const sent = await call('bili_reply', {
+          bvid,
+          text,
+          rpid: Number(floorRpid),        // ＝ parent：回在收纳楼下面
+          root: Number(floorRpid),        // ＝ root：楼层根也是收纳楼
+        })
+        let rec = sent
+        if (typeof rec === 'string') { try { rec = JSON.parse(rec) } catch { /* 保持原样 */ } }
+        /**
+         * 🔴 **回执要真校验**：MCP 可能在 `code:0` 之外用 `success:false` 表示失败，
+         *    也可能只回一段无法解析的文本。**拿不到 rpid 就当没成功**。
+         */
+        const okFlag = rec?.success !== false && rec?.ok !== false && rec?.code !== -1 && rec?.code !== -101
+        const rid = rec?.rpid != null ? String(rec.rpid) : ''
+        if (!okFlag || !rid) {
+          const msg = rec?.message ?? rec?.error ?? (typeof sent === 'string' ? sent.slice(0, 160) : '返回不明确')
+          const err = new Error(`发楼中楼失败：${msg}`)
+          err.biliCode = Number(rec?.code)
+          throw err
+        }
+        return rid
+      }
+      const r1 = await withRetry(sendOnce, (e) => codeRetryable(e?.biliCode))
+      if (!r1.ok) {
+        markFail(bvid, item, 'move', null, r1.error, text)
+        return { ok: false, step: 'move', error: `搬进收纳楼失败（试了 ${r1.tries} 次）：${r1.error}` }
+      }
+      movedRpid = r1.value
+    } else {
+      skippedMove = true
+      log(`评论 ${item.rpid} 上一轮已搬过（${movedRpid}），这轮直接重试删除，不重复搬`)
     }
 
-    // ⭐ **先发成功，才删原评论**（顺序不能反，见本节开头）
-    const del = await biliPost(
-      'https://api.bilibili.com/x/v2/reply/del',
-      { type: 1, oid: (await bvidMeta(bvid, credCookie()))?.aid, rpid: item.rpid },
-      credCookie(),
-    )
-    const dcode = Number(del?.code)
-    const delOk = dcode === 0 || dcode === 12022
-    return {
-      ok: delOk,
-      movedRpid,
-      deleted: delOk,
-      text,
-      ...(delOk ? {} : { error: `搬过去了，但**删原评论失败**（code=${dcode}）—— 原评论还在，下次扫描会重复搬。` }),
+    /* ── ② 删除原评论 ─────────────────────────────────────
+     * ⚠️ 只有搬运真的成功了才走到这里（顺序不能反）。 */
+    const meta = await bvidMeta(bvid, credCookie())
+    const delOnce = async () => {
+      const del = await biliPost(
+        'https://api.bilibili.com/x/v2/reply/del',
+        { type: 1, oid: meta?.aid, rpid: item.rpid },
+        credCookie(),
+      )
+      const code = Number(del?.code)
+      // 12022 = 已经删过了 ⇒ 当成功（幂等）
+      if (code === 0 || code === 12022) return { code }
+      const err = new Error(`删原评论失败：code=${code} ${del?.message ?? ''}`.trim())
+      err.biliCode = code
+      throw err
     }
+    const r2 = await withRetry(delOnce, (e) => codeRetryable(e?.biliCode))
+    if (!r2.ok) {
+      /**
+       * 🔴 这里**必须把 movedRpid 记进账本**，否则下一轮会再搬一遍（重复）。
+       *    → `markFail` 里带上 movedRpid，下一轮 `alreadyMoved` 才认得出来。
+       */
+      const all = readFails()
+      const k = String(bvid || '').trim()
+      const cur = (all[k] && typeof all[k] === 'object') ? all[k] : {}
+      const id = String(item.rpid)
+      const prev = cur[id] || {}
+      cur[id] = {
+        step: 'del',
+        code: r2.tries ? Number((/code=(-?\d+)/.exec(r2.error || '') || [])[1]) || null : null,
+        error: r2.error,
+        tries: (Number(prev.tries) || 0) + 1,
+        firstAt: Number(prev.firstAt) || Date.now(),
+        at: Date.now(),
+        text: String(item.message || '').slice(0, 400),
+        uname: String(item.uname || ''),
+        movedRpid: String(movedRpid || ''),        // ⭐ 关键：记住"已经搬到哪儿了"
+      }
+      all[k] = cur
+      writeJson(failFile, all)
+      return {
+        ok: false,
+        step: 'del',
+        movedRpid,
+        skippedMove,
+        text,
+        error: `已搬进收纳楼，但删原评论失败（试了 ${r2.tries} 次）：${r2.error} —— 下一轮会直接重试删除，不会重复搬。`,
+      }
+    }
+
+    // ⭐ 成功 ⇒ 清掉这条的失败记录（账本里不该留已修好的）
+    clearFail(bvid, item.rpid)
+    return { ok: true, movedRpid, deleted: true, text, skippedMove }
   }
 
   /**
@@ -4354,6 +4523,10 @@ export function apply(ctx, config) {
      * ① **先建（或复用）收纳楼**。
      * ⭐ 使用者要求：「一个视频处理，只用一个楼」「rpid 跟视频绑定，存个账本」。
      * ⇒ 已有就直接用，没有才建。跨轮次、跨批次都复用同一个。
+     *
+     * 🔴 **建楼也要重试 + 记账**（2026-10-26 使用者要求"每一步都要有回执、失败重试"）。
+     *    建楼失败是**硬中止**：楼都没有，后面的搬运无处可去，只能整轮放弃。
+     *    ⇒ 但仍要**记进失败账本**（`step:'build'`），让面板上看得见"这个视频的楼没建成"。
      */
     let floorRpid = getFloor(bvid)
     let floorCreated = false
@@ -4361,18 +4534,45 @@ export function apply(ctx, config) {
       const floorText = '【收纳楼】这里收纳本视频下机器人代发的留言。'
         + '原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。'
         + '本楼只做归档，不参与讨论。'
-      try {
+      const buildOnce = async () => {
         const f = await call('bili_reply', { bvid, text: floorText, rpid: 0 })
         let fr = f
         if (typeof fr === 'string') { try { fr = JSON.parse(fr) } catch { /* */ } }
-        floorRpid = fr?.rpid != null ? String(fr.rpid) : ''
-        if (!floorRpid) return { ok: false, error: '建收纳楼失败（拿不到 rpid）', log: [] }
-        saveFloor(bvid, floorRpid, sc.title)
-        floorCreated = true
-        log(`收纳楼已建：${floorRpid}（${bvid}）`)
-      } catch (e) {
-        return { ok: false, error: `建收纳楼失败：${e?.message ?? e}`, log: [] }
+        const okFlag = fr?.success !== false && fr?.ok !== false && fr?.code !== -1 && fr?.code !== -101
+        const rid = fr?.rpid != null ? String(fr.rpid) : ''
+        if (!okFlag || !rid) {
+          const msg = fr?.message ?? fr?.error ?? '返回不明确'
+          const err = new Error(`建收纳楼失败：${msg}`)
+          err.biliCode = Number(fr?.code)
+          throw err
+        }
+        return rid
       }
+      const rb = await withRetry(buildOnce, (e) => codeRetryable(e?.biliCode), [2000, 5000, 10000])
+      if (!rb.ok) {
+        // 建楼失败：记在账本里（用一条特殊键 `__floor__`），面板上能看出来
+        const all = readFails()
+        const k = String(bvid || '').trim()
+        const cur = (all[k] && typeof all[k] === 'object') ? all[k] : {}
+        const prev = cur.__floor__ || {}
+        cur.__floor__ = {
+          step: 'build',
+          code: null,
+          error: rb.error,
+          tries: (Number(prev.tries) || 0) + 1,
+          firstAt: Number(prev.firstAt) || Date.now(),
+          at: Date.now(),
+          text: '（建收纳楼）',
+          uname: '',
+        }
+        all[k] = cur
+        writeJson(failFile, all)
+        return { ok: false, error: `${rb.error}（试了 ${rb.tries} 次）—— 没有收纳楼，这一轮什么都没做。`, log: [] }
+      }
+      floorRpid = rb.value
+      saveFloor(bvid, floorRpid, sc.title)
+      floorCreated = true
+      log(`收纳楼已建：${floorRpid}（${bvid}）`)
     } else {
       log(`复用已有收纳楼：${floorRpid}（${bvid}）`)
     }
@@ -4411,8 +4611,17 @@ export function apply(ctx, config) {
           作者: it.uname,
           at谁: it.at.map((a) => a.uname),
           ...(r.ok
-            ? { 结果: '✅ 已搬运并删除', 新rpid: r.movedRpid, 文本: r.text }
-            : { 结果: '❌ 失败', 错误: r.error, 已搬rpid: r.movedRpid || null }),
+            ? {
+              结果: r.skippedMove ? '✅ 补删成功（上轮已搬过）' : '✅ 已搬运并删除',
+              新rpid: r.movedRpid,
+              文本: r.text,
+            }
+            : {
+              结果: '❌ 失败',
+              失败在哪一步: r.step === 'move' ? '搬进收纳楼' : r.step === 'del' ? '删原评论' : '未知',
+              错误: r.error,
+              已搬rpid: r.movedRpid || null,
+            }),
         })
         // 每条之间留一点间隔（写操作太密会 -509）
         await new Promise((s) => setTimeout(s, 1500))
@@ -4439,6 +4648,22 @@ export function apply(ctx, config) {
       failed: failedTotal,
       /** ⭐ 是否**清干净了**（false 表示到了安全上限或中途失败，还有剩） */
       allClear,
+      /**
+       * ⭐ **失败清单**（2026-10-26 加）。
+       * 按使用者选的 C 方案：**只记录、不跳过** —— 下一轮照样会重试这些。
+       * 面板上直接摊出来，方便知道"卡在哪一步、错了几次"。
+       */
+      failures: Object.entries(listFails(bvid)).map(([rpid, f]) => ({
+        原rpid: rpid,
+        失败在哪一步: f.step === 'build' ? '建收纳楼'
+          : f.step === 'move' ? '搬进收纳楼' : f.step === 'del' ? '删原评论' : String(f.step),
+        作者: f.uname || '',
+        错误码: f.code,
+        错误: f.error,
+        试了几次: f.tries,
+        原文: f.text,
+        已搬rpid: f.movedRpid || null,
+      })),
       ...(allClear ? {} : { note: `还有没处理完的：到了上限（${maxRounds} 批）或中途失败。再跑一次会接着处理。` }),
       log: logItems,
     }
@@ -7648,6 +7873,21 @@ export function apply(ctx, config) {
         ...status(),
         cleanWhitelist: _wl,
         cleanSelfMid: selfMid(),
+        /**
+         * ⭐ 当前目标视频的失败清单（面板每 5 秒轮询就自动对齐）。
+         * 按使用者选的 C 方案：**只展示、不跳过**。
+         */
+        cleanFailures: Object.entries(listFails(cfg.cleanBvid || '')).map(([rpid, f]) => ({
+          原rpid: rpid,
+          失败在哪一步: f.step === 'build' ? '建收纳楼'
+            : f.step === 'move' ? '搬进收纳楼' : f.step === 'del' ? '删原评论' : String(f.step),
+          作者: f.uname || '',
+          错误码: f.code,
+          错误: f.error,
+          试了几次: f.tries,
+          原文: f.text,
+          已搬rpid: f.movedRpid || null,
+        })),
       })
     }
 
@@ -8209,6 +8449,18 @@ export function apply(ctx, config) {
         whitelist: wl,
         selfMid: selfMid(),
         floors: readFloors(),
+        /** ⭐ 当前视频的失败清单（面板上摊出来） */
+        failures: Object.entries(listFails(cfg.cleanBvid || '')).map(([rpid, f]) => ({
+          原rpid: rpid,
+          失败在哪一步: f.step === 'build' ? '建收纳楼'
+            : f.step === 'move' ? '搬进收纳楼' : f.step === 'del' ? '删原评论' : String(f.step),
+          作者: f.uname || '',
+          错误码: f.code,
+          错误: f.error,
+          试了几次: f.tries,
+          原文: f.text,
+          已搬rpid: f.movedRpid || null,
+        })),
         note: '插件自己的账号（selfMid）永远跳过，不在 whitelist 里、也删不掉。',
       })
     }

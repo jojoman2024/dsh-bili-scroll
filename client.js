@@ -4518,6 +4518,25 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   x.错误 ? h('div', { 'data-bd-cleanwill': '' }, '⚠️ ' + x.错误) : null)))
               : null,
 
+            // ── 失败清单 ⭐（2026-10-26 加）──
+            // 按使用者选的 C 方案：**只记录、不跳过** —— 下一轮照样会重试这些。
+            // 摊在面板上的目的是"知道卡在哪一步、错了几次"，不是"拉黑"。
+            (st.cleanFailures && st.cleanFailures.length)
+              ? h('div', { 'data-bd-cleanbox': '' },
+                h('div', { 'data-bd-note': '' },
+                  `⚠️ 失败 ${st.cleanFailures.length} 条 —— 下一轮会自动重试（不会跳过）。`),
+                st.cleanFailures.map((f) => h('div', { 'data-bd-cleanitem': '' },
+                  h('div', { 'data-bd-cleanhead': '' },
+                    h('span', { 'data-bd-cleanu': '' }, f.作者 || f.原rpid),
+                    h('span', { 'data-bd-cleantag': '' }, f.失败在哪一步),
+                    h('span', { 'data-bd-cleantag': '' }, `试了 ${f.试了几次} 次`)),
+                  h('div', { 'data-bd-cleanmsg': '' },
+                    `原 rpid ${f.原rpid} · ` + (f.错误码 != null ? `code ${f.错误码} · ` : '') + (f.错误 || '')),
+                  f.原文 ? h('div', { 'data-bd-cleanwill': '' }, '原文：' + f.原文) : null,
+                  f.已搬rpid ? h('div', { 'data-bd-cleanwill': '' },
+                    `已搬进楼（${f.已搬rpid}），下轮只补删、不会重复搬`) : null)))
+              : null,
+
             // ── 白名单摘要 ──
             // ⚠️ 它是 fold 里的**纯文字**，不是设置行 ⇒ 用 data-bd-noteonly 让它
             //    不吃那套行样式（否则会平白多出一条分隔线 + 16px 上下留白）。
