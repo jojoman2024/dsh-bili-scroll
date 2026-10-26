@@ -600,6 +600,12 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
   display:flex;flex-direction:column;gap:8px;
   padding:2px 2px 4px;overscroll-behavior:contain;}
 [data-bd-more]{flex:none;text-align:center;padding:6px 0 0;}
+/* ⭐ 底部状态提示（2026-10-26）：加载中 / 没有更多了。
+   用官方那套蓝色/灰色 token，别写死颜色（暗色下会崩）。 */
+[data-bd-foot]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  padding:8px 0 2px;transition:opacity .15s;}
+[data-bd-foot="loading"]{color:var(--dsw-alias-state-business-primary,#4176e6);}
+[data-bd-foot="no-more"]{color:var(--dsw-alias-label-tertiary,#81858c);}
 
 [data-bd-confirm]{position:fixed;inset:0;z-index:60;display:flex;
   align-items:center;justify-content:center;padding:16px;
@@ -1947,6 +1953,27 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        * 作用：防止用户一直往下拉、连着发好几个翻页请求。
        */
       const [cleanLoading, setCleanLoading] = React.useState(false)
+      /**
+       * ⭐ **列表底部的状态提示**（2026-10-26 加，使用者要求：
+       *    「触底加载的时候给加浮窗提示状态吧。比如加载中。停留的时间短一点，
+       *     1秒就够了。全部加载完了，应该提示没有更多了。」）
+       *
+       * 取值：
+       *   · `''`        —— 不显示
+       *   · `'loading'` —— 正在取下一页
+       *   · `'no-more'` —— 已到底（1 秒后自动消失）
+       * ⚠️ 用 `cleanFootTimer` 记住那个 1 秒定时器，卸载/重扫时要清掉，
+       *    否则会在已关闭的浮窗上设置状态。
+       */
+      const [cleanFoot, setCleanFoot] = React.useState('')
+      const cleanFootTimer = React.useRef(null)
+      const flashFoot = (kind, ms = 1000) => {
+        if (cleanFootTimer.current) clearTimeout(cleanFootTimer.current)
+        setCleanFoot(kind)
+        if (ms > 0) {
+          cleanFootTimer.current = setTimeout(() => { setCleanFoot(''); cleanFootTimer.current = null }, ms)
+        }
+      }
       /**
        * ⭐ 两个筛选关键词的**草稿**（2026-10-26）。
        * ⚠️ 跟 cleanDraft 同理：**不能让 5 秒轮询直接绑 cfg**，
@@ -4554,9 +4581,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   onClick: async () => {
                     setCleanBusy(true)
                     setCleanResult(null)
-                    // ⭐ 新扫描 ⇒ 显示条数/加载状态都归零（2026-10-26，配合分页）
+                    // ⭐ 新扫描 ⇒ 显示条数/加载状态/底部提示都归零（2026-10-26，配合分页）
                     setCleanShown(30)
                     setCleanLoading(false)
+                    setCleanFoot('')
+                    if (cleanFootTimer.current) { clearTimeout(cleanFootTimer.current); cleanFootTimer.current = null }
                     try {
                       const r = await jpost('/clean/scan', { bvid: cleanDraft || cfg.cleanBvid })
                       setCleanResult(r)
@@ -4632,19 +4661,26 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                         const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 120
                         if (!nearBottom) return
                         const total = (cleanResult.items || []).length
-                        // ① 本地还有没显示的 ⇒ 先放出来
+                        // ① 本地还有没显示的 ⇒ 先放出来（纯前端，不请求）
                         if (cleanShown < total) {
                           setCleanShown((n) => Math.min(n + 30, total))
                           return
                         }
-                        // ② 本地放光了 ⇒ 去后台要下一页
-                        if (!cleanLoading && cleanResult.isEnd !== true && cleanResult.bvid) {
+                        // ② 已经到底了 ⇒ 提示"没有更多了"（1 秒后自动消失）
+                        if (cleanResult.isEnd === true) {
+                          if (cleanFoot !== 'no-more') flashFoot('no-more', 1000)
+                          return
+                        }
+                        // ③ 本地放光了、还有页 ⇒ 去后台要下一页
+                        if (!cleanLoading && cleanResult.bvid) {
                           setCleanLoading(true)
+                          flashFoot('loading', 0)     // 加载中**不自动消失**，等请求回来再换
                           const nextPage = (cleanResult.page || 1) + 1
                           jpost('/clean/page', { bvid: cleanResult.bvid, page: nextPage })
                             .then((r) => {
                               if (!r?.ok) {
                                 setCleanResult((prev) => prev ? { ...prev, isEnd: true, loadError: r?.error || '取下一页失败' } : prev)
+                                flashFoot('no-more', 1200)
                                 return
                               }
                               setCleanResult((prev) => {
@@ -4661,9 +4697,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                                 }
                               })
                               setCleanShown((n) => n + 30)
+                              // ⭐ 这一页取回来之后**已经到底** ⇒ 直接提示"没有更多了"
+                              //    （不然用户还得再滑一次才发现）
+                              if (r.isEnd === true) flashFoot('no-more', 1000)
+                              else flashFoot('', 0)
                             })
                             .catch((err) => {
                               setCleanResult((prev) => prev ? { ...prev, isEnd: true, loadError: String(err?.message || err) } : prev)
+                              flashFoot('no-more', 1200)
                             })
                             .finally(() => setCleanLoading(false))
                         }
@@ -4699,11 +4740,23 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                             }
                           },
                         }, '加入白名单'))),
-                      // 还有更多时给一句提示（滑到底会自动加载）
-                      (cleanShown < (cleanResult.items || []).length)
-                        ? h('div', { 'data-bd-note': '', 'data-bd-more': '' },
-                          `继续往下滑，还有 ${(cleanResult.items || []).length - cleanShown} 条`)
-                        : null))))
+                      /**
+                       * ⭐ **列表底部的状态提示**（2026-10-26 加）。
+                       *   · 加载中 —— 一直显示到请求回来（不自动消失，否则用户不知道在等）
+                       *   · 没有更多了 / 取下一页失败 —— **1 秒后自动消失**
+                       * 注意"还有 N 条没显示"那条是**常驻**的（本地还有内容），
+                       * 与这个浮动提示是两回事，只在没有浮动提示时显示。
+                       */
+                      cleanFoot === 'loading'
+                        ? h('div', { 'data-bd-note': '', 'data-bd-more': '', 'data-bd-foot': 'loading' },
+                          '加载中…')
+                        : cleanFoot === 'no-more'
+                          ? h('div', { 'data-bd-note': '', 'data-bd-more': '', 'data-bd-foot': 'no-more' },
+                            cleanResult.loadError ? `取下一页失败：${cleanResult.loadError}` : '没有更多了')
+                          : (cleanShown < (cleanResult.items || []).length)
+                            ? h('div', { 'data-bd-note': '', 'data-bd-more': '' },
+                              `继续往下滑，还有 ${(cleanResult.items || []).length - cleanShown} 条`)
+                            : null))))
               : null,
 
             // ── 执行结果 ──
