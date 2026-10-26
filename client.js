@@ -4784,7 +4784,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   'data-bd-input': '',
                   'data-bd-persona': '',
                   rows: 4,
-                  placeholder: '【收纳楼】这里收纳本视频下机器人代发的留言…',
+                  placeholder: '【收纳楼】这里收纳本视频下大肥鱼的留言…',
                   /**
                    * ⭐ **默认值直接填进去**（2026-10-26 使用者要求：
                    *    「你应该把默认值直接填进去，处理应该跟提示词那块是一样的。」）
@@ -4797,8 +4797,24 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   value: cleanFloorText,
                   onInput: (e) => setCleanFloorText(e.target.value),
                   onBlur: () => {
+                    /**
+                     * 🔴 **跟出厂默认一字不差时，存空串（= "用默认"），而不是把默认文案冻进配置**
+                     *    （2026-10-26 真机踩出来的）。
+                     *
+                     * ── 为什么要这样 ─────────────────────────────────
+                     *    我第一版是"输入框里填默认值 → 失焦就存下去"，结果：
+                     *      使用者一打开面板，默认值就被存成**显式配置**
+                     *      ⇒ 以后我改默认文案，**他永远收不到**（配置里那份把它盖住了）。
+                     *    实测：改成「大肥鱼的留言」之后，他那份 config.json 里还是
+                     *      「机器人代发的留言」—— 新默认值完全没生效。
+                     *
+                     * ⇒ 判据：**内容 == 出厂默认 ⇒ 存空串**。语义上"我没意见，跟着默认走"。
+                     *    这样改默认值能自然传播到所有没自定义过的人。
+                     */
                     const v = String(cleanFloorText || '').trim()
-                    if (v !== String(cfg.cleanFloorText || '')) patch({ cleanFloorText: v }, '收纳楼文案')
+                    const isDef = v === String(st.cleanFloorTextDefault || '').trim()
+                    const saveAs = isDef ? '' : v
+                    if (saveAs !== String(cfg.cleanFloorText || '')) patch({ cleanFloorText: saveAs }, '收纳楼文案')
                   },
                 }),
                 /* ⭐ 按钮组跟「提示词」那几块**完全同一套**（`data-bd-foot` + 普通 `data-bd-btn`），
