@@ -3571,8 +3571,8 @@ export function apply(ctx, config) {
     description: '对 B站 做**有点痕迹**的动作：点赞视频 / 收藏 / 发弹幕 / 点赞评论，`action` 选哪个。\n'
       + '🔴 **动手之前先读规范**：`bilij_read({ path: "prompts/actions.md" })` —— '
       + '什么时候该用哪个、弹幕怎么写、`progress` 怎么定、什么时候**不**该动手，全在那份里。\n'
-      + '⭐ `action:"folders"` 先看有哪些收藏夹；`favorite` 不传 `folder` 时，'
-      + '只有一个夹就自动用它，多个会回清单让你自己选。\n'
+      + '⭐ `action:"folders"` 先看有哪些收藏夹；`favorite` 不传 `folder` 时**默认用第一个夹**，'
+      + '回执里会带上完整清单 —— 所以**收藏前先想一下这条该进哪个夹**，有合适的就传 `folder`。\n'
       + '⚠️ **弹幕发出去收不回**（没有删除接口），其余三个都能撤（传取消值）。\n'
       + '⚠️ 回执 `code:-101/-111` = 登录过期，让使用者去面板重新扫码，别反复重试。',
     parameters: {
@@ -3687,18 +3687,18 @@ export function apply(ctx, config) {
           }
         } else {
           /**
+           * ⭐ **不传 `folder` ⇒ 用第一个**（2026-10-26 按使用者要求改）。
+           *
+           * 原先是"多个夹就报错让模型自己选"，使用者改成了：
+           *   「尽量合适的去选择收藏夹，**如果没有合适的，就选第一个即可**」
+           * ⇒ 默认落到列表第一个，**但仍然把完整清单回给模型**，
+           *    这样它能看出"我这次是不是选得不对"，下次自己指定 `folder`。
+           *
            * ⚠️ B站 的 `list-all` **没有 `is_default` 字段**（实测只有 id/title/media_count/fav_state）
-           *    ⇒ "默认收藏夹"认不准。所以只能退化成"只有一个就自动用"。
+           *    ⇒ "默认收藏夹"认不准。但实测这个列表的第一个**就是「默认收藏夹」**
+           *    （1936 个视频那个），所以"选第一个"在实践中≈"选默认夹"。
            */
-          if (folders.length === 1) target = folders[0]
-          else {
-            return {
-              ok: false,
-              error: `你有 ${folders.length} 个收藏夹，B站 不提供"哪个是默认"的信息，所以不敢替你选。`,
-              folders,
-              hint: '从上面挑一个，把 `title` 或 `id` 填进 `folder` 再调一次。',
-            }
-          }
+          target = folders[0]
         }
         const r = await biliPost(
           'https://api.bilibili.com/x/v3/fav/resource/deal',
@@ -3714,6 +3714,16 @@ export function apply(ctx, config) {
         return done(r, {
           action, bvid, undo, title: meta.title,
           folder: { id: target.id, title: target.title },
+          // ⭐ 把**完整清单**一起回去 ⇒ 模型能判断"这次是不是选得不对"
+          ...(folders.length > 1
+            ? {
+              folders,
+              folderNote: want
+                ? ''
+                : `没指定收藏夹 ⇒ 按规矩用了第一个（「${target.title}」）。`
+                  + `如果这条更适合别的夹（比如教程类进「学习」），下次传 \`folder\` 指定。`,
+            }
+            : {}),
         })
       }
 
