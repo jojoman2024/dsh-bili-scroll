@@ -250,6 +250,29 @@ window.__ModuleLoader__.load({
  */
 [data-bd-sec]>[data-bd-sub]{padding:0;border-bottom:0;}
 
+/* 🔴 **[data-bd-fold] 是折叠壳，必须"透传"行规则**（2026-10-26 修）。
+ *
+ * 症状（使用者截图）：评论区整理里的设置项**全部没有分隔线、间距也不对**。
+ * 根因：那条"唯一间距规则"是 [data-bd-sec] > * —— **只认直接子元素**。
+ *   我为折叠加了一层 div[data-bd-fold] 包住目标视频/扫描/执行，
+ *   于是它们成了**孙元素** ⇒ 一条规则都匹配不上 ⇒ 行样式全丢。
+ *
+ * ⭐ 修法跟 [data-bd-sub] 完全同理：**把壳自己的 padding/线去掉，
+ *   让它的直接子元素去接行样式**。
+ * ⚠️ 别指望"给 fold 加个 class 让它也吃行样式" —— 那样壳自己会多一份 padding，
+ *   上下叠加起来就变成"上 32 / 下 16"那种不齐（这个坑 sub 那边踩过）。
+ */
+[data-bd-sec]>[data-bd-fold],[data-bd-sub]>[data-bd-fold]{padding:0;border-bottom:0;}
+[data-bd-fold]>*{
+  padding:16px 0;
+  border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 折叠区的最后一项不拖线（它后面还有白名单摘要之类的话） */
+[data-bd-fold]>*:last-child{border-bottom:0;}
+/* 🔴 折叠区里的**纯文字摘要**（不是设置行）：不吃行样式（2026-10-26）——
+ *    否则它会平白多一条分隔线 + 16px 上下留白，看着像"漏了个控件的一行"。 */
+[data-bd-fold]>[data-bd-noteonly],[data-bd-sub]>[data-bd-noteonly]{
+  padding:0;border-bottom:0;margin-top:8px;}
+
 /* 🔴 **分节标题上方要有一条线，把"新的一块"隔开**（2026-10-16 使用者要求：
  *    "大标题跟前面板块的分隔也应该有灰线" → 后来又说"干脆顶满宽度用来做区分"）。
  *    原来只靠 28px 的空隙区分，太弱、扫一眼看不出换节了。
@@ -4241,6 +4264,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              *    必须说清「要先用 UP 主账号扫码登录」这个前提，
              *    否则用户填了视频、点了扫描，只会拿到一句「拿不到视频信息」。
              *    ⚠️ 面板是纯文本，不能写星号。 */
+            /* ⭐ 它紧跟 [data-bd-h] ⇒ 自动吃到「标题+说明」那条规则
+             *    （[data-bd-sub]>[data-bd-h]+[data-bd-note]：不画线、不吃 16px、上间距 4px）
+             *    ⚠️ 别再给它加自定义 class 去抢样式 —— 那条规则已经对了。 */
             h('div', { 'data-bd-note': '' },
               '把本视频下「带 @ 的机器人留言」删掉，同时建一层收纳楼，'
               + '把原文和被 @ 的人搬进去 —— 被 @ 的朋友还能看到内容。'
@@ -4396,7 +4422,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               : null,
 
             // ── 白名单摘要 ──
-            h('div', { 'data-bd-note': '' },
+            // ⚠️ 它是 fold 里的**纯文字**，不是设置行 ⇒ 用 data-bd-noteonly 让它
+            //    不吃那套行样式（否则会平白多出一条分隔线 + 16px 上下留白）。
+            h('div', { 'data-bd-note': '', 'data-bd-noteonly': '' },
               `白名单：${(st.cleanWhitelist?.mids || []).length} 个账号`
               + `（插件自己 mid ${st.cleanSelfMid || '?'} 永远跳过，不在名单里也删不掉）`),
 
