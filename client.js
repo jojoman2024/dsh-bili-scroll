@@ -1942,6 +1942,13 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        * ⚠️ 初始 30 条、滑到底再加 30 条（`cleanShown` 是"现在显示到第几条"）。
        */
       const [cleanShown, setCleanShown] = React.useState(30)
+      /**
+       * ⭐ 两个筛选关键词的**草稿**（2026-10-26）。
+       * ⚠️ 跟 cleanDraft 同理：**不能让 5 秒轮询直接绑 cfg**，
+       *    否则你打字打到一半会被冲掉（面板里这个坑踩过多次）。
+       */
+      const [cleanKwUname, setCleanKwUname] = React.useState('')
+      const [cleanKwMessage, setCleanKwMessage] = React.useState('')
 
       /* ⭐⭐ **所有浮现式提示的统一入口 —— 一律会自己消失**（2026-10-18 修）。
        *
@@ -2042,6 +2049,28 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       }, [])
 
       // ② 本地 tab 变了 ⇒ 推给别的面板（让它们立刻跟上，不用等切会话）
+      /**
+       * ⭐ **评论区整理那三个输入框的草稿，第一次拿到 cfg 时初始化一次**（2026-10-26 修）。
+       *
+       * 🔴 修的是什么：`cleanDraft` 初值是空串，而配置里可能已经存着 BV 号 ——
+       *    面板一打开，输入框看着是空的，用户以为没设过、又填一遍。
+       *    （关键词两个框同理。）
+       *
+       * 🔴 为什么只初始化**一次**（用 ref 记住）：之后 cfg 每 5 秒轮询一次，
+       *    如果每次都从 cfg 重设，你打字打到一半就会被冲掉 —— 这个坑踩过多次。
+       *    ⇒ 只在 `cfgInited.current === false` 时灌一次，之后完全由用户输入驱动。
+       */
+      const cfgInited = React.useRef(false)
+      React.useEffect(() => {
+        if (cfgInited.current) return
+        const c = st?.config
+        if (!c) return
+        cfgInited.current = true
+        if (c.cleanBvid) setCleanDraft(String(c.cleanBvid))
+        if (c.cleanKwUname) setCleanKwUname(String(c.cleanKwUname))
+        if (c.cleanKwMessage) setCleanKwMessage(String(c.cleanKwMessage))
+      }, [st?.config])
+
       React.useEffect(() => {
         if (applyingRemote.current) { applyingRemote.current = false; return }
         writeSharedUI({ tab })
@@ -4459,6 +4488,47 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 max: '600',
                 value: String(cfg.cleanBatchGapSec ?? 30),
                 onChange: (e) => patch({ cleanBatchGapSec: Number(e.target.value) }, '批次之间停几秒'),
+              }),
+            }),
+
+            /* ⭐⭐ **筛选关键词**（2026-10-26 加，使用者要求：
+             *    「用户可以自己设置对于用户昵称和评论的关键词设置（分别做），去筛选机器人。
+             *      可以输入多个，以空格分隔。」）
+             *
+             * 🔴 **两个维度分开**、命中任一即算机器人：
+             *    · 昵称关键词只打昵称（插件机器人常叫「xx的大肥鱼」）
+             *    · 正文关键词只打正文
+             * ⚠️ 两个都空 ⇒ **不过滤**（保留"凡是带 @ 就处理"的老行为）。
+             * ⚠️ 输入框绑的是草稿 state，不能让 5 秒轮询冲掉（这坑踩过）。 */
+            h(Field, {
+              label: '按昵称筛选',
+              note: '只匹配作者昵称，多个词用空格分隔，命中任一就算机器人。留空则不按昵称筛。',
+              children: h('input', {
+                'data-bd-input': '',
+                type: 'text',
+                placeholder: '例如：大肥鱼 鲸鱼',
+                value: cleanKwUname,
+                onInput: (e) => setCleanKwUname(e.target.value),
+                onBlur: () => {
+                  const v = String(cleanKwUname || '').trim()
+                  if (v !== String(cfg.cleanKwUname || '')) patch({ cleanKwUname: v }, '按昵称筛选')
+                },
+              }),
+            }),
+
+            h(Field, {
+              label: '按评论内容筛选',
+              note: '只匹配评论正文，多个词用空格分隔，命中任一就算机器人。留空则不按内容筛。',
+              children: h('input', {
+                'data-bd-input': '',
+                type: 'text',
+                placeholder: '例如：来看看这条视频',
+                value: cleanKwMessage,
+                onInput: (e) => setCleanKwMessage(e.target.value),
+                onBlur: () => {
+                  const v = String(cleanKwMessage || '').trim()
+                  if (v !== String(cfg.cleanKwMessage || '')) patch({ cleanKwMessage: v }, '按评论内容筛选')
+                },
               }),
             }),
 

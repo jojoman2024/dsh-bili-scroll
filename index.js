@@ -337,6 +337,23 @@ export const Config = !z ? undefined : z.object({
   cleanBatchSize: z.number().default(30).extra('volatile', true),
   /** ⭐ **批次之间的间隔（秒）**，默认 30。防 -509 限流。 */
   cleanBatchGapSec: z.number().default(30).extra('volatile', true),
+  /**
+   * ⭐⭐ **筛选关键词**（2026-10-26 加，使用者要求：
+   *    「用户可以自己设置对于用户昵称和评论的关键词设置（分别做），去筛选机器人。
+   *      可以输入多个，以空格分隔。」）。
+   *
+   * 🔴 **两个维度分开匹配**，命中**任意一个**就算机器人：
+   *    · `cleanKwUname`   —— 只匹配**作者昵称**（如「大肥鱼」这种插件机器人命名）
+   *    · `cleanKwMessage` —— 只匹配**评论正文**
+   *
+   * ⚠️ **匹配方式：子串、不区分大小写**（`includes`），不是整词。
+   *    理由：中文昵称没有"词"的概念，`大肥鱼` 要能命中 `林的大肥鱼`。
+   *
+   * ⚠️ **两个都空 ⇒ 不过滤**（保留"凡是带 @ 就处理"的老行为）。
+   *    不能写成"空就谁都不匹配"—— 那会让用户一打开面板就发现"什么都不处理了"。
+   */
+  cleanKwUname: z.string().default('').extra('volatile', true),
+  cleanKwMessage: z.string().default('').extra('volatile', true),
   /** 上次成功执行的时间戳（增量扫描用） */
   cleanLastScanAt: z.number().default(0).extra('volatile', true),
   /**
@@ -511,6 +528,7 @@ export function apply(ctx, config) {
     cleanBvid: '', cleanEnabled: false, cleanLastScanAt: 0, cleanUiOpen: false,
     cleanIntervalMin: 30, cleanLastRunEndAt: 0,
     cleanBatchSize: 30, cleanBatchGapSec: 30,
+    cleanKwUname: '', cleanKwMessage: '',
     adminMode: false,
     /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
     absoluteGuard: true,
@@ -536,7 +554,29 @@ export function apply(ctx, config) {
     return out
   }
   const cfg = normalize(readJson(cfgFile, {}), normalize(config, { ...DEFAULTS }))
-  const saveCfg = (patch) => { Object.assign(cfg, normalize(patch, cfg)); writeJson(cfgFile, cfg) }
+  /**
+   * ⭐ **筛选关键词的空白规整**（2026-10-26）。
+   *
+   * 🔴 **为什么放在这里、而不是只放在 `POST /config` 里**：
+   *    配置有**两条写入路径** —— 面板走 `POST /config`、模型走 `bilij_config` 工具
+   *    （后者直接 `saveCfg`）。原来只在面板那条做了规整 ⇒
+   *    实测发现：工具写 `'  大肥鱼    鲸鱼  '` 会**原样存进去**（探针抓到的）。
+   *    ⇒ 提到 `saveCfg` 这一层，两条路都管到。
+   *
+   * ⚠️ 只规整空白（多空格/换行折一个），**不改大小写、不去重**：
+   *    匹配时会 `toLowerCase()`；去重没意义还会让用户以为自己少输了词。
+   */
+  const tidyKw = (obj) => {
+    for (const k of ['cleanKwUname', 'cleanKwMessage']) {
+      if (typeof obj?.[k] === 'string') obj[k] = obj[k].replace(/\s+/g, ' ').trim().slice(0, 500)
+    }
+    return obj
+  }
+  tidyKw(cfg)
+  const saveCfg = (patch) => {
+    Object.assign(cfg, tidyKw(normalize(patch, cfg)))
+    writeJson(cfgFile, cfg)
+  }
 
   /* ─────────────── 人设（persona） ───────────────
    * 人设正文落**插件家目录**的 `persona.md`：
@@ -4265,17 +4305,31 @@ export function apply(ctx, config) {
     }
 
     const items = []
+    const kwActive = (() => {
+      const split = (s) => String(s || '').split(/\s+/).filter(Boolean)
+      return split(cfg.cleanKwUname).length > 0 || split(cfg.cleanKwMessage).length > 0
+    })()
+    let kwFilteredOut = 0
     for (const x of all) {
       const ct = x.content || {}
       const mems = Array.isArray(ct.members) ? ct.members : []
       // ⭐ 使用者的判据：**带 @ 的一级评论就算**（不看 @ 在开头还是结尾）
       if (!mems.length) continue
       const mem = x.member || {}
+      const msg = String(ct.message || '')
+      const uname = String(mem.uname || '')
+      /**
+       * ⭐ **关键词筛选**（2026-10-26）。
+       * 没设关键词 ⇒ `matchBotKeywords` 返回 `active:false, hit:true` ⇒ 全部通过。
+       * 设了 ⇒ 只留命中的；被筛掉的**计数**报给面板，让用户知道筛掉了多少。
+       */
+      const kw = matchBotKeywords(uname, msg)
+      if (!kw.hit) { kwFilteredOut++; continue }
       items.push({
         rpid: String(x.rpid),
         mid: String(mem.mid || ''),
-        uname: String(mem.uname || ''),
-        message: String(ct.message || ''),
+        uname,
+        message: msg,
         at: mems.map((m) => ({ mid: String(m.mid || ''), uname: String(m.uname || '') })),
         like: Number(x.like) || 0,
         rcount: Number(x.rcount) || 0,
@@ -4295,7 +4349,46 @@ export function apply(ctx, config) {
       scannedPages,
       newestCtime,
       incremental,
+      /** ⭐ 关键词筛选信息（面板据此显示"被关键词筛掉 N 条"） */
+      kwActive,
+      kwFilteredOut,
     }
+  }
+
+  /**
+   * ⭐ **关键词筛选**（2026-10-26 加，使用者要求：
+   *    「用户可以自己设置对于用户昵称和评论的关键词设置（分别做），去筛选机器人。
+   *      可以输入多个，以空格分隔。」）。
+   *
+   * ── 语义（这几个决定都会影响使用者看到的结果，写清楚）──────────────
+   *   ① **两个维度分开匹配**：昵称关键词只打昵称，正文关键词只打正文。
+   *      不交叉 —— 否则「在昵称里写了"养鱼"，正文里提到养鱼也被删」这种误伤没法避免。
+   *   ② **两个维度之间是"或"**：命中任意一个就算机器人。
+   *      （用户要么按昵称找、要么按内容找，两边都能捞到才符合直觉。）
+   *   ③ **同一维度内是"或"**：写了多个词，命中任一即可。
+   *   ④ **子串匹配、不区分大小写**：中文没有"词"的边界，
+   *      「大肥鱼」要能命中「林的大肥鱼」。
+   *   ⑤ **某一维度留空 = 该维度不限制**（不是"谁都不匹配"）。
+   *   ⑥ **两个都留空 = 完全不过滤**，保留老的「凡是带 @ 就处理」行为。
+   *
+   * @returns {{active:boolean, hit:boolean, byUname:boolean, byMessage:boolean}}
+   *   `active` 表示"用户到底有没有设置筛选"（全空就是 false）
+   */
+  const matchBotKeywords = (uname, message) => {
+    const split = (s) => String(s || '').split(/\s+/).map((x) => x.trim().toLowerCase()).filter(Boolean)
+    const kwU = split(cfg.cleanKwUname)
+    const kwM = split(cfg.cleanKwMessage)
+    if (!kwU.length && !kwM.length) {
+      // 没设筛选 ⇒ 全部通过（active:false，调用方据此不显示"被筛掉"）
+      return { active: false, hit: true, byUname: false, byMessage: false }
+    }
+    const u = String(uname || '').toLowerCase()
+    const m = String(message || '').toLowerCase()
+    const byUname = kwU.length ? kwU.some((k) => u.includes(k)) : false
+    const byMessage = kwM.length ? kwM.some((k) => m.includes(k)) : false
+    // ⚠️ 注意：某一维度**留空**时它不参与判定（不是 false 就把整体拉成 false）
+    const hit = (kwU.length ? byUname : false) || (kwM.length ? byMessage : false)
+    return { active: true, hit, byUname, byMessage }
   }
 
   /**
@@ -4716,7 +4809,9 @@ export function apply(ctx, config) {
           带at: sc.items.length,
           待处理: pending.length,
           跳过_白名单或自己: sc.items.length - pending.length,
-          本轮到上限: Math.min(pending.length, limit),
+          /** ⭐ 关键词筛选状态（2026-10-26）：没设就 false */
+          关键词筛选: sc.kwActive ? `已启用，筛掉 ${sc.kwFilteredOut} 条` : '未设置（带 @ 的都算）',
+          将分几批: `${Math.ceil(pending.length / (Number(cfg.cleanBatchSize) || 30))} 批（每批 ${Number(cfg.cleanBatchSize) || 30} 条）`,
           清单: pending.slice(0, 50).map((it) => ({
             rpid: it.rpid, 作者: it.uname, mid: it.mid, at谁: it.at.map((a) => a.uname),
             原文: it.message.slice(0, 80), 将发: buildMovedText(it).slice(0, 120),
@@ -7921,6 +8016,8 @@ export function apply(ctx, config) {
         // 评论区整理（2026-10-26）：目标视频 / 开关 / 间隔 / 批次 / 每轮上限
         'cleanBvid', 'cleanEnabled', 'cleanIntervalMin', 'cleanLastScanAt', 'cleanLastRunEndAt', 'cleanUiOpen',
         'cleanBatchSize', 'cleanBatchGapSec',
+        // 筛选关键词（2026-10-26）：昵称 / 正文，分开两个
+        'cleanKwUname', 'cleanKwMessage',
         // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
         'absoluteGuard',
         'personaEnabled', 'personaMaxChars',
@@ -7951,6 +8048,15 @@ export function apply(ctx, config) {
       }
       if ('cleanBatchSize' in patch) patch.cleanBatchSize = Math.max(1, Math.min(Math.floor(Number(patch.cleanBatchSize) || 30), 100))
       if ('cleanBatchGapSec' in patch) patch.cleanBatchGapSec = Math.max(0, Math.min(Math.floor(Number(patch.cleanBatchGapSec) ?? 30), 600))
+      /**
+       * 筛选关键词（2026-10-26）：
+       * ⚠️ **只是规整空白**（多个空格/换行折成一个），**不做大小写转换、不去重** ——
+       *    用户写什么就存什么，匹配时自己会 `toLowerCase()`。
+       *    去重没意义（重复的词匹配结果一样），还会让用户以为自己少输了词。
+       */
+      for (const k of ['cleanKwUname', 'cleanKwMessage']) {
+        if (k in patch) patch[k] = String(patch[k] || '').replace(/\s+/g, ' ').trim().slice(0, 500)
+      }
       /**
        * ⭐ 间隔（分钟）：**`0` 是合法值**（表示不自动清理），不要用 `|| 5` 兜掉。
        *    上限给 1440（一天）—— 再大就没意义了，还会让"看起来没在跑"。
@@ -8496,6 +8602,11 @@ export function apply(ctx, config) {
         withAt: sc.items.length,
         pending: pending.length,
         skipped: sc.items.length - pending.length,
+        /** ⭐ 关键词筛选状态（面板据此显示"被关键词筛掉 N 条"） */
+        kwActive: sc.kwActive,
+        kwFilteredOut: sc.kwFilteredOut,
+        kwUname: String(cfg.cleanKwUname || ''),
+        kwMessage: String(cfg.cleanKwMessage || ''),
         items: sc.items.map((it) => ({
           rpid: it.rpid, mid: it.mid, uname: it.uname,
           at: it.at.map((a) => a.uname), atMids: it.at.map((a) => a.mid),
