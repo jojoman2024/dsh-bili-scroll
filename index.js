@@ -797,6 +797,108 @@ export function apply(ctx, config) {
   }
 
   /**
+   * ⭐ bvid → `{ aid, cid, duration }`（2026-10-26 加，给 `bilij_act` 用）。
+   *
+   * ── 为什么另开一个函数、而不改 `bvidToAid` ────────────────────────
+   *   `bvidToAid` 已经有 **5 个调用点**（`fetchReplyDetail` / `probeReplyLanding` …），
+   *   它们全都把它当**数字**用（直接拼进 URL 字符串）。
+   *   把返回值改成对象 ⇒ 那 5 处会静默拼出 `[object Object]`，**而且不报错**。
+   *   ⇒ 保留原函数不动，这里另开一个，风险为零。
+   *
+   * ── 为什么要 `cid` ──────────────────────────────────────────────
+   *   发弹幕的 `oid` 是 **分P 的 cid**，不是 aid（实测：`x/v2/dm/post` 的
+   *   `oid` 传 aid 会失败）。而 `cid` 就在同一个 `x/web-interface/view` 响应里
+   *   ⇒ 一次请求把三个值都拿回来，不多打一次接口。
+   *
+   * ⚠️ `duration` 是**秒**，用来校验模型填的 `progress`（弹幕时间点）。
+   */
+  const metaCache = new Map()
+  const bvidMeta = async (bvid, cookie) => {
+    if (!bvid) return null
+    if (metaCache.has(bvid)) return metaCache.get(bvid)
+    try {
+      const j = await biliGet(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, cookie)
+      const d = j?.data
+      if (!d?.aid) return null
+      const m = {
+        aid: d.aid,
+        cid: d.cid ?? d.pages?.[0]?.cid ?? null,
+        duration: Number(d.duration) || 0,
+        title: String(d.title || ''),
+      }
+      metaCache.set(bvid, m)
+      // 顺手把 aid 塞进 aidCache，省得别的调用点再查一次
+      if (!aidCache.has(bvid)) aidCache.set(bvid, m.aid)
+      return m
+    } catch { return null }
+  }
+
+  /** 从凭证里单独取 `bili_jct`（写请求的 csrf） */
+  const credJct = () => {
+    const c = readJson(join(stateDir, 'bili_credential.json'), null)
+    return c && typeof c === 'object' ? String(c.bili_jct || '') : ''
+  }
+
+  /**
+   * 🔴 **写请求**（2026-10-26 加）—— 点赞 / 收藏 / 发弹幕 / 点赞评论全靠它。
+   *
+   * ⚠️ **为什么必须自己写、不能走 MCP**：`vendor/bilibili-mcp` 那份 Python
+   *    **没 import `video` 的写方法**（只用了 `get_info` / `get_danmakus` 这些读的），
+   *    而且**用户装插件时会被整份重铺** ⇒ 改了白改（库里 `cbba9982` 那条）。
+   *
+   * ⚠️ **为什么不用 `bilibili_api` 的封装**：真机实测 `v.like(True)` 会抛
+   *    `AttributeError: 'NoneType' object has no attribute 'get'` ——
+   *    它对这几个写接口拿到的 `result` 是 `None`，封装是坏的。
+   *    而**直接打 HTTP 一切正常**（`code:0`）。⇒ 只能自己打。
+   *
+   * 🔴 **成功判据只有一个：`code === 0`**。
+   *    实测这三个写接口的真实返回是 `{code:0, message:"OK", data:null}`
+   *    —— **没有 `success` 字段**。照 `bili_reply` 那套找 `success` 会永远判失败。
+   *
+   * @param {string} url
+   * @param {Record<string,string|number>} data  会被 URL 编码；`csrf` 自动补
+   * @param {string} cookie
+   * @returns {Promise<{code:number, message:string, data:any}>}
+   */
+  const biliPost = async (url, data, cookie) => {
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), 10000)
+    try {
+      const body = new URLSearchParams()
+      for (const [k, v] of Object.entries(data ?? {})) {
+        /**
+         * ⚠️ **空串要照发，不能当"没填"跳过**（2026-10-26 修）。
+         *    `x/v3/fav/resource/deal` 的 `add_media_ids` / `del_media_ids` 是**成对**的，
+         *    收藏时 `del_media_ids` 就是空串 —— `bilibili_api` 也是显式发 `""` 的，
+         *    真机探针照这个发，`code:0` 通过。
+         *    ⇒ 只跳过 `undefined` / `null`（那才是"没给"）。
+         */
+        if (v === undefined || v === null) continue
+        body.append(k, String(v))
+      }
+      // ⚠️ csrf 从凭证里现取 —— 调用方不用记得传（传漏了 B站 报 -111）
+      const jct = credJct()
+      if (jct) body.append('csrf', jct)
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Cookie: cookie,
+          'User-Agent': BILI_UA,
+          Referer: 'https://www.bilibili.com/',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: 'https://www.bilibili.com',
+        },
+        body: body.toString(),
+        signal: ctl.signal,
+      })
+      const j = await r.json()
+      return { code: Number(j?.code), message: String(j?.message ?? ''), data: j?.data ?? null }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
    * 取一条楼中楼的正文。
    * @returns {Promise<{内容: string, 昵称: string, 时间: number}|null>}
    *
@@ -1804,7 +1906,45 @@ export function apply(ctx, config) {
    * ⚠️ 边界**由代码判**，不看开关：`absoluteGuard` 关着时这里的边界也不变 ——
    *    它约束的是"这个工具能碰哪些路径"，不是"这个会话能用哪些工具"。
    */
-  const resolveInHome = (p) => {
+  /**
+   * ⭐⭐ **只读的第三根：插件包里的 `prompts/`**（2026-10-26 加）。
+   *
+   * ── 它解决什么问题 ────────────────────────────────────────────
+   *   有几份文档**不该给使用者改**（出厂功能的一部分），所以不能进家目录：
+   *     · `hard-rules.md`（硬约束，早就只从插件包读）
+   *     · `actions.md`（点赞/收藏/发弹幕的规范，本批新增）
+   *   而"绝对防护"开着时，前台会话**只有 `bilij_*`** ⇒ 想读它们只能走 `bilij_read`。
+   *
+   * ── 🔴 为什么不能直接塞进 `allowedRoots()` ──────────────────────
+   *   那个函数被 `bilij_write` **共用** ⇒ 加进去等于让模型能**写仓库源码**
+   *   （link 装的时候那就是正在跑的代码）。⇒ 必须拆成读/写两份清单。
+   *
+   * ⚠️ 用 `pluginDir` 作为根（而不是 `join(pluginDir, 'prompts')`）：
+   *    因为模型会写 **`prompts/actions.md`** 这种带前缀的相对路径 ——
+   *    若根本身已经是 `.../prompts`，拼出来就成了 `prompts/prompts/actions.md`（实测踩过）。
+   *    但**只放行 `prompts/` 子目录**（见 `PROMPT_ONLY_SUBDIR`），
+   *    整包放进来会让 `index.js` / `client.js` / `vendor/` 都可读 ——
+   *    `vendor/bilibili-mcp/` 下面就有读 `bili_credential.json` 的逻辑，
+   *    没必要把攻击面放大到那里。
+   */
+  const READONLY_ROOT_DIR = () => pluginDir
+  /** 只读根里**只允许**这个子目录（其余一律当越界） */
+  const READONLY_SUBDIR = 'prompts'
+
+  /**
+   * 读操作可用的根（家目录 + 前台工作区 + 插件包）。
+   * ⚠️ 写操作**只能**用 `allowedRoots()`，别混用。
+   * ⚠️ 插件包那根还要过 `READONLY_SUBDIR` 这一关（见 `resolveInHome`）。
+   */
+  const readRoots = () => [...allowedRoots(), READONLY_ROOT_DIR()]
+
+  /**
+   * 把路径解析成白名单内的绝对路径。
+   * @param {string} p
+   * @param {{ write?: boolean }} [opt] `write:true` ⇒ 只认 `allowedRoots()`（不给写 prompts/）
+   */
+  const resolveInHome = (p, opt = {}) => {
+    const isWrite = opt.write === true
     const raw = String(p ?? '').trim()
     if (raw === '') {
       return {
@@ -1814,11 +1954,48 @@ export function apply(ctx, config) {
         hint: '给一个路径再试：可以写相对家目录的（如 `duty.md`），也可以写绝对路径。',
       }
     }
-    const roots = allowedRoots()
-    // 相对路径按**第一个根**（家目录）解析（章程/判重表都在那儿）
-    const abs = resolve(isAbsolute(raw) ? raw : join(roots[0], raw))
+    const roots = isWrite ? allowedRoots() : readRoots()
+    /**
+     * 解析相对路径。
+     *
+     * ⚠️ **相对路径要按"所有根"依次试，不能只看第一个根**（2026-10-26 修）。
+     *    原来只按 `roots[0]`（家目录）拼 ⇒ `prompts/actions.md` 被拼成
+     *    `<家>/prompts/actions.md`（不存在），而它真正在**插件包**的 `prompts/` 下。
+     *    ⇒ 现在的规则：**按顺序找第一个真实存在的**；都不存在就退回第一个根，
+     *      让错误信息落在"最可能想读的地方"。
+     *    ⚠️ 这只影响相对路径；绝对路径照旧直接解析。
+     */
+    let abs
+    if (isAbsolute(raw)) {
+      abs = resolve(raw)
+    } else {
+      const candidates = roots.map((r) => resolve(join(r, raw)))
+      // ⚠️ 先看存在的；都不存在就退回 roots[0]（保持原来的错误文案不变）
+      abs = candidates.find((p) => existsSync(p)) ?? candidates[0]
+    }
     // ⚠️ 用 `root + sep` 比对：防止 `/x/home-evil` 冒充 `/x/home` 的兄弟
     const hit = roots.find((r) => { const rr = resolve(r); return abs === rr || abs.startsWith(rr + sep) })
+
+    /**
+     * 🔒 **插件包那根只放行 `prompts/`**（2026-10-26 加）。
+     *
+     * 为什么不是整个插件包：`index.js` / `client.js` / `vendor/` 都在那儿，
+     * 而 `vendor/bilibili-mcp/` 下面就有读 `bili_credential.json` 的逻辑 ——
+     * 整包可读等于把攻击面放大到没必要的地方。
+     */
+    if (!isWrite && hit && resolve(hit) === resolve(READONLY_ROOT_DIR())) {
+      const allowDir = resolve(join(READONLY_ROOT_DIR(), READONLY_SUBDIR))
+      if (!(abs === allowDir || abs.startsWith(allowDir + sep))) {
+        return {
+          ok: false,
+          error: `插件包里只开放 \`${READONLY_SUBDIR}/\` 这个子目录，不接受：${abs}`,
+          bounded: true,
+          allowedRoots: roots,
+          hint: `换成 \`${READONLY_SUBDIR}/<文件名>\` 这种路径再来一次（例如 \`${READONLY_SUBDIR}/actions.md\`）。`,
+          doNotConclude: '不要因为这一次越界就结束整轮或跳过剩下的步骤。',
+        }
+      }
+    }
 
     /**
      * 🔒 **凭证拦截**（在"是否越界"之后判 —— 因为它**本来就在**白名单里）。
@@ -1858,8 +2035,10 @@ export function apply(ctx, config) {
          */
         bounded: true,
         allowedRoots: roots,
-        hint: '这是本工具固定的范围（家目录 + 前台会话的工作区），不是故障、也不用重试同一个路径。'
-          + '换成这两个目录里的路径再来一次即可，这一轮可以继续往下做。',
+        hint: (isWrite
+          ? '这是本工具固定的可写范围（家目录 + 前台会话的工作区），不是故障、也不用重试同一个路径。'
+          : '这是本工具固定的范围（家目录 + 前台会话的工作区 + 插件自带的 prompts/），不是故障、也不用重试同一个路径。')
+          + '换成上面 `allowedRoots` 里的路径再来一次即可，这一轮可以继续往下做。',
         doNotConclude: '不要因为这一次越界就结束整轮或跳过剩下的步骤。',
       }
     }
@@ -1868,9 +2047,10 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bilij_read',
-    description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 回复细则 reply.md / 判重表 seen.md / 产物 reports/*.md …）。\n'
+    description: '读插件家目录里的文件（章程 duty.md / 人设 persona.md / 回复细则 reply.md / 判重表 seen.md / 产物 reports/*.md …），\n'
+      + '以及插件自带的出厂文档（`prompts/actions.md` 点赞收藏弹幕规范、`prompts/hard-rules.md` 硬约束）。\n'
       + '⭐ **刷一轮读章程就用它** —— 前台会话的工作区是另一个目录，普通文件工具**读不到**家目录里的章程。\n'
-      + '🔒 **只能读两个地方**：插件家目录、以及刷B站自己那个会话的工作区。\n'
+      + '🔒 **只能读三个地方**：插件家目录、刷B站自己那个会话的工作区、插件包的 `prompts/`。\n'
       + '   ⛔ **`bili_credential.json` 读不到** —— 那是登录凭证，永远不对 AI 开放。\n'
       + '   越界时回执里会带 `allowedRoots` —— 换个范围内的路径继续就行，**不要因此结束这一轮**。',
     parameters: {
@@ -2072,7 +2252,8 @@ export function apply(ctx, config) {
       confirmShrink: { type: 'boolean', description: '覆盖时新内容比原来短一半以上会被拦；确认这是真的要大幅精简，就传 true。' },
     },
     async execute(args) {
-      const r = resolveInHome(args.path)
+      // ⚠️ 写操作**只认可写根**（家目录 + 前台工作区）—— 插件包的 prompts/ 是只读的
+      const r = resolveInHome(args.path, { write: true })
       // ⚠️ 越界时把 bounded / allowedRoots / hint / doNotConclude 一起回给模型（同 bilij_read）
       if (!r.ok) return { ok: false, ...r }
       const body = String(args.text ?? '')
@@ -3333,6 +3514,294 @@ export function apply(ctx, config) {
         home: stateDir,
         report: join(outDir, `${dayKey(now)}.md`),
       }
+    },
+  })
+
+  /* ─────────────── bilij_act：点赞 / 收藏 / 弹幕 / 赞评论（2026-10-26 加） ───────────────
+   *
+   * ⭐ **五个动作共用一个工具**（使用者要求）：like / favorite / danmaku / likeComment / folders。
+   *    描述里只留一句指针，具体规范在 `prompts/actions.md`（**插件包内，不进家目录**）——
+   *    这样它不常驻上下文，模型要用时才读。
+   *
+   * 🔴 **三条不做**（使用者明确要求，别自作主张加回来）：
+   *    · **不做开关** —— 让使用者自己在提示词里约束；
+   *    · **不做额度硬闸** —— 不记 rounds，不拦；
+   *    · **不写判重表** —— 不碰 seen.md，也不建 acted.md。
+   *
+   * ⚠️ **弹幕没有撤销接口**（B站 官方不提供删弹幕）⇒ 唯一一个"发出去就收不回"的动作。
+   *    收藏/点赞/赞评论都能撤（传对应的取消值）。
+   */
+
+  /** 把 B站 的错误码翻成人话 —— 模型看得懂才不会乱试 */
+  const ACT_CODE_HINT = (code) => {
+    if (code === 0) return ''
+    if (code === -101) return 'B站 说没登录（凭证过期了）⇒ 让使用者在面板里重新扫码登录，然后重试。'
+    if (code === -111) return 'csrf 校验失败（`bili_jct` 不对）⇒ 也是登录态问题，让使用者重新扫码。'
+    if (code === -400) return '参数不对 —— 检查 bvid / rpid / progress 有没有填错。'
+    if (code === -404) return 'B站 说找不到这个资源（视频/评论可能被删了）。'
+    if (code === 65004) return '用户已取消点赞（重复操作）。'
+    if (code === 65006) return '已经赞过了（重复点赞不会报错，这次是幂等的）。'
+    if (code === 11010) return '收藏夹数量到上限了，或者该收藏夹不存在。'
+    if (code === 41010) return '这个视频不允许收藏（UP 主关了）。'
+    if (code === -509) return '被 B站 限流了（请求太频繁）⇒ 等一会儿再试，这一轮别继续。'
+    return `B站 返回错误：code=${code}`
+  }
+
+  /** 列当前账号的收藏夹（一轮内缓存；`folder` 的解析也靠它） */
+  let favFolderCache = null
+  const fetchFavFolders = async (cookie) => {
+    if (favFolderCache) return favFolderCache
+    const c = readJson(join(stateDir, 'bili_credential.json'), null)
+    const mid = String(c?.dedeuserid || '')
+    if (!mid) return []
+    try {
+      const j = await biliGet(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${encodeURIComponent(mid)}`, cookie)
+      const list = Array.isArray(j?.data?.list) ? j.data.list : []
+      favFolderCache = list.map((it) => ({
+        id: Number(it.id) || 0,
+        title: String(it.title || ''),
+        count: Number(it.media_count) || 0,
+      })).filter((x) => x.id > 0)
+      return favFolderCache
+    } catch { return [] }
+  }
+
+  tool({
+    name: 'bilij_act',
+    description: '对 B站 做**有点痕迹**的动作：点赞视频 / 收藏 / 发弹幕 / 点赞评论，`action` 选哪个。\n'
+      + '🔴 **动手之前先读规范**：`bilij_read({ path: "prompts/actions.md" })` —— '
+      + '什么时候该用哪个、弹幕怎么写、`progress` 怎么定、什么时候**不**该动手，全在那份里。\n'
+      + '⭐ `action:"folders"` 先看有哪些收藏夹；`favorite` 不传 `folder` 时，'
+      + '只有一个夹就自动用它，多个会回清单让你自己选。\n'
+      + '⚠️ **弹幕发出去收不回**（没有删除接口），其余三个都能撤（传取消值）。\n'
+      + '⚠️ 回执 `code:-101/-111` = 登录过期，让使用者去面板重新扫码，别反复重试。',
+    parameters: {
+      action: {
+        type: 'string',
+        description: 'like=点赞视频 / favorite=收藏 / danmaku=发弹幕 / likeComment=点赞评论 / folders=列收藏夹',
+      },
+      bvid: { type: 'string', description: 'BV号（除 folders 外都要）' },
+      rpid: { type: 'string', description: '仅 likeComment：**评论**的 id（`bilij_comments` 返回的 rpid）' },
+      folder: { type: 'string', description: '仅 favorite：收藏夹**名字或 id**（不传 = 自动选）' },
+      text: { type: 'string', description: '仅 danmaku：弹幕内容' },
+      progress: { type: 'number', description: '仅 danmaku：弹幕出现在第几**秒**（会校验 0~时长）' },
+      undo: { type: 'boolean', description: '传 true = **取消**（取消赞/取消收藏/取消赞评论）。弹幕不支持' },
+    },
+    async execute(args) {
+      const action = String(args.action ?? '').trim()
+      /**
+       * ⚠️ **先校验 action 本身**，再校验它的参数（2026-10-26 修）。
+       *    原来顺序反了 ⇒ 传 `action:"xxx"` 会先撞上"缺少 bvid"，
+       *    模型读到的是一句**答非所问**的错（它以为自己只是漏了个参数）。
+       */
+      const ACTIONS = ['like', 'favorite', 'danmaku', 'likeComment', 'folders']
+      if (!ACTIONS.includes(action)) {
+        return {
+          ok: false,
+          error: `不认识的 action：${action || '（空）'}`,
+          hint: `只能是 ${ACTIONS.join(' / ')} 这五个之一。`,
+          actions: ACTIONS,
+        }
+      }
+      const cookie = credCookie()
+      if (!cookie) {
+        return {
+          ok: false,
+          error: '还没登录 B站 —— 没有凭证，做不了写操作。',
+          hint: '让使用者在面板里扫码登录（或用 `bilij_login_start`），登录后重试。',
+        }
+      }
+      const undo = args.undo === true
+
+      /** 统一的收尾：把 B站 的 code 翻成人话，并给 `ok` */
+      const done = (r, extra = {}) => {
+        const code = Number(r?.code)
+        const okNow = code === 0
+        const hint = ACT_CODE_HINT(code)
+        return {
+          ok: okNow,
+          code,
+          message: r?.message ?? '',
+          ...(okNow ? {} : { error: hint || `B站 返回 code=${code}` }),
+          ...(okNow && hint ? { note: hint } : {}),
+          ...extra,
+        }
+      }
+
+      // ─────────── folders：列收藏夹（只读） ───────────
+      if (action === 'folders') {
+        favFolderCache = null                       // 显式要清单 ⇒ 不吃缓存
+        const list = await fetchFavFolders(cookie)
+        return {
+          ok: list.length > 0,
+          count: list.length,
+          folders: list,
+          ...(list.length ? {} : { error: '没拿到收藏夹清单（可能登录过期，或者账号一个收藏夹都没有）。' }),
+        }
+      }
+
+      // ─────────── 其余四个都要 bvid ───────────
+      const bvid = String(args.bvid ?? '').trim()
+      if (!bvid) return { ok: false, error: '缺少 bvid。' }
+      const meta = await bvidMeta(bvid, cookie)
+      if (!meta?.aid) {
+        return {
+          ok: false,
+          error: `拿不到 ${bvid} 的视频信息（视频可能被删了，或者登录过期）。`,
+          hint: '先确认 BV 号对不对；还不行就检查登录状态（`bilij_whoami`）。',
+        }
+      }
+
+      // ─────────── ① like：点赞视频 ───────────
+      if (action === 'like') {
+        // ⚠️ 视频：like=1 赞 / like=2 取消（跟评论的 1/0 **不一样**，别搞混）
+        const r = await biliPost(
+          'https://api.bilibili.com/x/web-interface/archive/like',
+          { aid: meta.aid, like: undo ? 2 : 1 },
+          cookie,
+        )
+        return done(r, { action, bvid, undo, title: meta.title })
+      }
+
+      // ─────────── ② favorite：收藏 ───────────
+      if (action === 'favorite') {
+        const folders = await fetchFavFolders(cookie)
+        if (!folders.length) {
+          return { ok: false, error: '没拿到收藏夹清单，没法收藏。', hint: '先 `action:"folders"` 看一眼，或者让使用者重新扫码登录。' }
+        }
+        const want = String(args.folder ?? '').trim()
+        let target = null
+        if (want) {
+          // 名字精确 > 名字包含 > id
+          target = folders.find((f) => f.title === want)
+            ?? folders.find((f) => f.title.includes(want))
+            ?? folders.find((f) => String(f.id) === want)
+            ?? null
+          if (!target) {
+            return {
+              ok: false,
+              error: `找不到叫「${want}」的收藏夹。`,
+              folders,
+              hint: '从 `folders` 里挑一个（用 `title` 或 `id` 填 `folder`），或者不传让它自动选。',
+            }
+          }
+        } else {
+          /**
+           * ⚠️ B站 的 `list-all` **没有 `is_default` 字段**（实测只有 id/title/media_count/fav_state）
+           *    ⇒ "默认收藏夹"认不准。所以只能退化成"只有一个就自动用"。
+           */
+          if (folders.length === 1) target = folders[0]
+          else {
+            return {
+              ok: false,
+              error: `你有 ${folders.length} 个收藏夹，B站 不提供"哪个是默认"的信息，所以不敢替你选。`,
+              folders,
+              hint: '从上面挑一个，把 `title` 或 `id` 填进 `folder` 再调一次。',
+            }
+          }
+        }
+        const r = await biliPost(
+          'https://api.bilibili.com/x/v3/fav/resource/deal',
+          {
+            rid: meta.aid,
+            type: 2,
+            // ⚠️ 逗号分隔的**字符串**，不是数组（照抄 bilibili_api 的写法）
+            add_media_ids: undo ? '' : String(target.id),
+            del_media_ids: undo ? String(target.id) : '',
+          },
+          cookie,
+        )
+        return done(r, {
+          action, bvid, undo, title: meta.title,
+          folder: { id: target.id, title: target.title },
+        })
+      }
+
+      // ─────────── ③ danmaku：发弹幕 ───────────
+      if (action === 'danmaku') {
+        if (undo) return { ok: false, error: '弹幕不支持撤销 —— B站 没有删除弹幕的接口。' }
+        const msg = String(args.text ?? '').trim()
+        if (!msg) return { ok: false, error: '缺少弹幕内容（`text`）。' }
+        if (!meta.cid) {
+          return { ok: false, error: `拿不到 ${bvid} 的分P id（cid），发不了弹幕。` }
+        }
+        const sec = Number(args.progress)
+        if (!Number.isFinite(sec) || sec < 0) {
+          return {
+            ok: false,
+            error: '`progress` 必须是 ≥0 的秒数（弹幕出现在第几秒）。',
+            duration: meta.duration,
+          }
+        }
+        if (meta.duration > 0 && sec > meta.duration) {
+          return {
+            ok: false,
+            error: `\`progress\`=${sec} 秒超过了视频时长（${meta.duration} 秒）。`,
+            duration: meta.duration,
+            hint: '填 0 到 duration 之间的秒数。',
+          }
+        }
+        const r = await biliPost(
+          'https://api.bilibili.com/x/v2/dm/post',
+          {
+            type: 1,
+            // ⚠️ oid 是**分P 的 cid**，不是 aid（实测传 aid 会失败）
+            oid: meta.cid,
+            msg,
+            aid: meta.aid,
+            bvid,
+            progress: Math.round(sec * 1000),      // 毫秒
+            color: 16777215,                        // 白
+            fontsize: 25,
+            pool: 0,
+            mode: 1,                                // 滚动
+            plat: 1,
+          },
+          cookie,
+        )
+        const out = done(r, {
+          action, bvid, title: meta.title, text: msg, progress: sec,
+          dmid: r?.data?.dmid_str ?? r?.data?.dmid ?? null,
+          // ⭐ visible=false 表示还在审核 —— 别当成失败
+          visible: r?.data?.visible ?? null,
+        })
+        if (out.ok && out.visible === false) {
+          out.note = '弹幕已提交，但 B站 标了 `visible:false` ⇒ 还在审核，过一会儿才会出现在弹幕里。'
+        }
+        return out
+      }
+
+      // ─────────── ④ likeComment：点赞评论 ───────────
+      if (action === 'likeComment') {
+        const rpid = String(args.rpid ?? '').trim()
+        if (!rpid) return { ok: false, error: '缺少 rpid（要赞的那条评论 id）。' }
+        /**
+         * ⚠️ 楼中楼的坑（跟 `bilij_reply` 那个 root/parent 是同一类）：
+         *    B站 对楼中楼的 rpid 做点赞时，**可能不报错但赞到了楼层根上**。
+         *    所以先查一下这条评论自己有没有 root/parent —— 有就说明它是楼中楼，
+         *    在回执里说明白，让模型知道"赞的是谁"。
+         */
+        let landingNote = ''
+        try {
+          const d = await fetchReplyDetail(bvid, rpid, cookie)
+          if (d && (d.root || d.parent) && String(d.root ?? '') !== String(rpid)) {
+            landingNote = `⚠️ 这条 rpid 是**楼中楼**（楼层根是 ${d.root}）——`
+              + 'B站 会把这个赞记在楼层根上，不一定落在你要的那条上。'
+          }
+        } catch { /* 查不到就算了，不挡主流程 */ }
+        // ⚠️ 评论：action=1 赞 / action=0 取消（跟视频的 1/2 **不一样**）
+        const r = await biliPost(
+          'https://api.bilibili.com/x/v2/reply/action',
+          { oid: meta.aid, type: 1, rpid, action: undo ? 0 : 1 },
+          cookie,
+        )
+        const out = done(r, { action, bvid, rpid, undo, title: meta.title })
+        if (out.ok && landingNote) out.note = landingNote
+        return out
+      }
+
+      // 走不到这儿：action 在上面已经校验过（五个之一），每个都有 return
+      return { ok: false, error: `未处理的 action：${action}` }
     },
   })
 
