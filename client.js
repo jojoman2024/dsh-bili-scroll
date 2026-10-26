@@ -4411,6 +4411,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             h(Field, {
               label: '目标视频',
               note: '要整理哪个视频的评论区。填 BV 号或粘贴视频链接都行。',
+              // ⭐ 整行输入框（2026-10-26 使用者要求）：标题+描述在上，输入框占满下面一整行
+              stack: true,
               children: h('input', {
                 'data-bd-input': '',
                 type: 'text',
@@ -4503,6 +4505,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             h(Field, {
               label: '按昵称筛选',
               note: '只匹配作者昵称，多个词用空格分隔，命中任一就算机器人。留空则不按昵称筛。',
+              stack: true,
               children: h('input', {
                 'data-bd-input': '',
                 type: 'text',
@@ -4519,6 +4522,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             h(Field, {
               label: '按评论内容筛选',
               note: '只匹配评论正文，多个词用空格分隔，命中任一就算机器人。留空则不按内容筛。',
+              stack: true,
               children: h('input', {
                 'data-bd-input': '',
                 type: 'text',
