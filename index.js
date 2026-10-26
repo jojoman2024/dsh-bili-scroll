@@ -4322,75 +4322,91 @@ export function apply(ctx, config) {
     if (!meta?.aid) return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `拿不到 ${bvid} 的视频信息（视频被删了 / 登录过期）。` }
 
     /**
-     * 🔴🔴 **走 MCP 的 `bili_comments`，不要自己手写 HTTP**（2026-10-26 大改）。
+     * 🔴🔴 **用 `/x/v2/reply/main` + 游标翻页**（2026-10-26 重写，依据知识库 934209ac）。
      *
      * ── 我错在哪（留住教训，别改回去）──────────────────────────
-     *   我原来自己拼 `GET /x/v2/reply?type=1&oid=…&sort=0&pn=N`，结果：
+     *   ① 我原来自己拼 `GET /x/v2/reply?type=1&oid=…&sort=0&pn=N`，被 **-412** 拒。
+     *      而 `/x/v2/reply/main` 同一秒、同一 IP、同一 Cookie 是**通的**
+     *      ⇒ 根本不是风控，是**我用错了接口**。我却连着三次归因风控。
+     *   ② 之后想"那就走 MCP 的 bili_comments"，但它是
+     *      `while len < num` 硬顶 + `except: break` 吞异常 ——
+     *      给大 `num` 会连续翻二三十页，中途一失败就**连第一页都拿不到**
+     *      （真机报"取到 0 条"）。而且它对外只暴露 6 个字段（无 mid、无 members）。
      *
-     *      自己写的：/x/v2/reply        → HTTP 412 / code=-412 "request was banned"
-     *      MCP 走的：/x/v2/reply/main   → code=0，数据正常
+     * ── 正确做法（知识库 934209ac 实测过：634 条总回复 → 374 条一级评论）──
+     *   · 接口：`GET /x/v2/reply/main?type=1&oid=<aid>&mode=2&next=<cursor>&ps=20`
+     *   · `mode=2` = **按时间**，能翻到底；`mode=3` = 热门，约 40 条就 is_end（拿不全）
+     *   · `next` 首次为 0，之后用回包的 **`data.cursor.next`（游标整数，不是页码）**
+     *   · `cursor.is_end === true` 就停
+     *   · `mode=2` 首页可能只回 3~18 条（混有置顶），**别据此断定接口坏了**
+     *   · 节奏：每页 1.3~2s、每 5~7 页歇 30s（防风控）
      *
-     *    同一秒、同一个 IP、同一份 Cookie，**一个被拒一个正常** ——
-     *    根本不是"风控"，是**我用错了接口**。我却连着三次归因风控，
-     *    还带着使用者一起怀疑网络。这条错误值得记住：
-     *    **B站 侧已经有现成能用的通路（MCP/`bilibili_api`），先用它，别自己拼。**
-     *
-     * ── 换过来之后的好处 ──────────────────────────────────
-     *    · 鉴权、wbi 签名、cookie 刷新都由 `bilibili_api` 处理，我不再操心
-     *    · `bili_comments` 内部**自己翻页**（page_index 递增，直到 num 满或没有更多）
-     *    · 出错时它返回 `count: 0`（异常被它吞了），所以**不能只看 count**：
-     *      这里额外判断"视频真有评论但拿到 0"⇒ 如实报错，别让用户以为没人评论
-     *
-     * ⚠️ **代价（必须记住）**：`bili_comments` 的返回**只有 6 个字段**
-     *      `{ rpid, user, content, like, reply_count, time }`
-     *    —— **没有 `mid`，也没有 `content.members`**。所以：
-     *      · 判断"带 @"只能看**正文里有没有 @**
-     *      · 白名单（按 mid）在这里拿不到 mid ⇒ 靠 `user`（昵称）兜底匹配
+     * ⭐ 好处：字段是 B站 原样（有 `member.mid`、有 `content.members`），
+     *    白名单能按 mid 精确判，"带 @"也能用 members + 正文双保险。
      */
     const cookie = credCookie()
     const incremental = Number(sinceTime) > 0
-    // 增量模式少拿点（新的都在前面）；全量按 500 上限拿
-    const wantNum = incremental ? 60 : 500
-
-    let rec
-    try {
-      const raw = await call('bili_comments', { bvid, num: wantNum })
-      rec = raw
-      if (typeof rec === 'string') { try { rec = JSON.parse(rec) } catch { /* 保持原样 */ } }
-    } catch (e) {
-      return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `取评论失败（MCP）：${e?.message ?? e}` }
-    }
-    const list = Array.isArray(rec?.comments) ? rec.comments : []
-    /**
-     * ⚠️ **`count: 0` 有两种含义**，必须分辨：
-     *    · 真的没评论
-     *    · `bili_comments` 内部异常被 `except: break` 吞掉（它不报错，只给空列表）
-     * ⇒ 用视频的**评论总数**（`meta` 里没有，但可以用 stat）粗判：
-     *    这里退一步 —— 拿到 0 条就把"可能是接口失败"讲清楚，别假装"没评论"。
-     */
-    if (!list.length) {
-      return {
-        ok: false,
-        total: 0,
-        items: [],
-        scannedPages: 0,
-        newestCtime: 0,
-        error: '取到 0 条评论。可能是这个视频真的没有评论，'
-          + '也可能是 B站 接口那边失败了（MCP 的 bili_comments 会把异常吞掉、直接返回空列表）。'
-          + '再点一次「扫描」试试；一直这样就用 bilij_comments 单独验一下。',
-      }
-    }
-
-    let newestCtime = 0
     const all = []
-    for (const x of list) {
-      const ct = Number(x.time) || 0
-      if (ct > newestCtime) newestCtime = ct
-      if (incremental && ct <= Number(sinceTime)) continue
-      all.push(x)
-    }
-    const scannedPages = 1
+    let scannedPages = 0
+    let newestCtime = 0
+    let hitOld = false
+    let cursorNext = 0
+    let lastErr = ''
+    // 增量最多翻 3 页（新的都在前面）；全量上限 40 页（634 条约 19 页够）
+    const maxPages = incremental ? 3 : 40
 
+    for (let page = 1; page <= maxPages; page++) {
+      let j
+      try {
+        j = await biliGet(
+          `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${meta.aid}&mode=2&next=${cursorNext}&ps=20`,
+          cookie,
+        )
+      } catch (e) {
+        lastErr = String(e?.message ?? e)
+        // 已经拿到部分就照用（增量模式下这是正常的）
+        if (all.length) break
+        return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `取评论失败（第 ${page} 页）：${lastErr}` }
+      }
+      if (Number(j?.code) !== 0) {
+        lastErr = `code=${j?.code} ${j?.message ?? ''}`.trim()
+        if (all.length) break
+        return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `取评论失败（第 ${page} 页）：${lastErr}` }
+      }
+      const reps = Array.isArray(j?.data?.replies) ? j.data.replies : []
+      const cur = j?.data?.cursor || {}
+      scannedPages = page
+      for (const x of reps) {
+        const ct = Number(x.ctime) || 0
+        if (ct > newestCtime) newestCtime = ct
+        // 增量：比"上次扫到的时间"还早 ⇒ 后面的更早，可以停
+        if (incremental && ct <= Number(sinceTime)) { hitOld = true; continue }
+        all.push(x)
+      }
+      if (hitOld) break
+      if (cur.is_end === true) break
+      // ⚠️ 游标不前进（还是同一个值）⇒ 再翻就是死循环，停
+      const nxt = cur.next
+      if (nxt === undefined || nxt === null || Number(nxt) === Number(cursorNext)) break
+      cursorNext = nxt
+      // 节奏：知识库实测每页 1.3~2s，每 5 页歇 30s
+      await new Promise((r) => setTimeout(r, 900))
+      if (page % 5 === 0) await new Promise((r) => setTimeout(r, 3000))
+    }
+
+    /**
+     * ⚠️ **一条都没拿到**时要分辨原因（别笼统说"没评论"）：
+     *    · 接口真返回空（视频确实没评论）
+     *    · 被拦/报错（`lastErr` 有值）
+     * 两种情况给完全不同的提示。
+     */
+    if (!all.length && lastErr) {
+      return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `取评论失败：${lastErr}` }
+    }
+    if (!all.length && !scannedPages) {
+      return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: '接口一条都没返回，先确认这个视频有没有评论。' }
+    }
+    // ⚠️ 拿到 0 条但不是错误（`scannedPages > 0`、`lastErr` 空）⇒ 视频确实没评论，照常往下走
     const items = []
     const kwActive = (() => {
       const split = (s) => String(s || '').split(/\s+/).filter(Boolean)
@@ -4400,26 +4416,24 @@ export function apply(ctx, config) {
     let hasAtCount = 0     // 带 @ 的条数
     for (const x of all) {
       /**
-       * ⚠️ **字段名按 MCP `bili_comments` 的返回**（2026-10-26）：
-       *    `{ rpid, user, content, like, reply_count, time }`
-       *    —— 不是 B站 原始 JSON 的 `member.uname` / `content.message`。
-       *    ⚠️ 也**没有 `mid`、没有 `content.members`**（MCP 侧只挑这 6 个字段）。
+       * ⭐ **字段按 B站 原始 JSON**（`/x/v2/reply/main` 原样返回，不再经 MCP 裁剪）：
+       *    `member.uname` / `member.mid` / `content.message` / `content.members`
+       * ⇒ **mid 和 members 都有**，白名单能按 mid 精确判。
        */
-      const msg = String(x.content || '')
-      const uname = String(x.user || '')
+      const ct = x.content || {}
+      const mem = x.member || {}
+      const mems = Array.isArray(ct.members) ? ct.members : []
+      const msg = String(ct.message || '')
+      const uname = String(mem.uname || '')
       /**
-       * 🔴🔴 **「带 @」只能看正文里有没有 @**（2026-10-26）。
+       * 🔴 **「带 @」= `content.members` 非空 OR 正文里有 `@xxx`**（2026-10-26）。
        *
-       * 原来的判断是 `content.members` 非空。两个原因都不能用了：
-       *   ① MCP 的返回里**根本没有 members 字段**
-       *   ② 就算有也不可靠 —— 实测 4 条正文含 `@茄子舅舅` 的评论里，
-       *      `members` 只有 2 条有值（另 2 条是空的）。
-       *
-       * ⇒ 改成**看正文**：出现 `@xxx` 形式就算带 @。
-       *   宽一点（正文里孤零零一个 @ 符号也会命中），但**宁可多收、不可漏收**
-       *   —— 漏一条就是那条机器人留言永远留在评论区。
+       * 为什么要两个条件：实测 4 条正文含 `@茄子舅舅` 的评论里，
+       * `content.members` **只有 2 条有值**（另 2 条是空的）——
+       * 只信 members 会漏掉一半。只看正文又可能把正文里孤零零的 @ 算进来。
+       * ⇒ **两者取或：宁可多收，不可漏收**（漏一条 = 那条机器人留言永远留着）。
        */
-      const hasAt = /@[^\s@]/.test(msg)
+      const hasAt = mems.length > 0 || /@[^\s@]/.test(msg)
       /**
        * 🔴🔴 **候选判据 = 「带 @」 OR 「命中关键词」**（2026-10-26 按使用者澄清重做）。
        *
@@ -4445,28 +4459,20 @@ export function apply(ctx, config) {
       if (!take) continue
       items.push({
         rpid: String(x.rpid),
-        /**
-         * ⚠️ MCP 返回里**没有 mid** ⇒ 这里留空。
-         *    白名单因此只能按**昵称**兜底匹配（见下面的 whitelisted）。
-         *    ⚠️ 这是 MCP 接口的固有限制；要按 mid 精确判就得改 vendor（不能动）。
-         */
-        mid: '',
+        /** ⭐ mid 有（B站 原始字段）⇒ 白名单能按 mid 精确判 */
+        mid: String(mem.mid || ''),
         uname,
         message: msg,
-        /** MCP 不给 members ⇒ 空数组（不再拿它做判断，只留给"搬进楼"时拼文本用） */
-        at: [],
+        /** ⭐ members 也有（B站 原始字段）—— "搬进楼"拼文本时能用上真实 @ 对象 */
+        at: mems.map((m) => ({ mid: String(m.mid || ''), uname: String(m.uname || '') })),
         like: Number(x.like) || 0,
-        rcount: Number(x.reply_count) || 0,
-        ctime: Number(x.time) || 0,
-        state: 0,
-        /** 插件自己发的 ⇒ 按**昵称**判断（拿不到 mid） */
-        isSelf: false,
-        /**
-         * 🔴 白名单**按昵称兜底**（2026-10-26）。
-         * MCP 不给 mid ⇒ 用 `user`（昵称）去比白名单里存过的名字。
-         * 代价：同名会误跳（但总比"按 mid 拿不到 mid"直接失效强）。
-         */
-        whitelisted: inWhitelistByName(uname),
+        rcount: Number(x.rcount) || 0,
+        ctime: Number(x.ctime) || 0,
+        state: Number(x.state) || 0,
+        /** 插件自己发的 ⇒ 按 mid 精确判（和"永远跳过自己"那条一脉相承） */
+        isSelf: String(mem.mid || '') === selfMid(),
+        /** 白名单：mid 优先，昵称兜底（有些老条目只存了名字） */
+        whitelisted: inWhitelist(mem.mid) || inWhitelistByName(uname),
         /**
          * ⭐ **这条是怎么被选中的**（2026-10-26）：
          *   · `'hasAt'` —— 带 @（主体，无条件要）
