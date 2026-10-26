@@ -5225,6 +5225,38 @@ export function apply(ctx, config) {
       }
     }
 
+    /**
+     * 🔴 **一定要打一条"结束"日志**（2026-10-26 使用者问：
+     *    「像刚刚那种情况，他已经没有东西可以处理了，他也没有停止进程。这块怎么处理呢？」）
+     *
+     * 实际情况：**进程早就停了**（22:44:29 就 return 了，`running` 也是空），
+     * 但日志里**只有"开始"、没有任何"结束"** ⇒ 从面板上完全看不出它停了，
+     * 最后一行还是「翻到第 2 页（原始 0 / 待处理 0）」，看着像"卡在那儿等什么"。
+     *
+     * ⇒ 结束必须**显式说出来**，而且要带上前因后果（为什么停、处理了几条、还剩什么）。
+     * ⚠️ 三种结局分开写，别都写成"完成"：
+     *    · `allClear` —— 真的清完了
+     *    · 到了上限 —— 还有剩，但不敢再跑
+     *    · 中途出错 —— 停下报错
+     */
+    const leftOnPage = pageItems.length
+    const failCount = Object.keys(listFails(bvid)).length
+    let endWord = ''
+    if (!allClear) {
+      endWord = leftOnPage > 0
+        ? `到了上限（${maxRounds} 批）就停了 —— 本页还剩 ${leftOnPage} 条没处理，再点一次会接着来`
+        : `到了上限（${maxRounds} 批）就停了 —— 后面还有页没翻，再点一次会接着来`
+    } else if (leftOnPage > 0) {
+      endWord = `本页还剩 ${leftOnPage} 条（下一页是空的，当作到底了）`
+    } else {
+      endWord = '已经到底，没有更多要处理的了'
+    }
+    clog(`整理结束：处理 ${doneTotal} 条成功 / ${failedTotal} 条失败，翻了 ${pageNo} 页 —— ${endWord}`,
+      allClear && failedTotal === 0 ? 'ok' : 'info')
+    if (failCount > 0) {
+      clog(`失败账本里还有 ${failCount} 条，下次整理会重试它们`, 'warn')
+    }
+
     return {
       ok: true,
       bvid,
@@ -8475,6 +8507,15 @@ export function apply(ctx, config) {
          */
         cleanLog: { seq: cleanLogSeq, lines: cleanLogBuf.slice(-160) },
         /**
+         * ⭐ **现在有没有整理任务在跑**（2026-10-26 加）。
+         * 面板靠它决定日志区的状态显示：
+         *   · `true`  ⇒ 「实时刷新中…」（轮询开着）
+         *   · `false` ⇒ 「已停止」+ 可以自动关掉轮询
+         * ⚠️ 这是**后端说了算**的 —— 不能只看前端那个 `cleanLogOn`，
+         *    因为用户可能关掉页面再回来，那时前端不知道自己还在不在跑。
+         */
+        cleanRunning,
+        /**
          * ⭐ 当前目标视频的失败清单（面板每 5 秒轮询就自动对齐）。
          * 按使用者选的 C 方案：**只展示、不跳过**。
          */
@@ -9224,12 +9265,29 @@ export function apply(ctx, config) {
        *    使用者原话：「可以设置批次处理多少条（默认30条）和批次之间间隔多少（默认30秒）。
        *    直到清完或者失败。」
        * ⚠️ 批次参数可以随请求覆盖（面板上改了不用先存配置）。
+       *
+       * ⚠️ **`cleanRunning` 手动这条路也要置位**（2026-10-26 补）：
+       *    原来只有自动整理（`cleanTick`）会置它 ⇒ 手动跑的时候
+       *    `/status` 一直报 `false`，面板就以为"没在跑"，日志区状态也是错的。
+       *    ⇒ 两条路共用这个标志，`finally` 里一定要复位。
        */
-      const r = await runCommentClean(bvid, {
-        batchSize: Number(body.batchSize) || Number(cfg.cleanBatchSize) || 30,
-        batchGapSec: Number(body.batchGapSec) ?? Number(cfg.cleanBatchGapSec) ?? 30,
-      })
+      cleanRunning = true
+      let r
+      try {
+        r = await runCommentClean(bvid, {
+          batchSize: Number(body.batchSize) || Number(cfg.cleanBatchSize) || 30,
+          batchGapSec: Number(body.batchGapSec) ?? Number(cfg.cleanBatchGapSec) ?? 30,
+        })
+      } finally {
+        cleanRunning = false
+      }
       if (r.ok) saveCfg({ cleanLastScanAt: Date.now() })
+      /**
+       * ⭐ **手动跑完也记结束时间**（2026-10-26 补）。
+       *    原来只有 `cleanTick` 写 `cleanLastRunEndAt` ⇒ 手动跑完它是 0，
+       *    面板上看不出"上一轮什么时候结束的"。
+       */
+      saveCfg({ cleanLastRunEndAt: Date.now() })
       return sendJson(res, 200, r)
     }
 

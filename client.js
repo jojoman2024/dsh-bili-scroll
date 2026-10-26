@@ -621,6 +621,10 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-loghint]{flex:none;
   font-size:var(--dsw-font-xxxs-11-font-size,11px);line-height:14px;
   color:var(--dsw-alias-label-tertiary,#81858c);}
+/* ⭐ 状态两态（2026-10-26）：在跑=绿、已结束=灰。
+   用属性选择器而不是内联色，方便以后统一调。 */
+[data-bd-loghint][data-bd-lv="run"]{color:#16a34a;font-weight:500;}
+[data-bd-loghint][data-bd-lv="idle"]{color:var(--dsw-alias-label-tertiary,#81858c);}
 /* 终端本体 */
 [data-bd-logscroll]{max-height:260px;overflow-y:auto;overscroll-behavior:contain;
   border-radius:var(--dsw-radius-sm,8px);
@@ -2058,6 +2062,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       const cleanLogSeq = React.useRef(0)
       /** 跑完后延缓关轮询的定时器（30 秒） */
       const cleanLogTimer = React.useRef(null)
+      /**
+       * ⭐ **后端说"现在有没有整理任务在跑"**（2026-10-26 加）。
+       * 与 `cleanLogOn`（= 前端要不要轮询）**不是一回事**：
+       *   · `cleanLogOn`     —— 我要不要每 1.5 秒去拉一次
+       *   · `cleanRunningOnServer` —— 后端真的还在跑吗
+       * 用户可能关页面再回来（前端不知道还在不在跑），所以**状态以后端为准**。
+       */
+      const [cleanRunningOnServer, setCleanRunningOnServer] = React.useState(false)
       const cleanFootTimer = React.useRef(null)
       const flashFoot = (kind, ms = 1000) => {
         if (cleanFootTimer.current) clearTimeout(cleanFootTimer.current)
@@ -2194,6 +2206,22 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             if (lg && Number(lg.seq) !== Number(cleanLogSeq.current)) {
               cleanLogSeq.current = Number(lg.seq)
               setCleanLog({ seq: Number(lg.seq), lines: Array.isArray(lg.lines) ? lg.lines : [] })
+            }
+            /**
+             * ⭐ **后端说停了 ⇒ 状态就改成"已停止"**（2026-10-26 加）。
+             *
+             * 使用者问：「他已经没有东西可以处理了，他也没有停止进程。这块怎么处理呢？」
+             * 实际进程早停了，但**面板上看不出来** —— 日志停在「翻到第 2 页（原始 0）」
+             * 那一行，看着像还在等什么。
+             *
+             * ⇒ 现在以**后端**的 `cleanRunning` 为准：
+             *    · 后端 `false` ⇒ 这里立刻显示"已停止"，不用等那 30 秒的延时
+             *    · 但**不立刻关轮询** —— 留一会儿把最后几条日志收干净
+             */
+            if (d && d.cleanRunning === false) {
+              setCleanRunningOnServer(false)
+            } else if (d && d.cleanRunning === true) {
+              setCleanRunningOnServer(true)
             }
           } catch { /* 网络抖一下不打断 */ }
         }
@@ -4955,6 +4983,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                        *    30 秒后自动停（见下面的 finally）。
                        */
                       setCleanLogOn(true)
+                      setCleanRunningOnServer(true)
                       if (cleanLogTimer.current) clearTimeout(cleanLogTimer.current)
                       try {
                         const r = await jpost('/clean/run', {
@@ -4993,8 +5022,18 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               ? h('div', { 'data-bd-logbox': '' },
                 h('div', { 'data-bd-loghead': '' },
                   h('span', { 'data-bd-logtitle': '' }, '整理日志'),
-                  h('span', { 'data-bd-loghint': '' },
-                    cleanLogOn ? '实时刷新中…' : '已停止刷新'),
+                  /* ⭐ 状态文字（2026-10-26 改）：**以后端的 cleanRunning 为准**。
+                     · 后端在跑      ⇒ 「正在整理…」
+                     · 后端没跑      ⇒ 「已结束」+ 最后一条日志的时间，让用户明确知道"停了"
+                     · 只开轮询没在跑 ⇒ 「已停止刷新」
+                     ⚠️ 原来只显示"实时刷新中…/已停止刷新"，说的是**轮询**状态，
+                        用户会误读成"整理还在跑"。 */
+                  h('span', { 'data-bd-loghint': '', 'data-bd-lv': cleanRunningOnServer ? 'run' : 'idle' },
+                    cleanRunningOnServer
+                      ? '正在整理…'
+                      : (cleanLog.lines.length > 0
+                        ? `已结束（${cleanLog.lines[cleanLog.lines.length - 1].ts}）`
+                        : '已结束')),
                   h('button', {
                     'data-bd-btn': '',
                     'data-bd-mini': '',
