@@ -4241,7 +4241,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               + '⚠️ 两种模式都仍然是让模型自己组合搜索词去搜，区别只在"你能把意思说多清楚"。',
             on: sw('freeformWatch'),
             onChange: (v) => patch({ freeformWatch: v }, '自由描述关注点'),
-          }),
+          })),
 
           /* ════════ 评论区整理（2026-10-26 加，实验功能）════════
            *
@@ -4258,8 +4258,25 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
            *
            * ⚠️ 面板是**纯文本**（不渲染 markdown）⇒ 文案里**不能写星号**，守卫会查。
            */
-          h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-h': '' }, '评论区整理'),
+        /* 🔴 **这里要开一个新的 `data-bd-sec`，不是 `data-bd-sub`**（2026-10-26 修）。
+         *
+         * 使用者截图指出：「评论区整理与上面的分割线间距不对。
+         *   而且这是不同的设置小节，分割线应该占满宽度。」
+         *
+         * 他说的对 —— 这两个词的语义完全不同：
+         *   · `data-bd-sub` = **一节内部的分组**（如「说不说话」里的小块），
+         *     它**没有**满宽分割线，上下只有 16px 行间距；
+         *   · `data-bd-sec` = **一个独立分节**，带 `margin:28px -16px 0` +
+         *     `border-top` ⇒ **从面板最左画到最右**（这正是他要的）。
+         *
+         * ⇒ 「评论区整理」跟上面的「实验功能」是**两个不同的小节**，
+         *    所以必须用 sec。同一个 tab 下有多个 sec 是常态
+         *    （「功能设置」页就有 7 个）。
+         *
+         * ⚠️ 用了 sec 之后，`data-bd-tabin` 也要跟着给（否则切页规则管不到它）。
+         */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab' },
+          h('div', { 'data-bd-h': '' }, '评论区整理'),
             /* ⭐ 大标题下的描述（2026-10-26 加）——
              *    必须说清「要先用 UP 主账号扫码登录」这个前提，
              *    否则用户填了视频、点了扫描，只会拿到一句「拿不到视频信息」。
@@ -4457,7 +4474,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       } finally { setCleanBusy(false) }
                     },
                   }, '确认执行（会真删）')))) : null)
-            : null)),   // ← 折叠区结束 + **lab 小节在这里收尾**（2026-10-26 修）
+            : null),   // ← 折叠区结束 + 评论区整理这个 sec 在这里收尾
 
           /* ⚠️ 这里原来有三块「开关状态」条件渲染，2026-10-18 按使用者要求全部删掉 ——
              使用者原话：「开关下面的状态那些都不要。3 行已打开都不要。」
