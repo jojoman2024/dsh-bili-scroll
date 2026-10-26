@@ -2070,6 +2070,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        * 用户可能关页面再回来（前端不知道还在不在跑），所以**状态以后端为准**。
        */
       const [cleanRunningOnServer, setCleanRunningOnServer] = React.useState(false)
+      /** ⭐ 点了「强制终止」⇒ 弹确认（2026-10-26）。影响面要讲清楚再让他点。 */
+      const [cleanAbortAsk, setCleanAbortAsk] = React.useState(false)
+      const [cleanAborting, setCleanAborting] = React.useState(false)
       const cleanFootTimer = React.useRef(null)
       const flashFoot = (kind, ms = 1000) => {
         if (cleanFootTimer.current) clearTimeout(cleanFootTimer.current)
@@ -5045,6 +5048,23 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       : (cleanLog.lines.length > 0
                         ? `已结束（${cleanLog.lines[cleanLog.lines.length - 1].ts}）`
                         : '已结束')),
+                  /**
+                   * ⭐ **强制终止按钮**（2026-10-26 加，使用者要求：
+                   *    「我希望日志窗上面加个强制终止进程的按钮。可以强制终止进程。
+                   *     但是影响面需要估量清楚，比如我中途断了的话，我再重新执行会有什么问题吗？」）
+                   *
+                   * 🔴 **只在真的在跑时才出现** —— 没跑的时候显示它只会让人乱点。
+                   * 🔴 **点了先弹确认**，把影响面讲清楚（这是他要求的"估量清楚"）。
+                   * ⚠️ 它不是 kill：只是让后端**在当前这条处理完后**停下（最坏等 2~10 秒）。
+                   */
+                  cleanRunningOnServer
+                    ? h('button', {
+                      'data-bd-btn': '',
+                      'data-bd-mini': '',
+                      'data-danger': '',
+                      onClick: () => setCleanAbortAsk(true),
+                    }, '强制终止')
+                    : null,
                   /* 🔴 **「暂停 / 继续」按钮已删**（2026-10-26 使用者问
                      「日志窗上面那个继续按钮的作用是啥？」）。
                      它原本切 `cleanLogOn`（要不要每 1.5 秒拉一次日志）。
@@ -5069,6 +5089,52 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     h('span', { 'data-bd-logts': '' }, x.ts),
                     h('span', { 'data-bd-logmsg': '' }, x.msg)))))
               : null,
+
+            /**
+             * ⭐ **强制终止的确认浮层**（2026-10-26）。
+             *
+             * 🔴 使用者要求「影响面需要估量清楚，比如我中途断了的话，我再重新执行会有什么问题吗？」
+             *    ⇒ 确认框里**逐条把影响面写出来**，包括"重跑是安全的"这个结论。
+             * ⚠️ 三条要点：
+             *    · 不是立刻停（要等当前这条走完）
+             *    · **不会重复 @ 别人**（留痕表挡住）—— 这是最关键的一条
+             *    · 已搬但没删的，重跑会补删
+             */
+            cleanAbortAsk ? h('div', { 'data-bd-confirm': '' },
+              h('div', { 'data-bd-confirm-box': '' },
+                h('div', { 'data-bd-confirm-title': '' }, '强制终止当前整理？'),
+                h('div', { 'data-bd-confirm-body': '' },
+                  '会停在「当前这条处理完之后」（不会立刻停，最坏等十几秒）。',
+                  h('br'), h('br'),
+                  '⚠️ 不是真的杀进程 —— 整理跑在 DSH 宿主里，杀它会把整个插件一起停掉。',
+                  h('br'), h('br'),
+                  '⭐ 终止后重新执行是安全的：',
+                  h('br'),
+                  '· 已经搬进收纳楼的，重跑会跳过搬运、只补删 ⇒ 「不会重复 @ 别人」',
+                  h('br'),
+                  '· 已经删掉的，重跑会当作"已经完成"跳过',
+                  h('br'),
+                  '· 只搬了还没删的，重跑会补上删除',
+                  h('br'),
+                  '· 收纳楼会复用，不会重建'),
+                h('div', { 'data-bd-confirm-foot': '' },
+                  h('button', { 'data-bd-btn': '', onClick: () => setCleanAbortAsk(false) }, '取消'),
+                  h('button', {
+                    'data-bd-btn': '',
+                    'data-danger': '',
+                    disabled: cleanAborting,
+                    onClick: async () => {
+                      setCleanAborting(true)
+                      try {
+                        const r = await jpost('/clean/abort', {})
+                        if (!r?.ok) {
+                          // ⚠️ 后端说"没在跑" ⇒ 把状态对齐，别让按钮一直亮着
+                          setCleanRunningOnServer(false)
+                        }
+                        setCleanAbortAsk(false)
+                      } catch { /* 网络抖一下，让用户自己再点一次 */ } finally { setCleanAborting(false) }
+                    },
+                  }, cleanAborting ? '正在终止…' : '确认终止')))) : null,
 
           /* ⚠️ 这里原来有三块「开关状态」条件渲染，2026-10-18 按使用者要求全部删掉 ——
              使用者原话：「开关下面的状态那些都不要。3 行已打开都不要。」

@@ -5047,6 +5047,11 @@ export function apply(ctx, config) {
      *    否则实时日志区会把几轮的内容混在一起，看不出这轮跑到哪了。
      */
     clearCleanLog(`开始整理 ${bvid}`)
+    /**
+     * ⚠️ **每一轮开始都要把终止标志清掉**（2026-10-26）。
+     *    否则上一轮点了终止、这一轮刚开跑就立刻停了（会很难查）。
+     */
+    cleanAbort = false
     clog(`开始整理：每批 ${batchSize} 条 / 批间 ${batchGapSec} 秒`, 'step')
 
     const sc = await scanComments(bvid)
@@ -5251,6 +5256,17 @@ export function apply(ctx, config) {
       const batch = pageItems.slice(0, batchSize)
       clog(`第 ${round} 批开始：${batch.length} 条（本页第 ${pageNo} 页，累计成功 ${doneTotal} / 失败 ${failedTotal}）`, 'step')
       for (const it of batch) {
+        /**
+         * 🔴 **终止检查点（每条之前）** —— 2026-10-26 加。
+         *
+         * 放在这里而不是"每条处理到一半"：**保证单条要么完整做完、要么完全没动**
+         * （搬了没删是安全的，但"搬到一半"不好判断）。
+         * 最坏情况：点了终止后，还要等当前这条走完（约 2~10 秒）。
+         */
+        if (cleanAbort) {
+          clog(`收到终止 —— 第 ${round} 批停在这里（已成功 ${doneTotal} / 失败 ${failedTotal}）`, 'warn')
+          break
+        }
         const r = await moveOne(it, bvid, floorRpid)
         /**
          * 🔴 **楼被删了 ⇒ 整轮立刻停**（2026-10-26）。
@@ -5302,10 +5318,21 @@ export function apply(ctx, config) {
       pageItems = pageItems.slice(batch.length)
       // 🔴 楼被删了 ⇒ 别再往下跑（剩下的每条都会撞 12022、还全记进失败账本）
       if (floorGoneHit) break
+      // 🔴 收到终止 ⇒ 不再等那 30 秒，直接收尾
+      if (cleanAbort) break
       // ⭐ 批次之间停一会（使用者要求可配，默认 30 秒）
       if (pageItems.length && batchGapSec > 0) {
         clog(`第 ${round} 批完成，本页还剩 ${pageItems.length} 条，等 ${batchGapSec} 秒`, 'info')
-        await new Promise((s) => setTimeout(s, batchGapSec * 1000))
+        /**
+         * ⚠️ **等待要能被终止打断**（2026-10-26）。
+         *    原来是一口气 `setTimeout(30 秒)` ⇒ 点了终止还要干等 30 秒才停。
+         *    ⇒ 拆成 500ms 一片，每片看一眼标志。
+         */
+        const waitMs = batchGapSec * 1000
+        for (let waited = 0; waited < waitMs; waited += 500) {
+          if (cleanAbort) break
+          await new Promise((s) => setTimeout(s, Math.min(500, waitMs - waited)))
+        }
       }
     }
 
@@ -5361,8 +5388,16 @@ export function apply(ctx, config) {
     } else {
       endWord = '已经到底，没有更多要处理的了'
     }
+    /**
+     * ⭐ **被终止要单独说**（2026-10-26）—— 别让它看起来像"跑完了"。
+     *    同时明确告诉使用者"重跑是安全的"（这是评估过的结论，见 `cleanAbort` 那段注释）。
+     */
+    if (cleanAbort) {
+      endWord = `**被强制终止**（第 ${round} 批中途停下）—— 再点一次执行会接着处理，`
+        + '而且不会重复 @ 别人（已经搬过的会跳过搬运、只补删）'
+    }
     clog(`整理结束：处理 ${doneTotal} 条成功 / ${failedTotal} 条失败，翻了 ${pageNo} 页 —— ${endWord}`,
-      allClear && failedTotal === 0 ? 'ok' : 'info')
+      cleanAbort ? 'warn' : (allClear && failedTotal === 0 ? 'ok' : 'info'))
     if (failCount > 0) {
       clog(`失败账本里还有 ${failCount} 条，下次整理会重试它们`, 'warn')
     }
@@ -7546,6 +7581,37 @@ export function apply(ctx, config) {
   let cleanRunning = false
 
   /**
+   * ⭐⭐ **强制终止标志**（2026-10-26 加，使用者要求：
+   *    「我希望日志窗上面加个强制终止进程的按钮。可以强制终止进程。
+   *     但是影响面需要估量清楚，比如我中途断了的话，我再重新执行会有什么问题吗？」）
+   *
+   * ── 🔴 能力边界（必须讲清楚，别让人以为这是 kill -9）────────────
+   *    `runCommentClean` 跑在**宿主进程里**（不是独立子进程）
+   *    ⇒ 前端**没有办法真的 kill 它**（能 kill 的只有宿主自己，那会把整个 DSH 关掉）。
+   *    ⇒ 这里的"强制终止"= **设一个标志，让它在下一次检查点自己停下**。
+   *    检查点在**每条评论之间**（最坏等一条处理完，约 2~10 秒）。
+   *
+   * ── 终止之后重跑会怎样（已逐场景评估，结论：全部安全）──────────
+   *    | 终止时机            | 重跑行为                       | 会重复 @ 吗 |
+   *    | 建楼后、还没搬       | 复用那栋楼（先校验还在）        | 不会       |
+   *    | **搬成功后、删除前** | **跳过搬运，只补删**           | **不会**（留痕表挡住） |
+   *    | 删除后、清账前       | 跳过搬运 → 删时拿 12022 当成功  | 不会       |
+   *    | 搬运失败时           | 重新搬（上次本来就没成）        | 不会       |
+   *    ⇒ 关键是 `comment-moved.json` 那张留痕表：**搬成功就立刻写**，
+   *      所以"搬了但没删"这个最危险的窗口，重跑时**绝不会再搬一次**。
+   *    ⚠️ 唯一的"损失"是：那一条的原评论还在（内容没丢，只是还没删掉），重跑会补删。
+   */
+  let cleanAbort = false
+
+  /** 让当前这一轮停下（面板「强制终止」按钮 → 路由 → 这里） */
+  const requestCleanAbort = () => {
+    if (!cleanRunning) return { ok: false, error: '现在没有在跑的整理任务。' }
+    cleanAbort = true
+    clog('收到终止请求 —— 会在当前这条处理完后停下', 'warn')
+    return { ok: true }
+  }
+
+  /**
    * ⭐ **自动评论区整理的一跳**（2026-10-26 加）。
    *
    * 🔴 **为什么必须单独一个函数、不能塞进 `tick()` 末尾**
@@ -9303,6 +9369,18 @@ export function apply(ctx, config) {
         oneLevelTotal: sc.oneLevelTotal,
         isEnd: sc.isEnd,
       })
+    }
+
+    /**
+     * ⭐ **强制终止当前整理**（2026-10-26 加，面板「强制终止」按钮）。
+     *
+     * 🔴 **它不是 kill**：`runCommentClean` 跑在宿主进程里，前端杀不掉它。
+     *    这里只是设个标志，让它**在当前这条处理完后停下**（最坏等 2~10 秒）。
+     *    ⚠️ 真要"立刻停"只能重启 DSH —— 但那会把整个插件一起停掉，得不偿失。
+     */
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/clean/abort') {
+      const r = requestCleanAbort()
+      return sendJson(res, 200, r)
     }
 
     /**
