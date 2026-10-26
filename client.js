@@ -4589,6 +4589,13 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       `${cleanResult.title || ''} —— 共 ${cleanResult.total} 条一级评论，`
                       + `带 @ 的 ${cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
                       + `跳过 ${cleanResult.skipped} 条（白名单 / 插件自己）。`
+                      /* ⭐ 关键词筛掉了多少（2026-10-26 加）——
+                       * 没有这一项时，用户填了筛选看到"待处理 0"会以为插件坏了，
+                       * 实际是"关键词把全部筛掉了"。必须让他看见。 */
+                      + (cleanResult.kwActive
+                        ? `关键词筛掉 ${cleanResult.kwFilteredOut ?? 0} 条`
+                          + `（昵称「${cleanResult.kwUname || '空'}」/ 内容「${cleanResult.kwMessage || '空'}」）。`
+                        : '')
                       + `现在显示 ${Math.min(cleanShown, (cleanResult.items || []).length)} / ${(cleanResult.items || []).length} 条。`),
                     h('div', {
                       'data-bd-cleanlist': '',

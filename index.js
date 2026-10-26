@@ -875,6 +875,39 @@ export function apply(ctx, config) {
         },
         signal: ctl.signal,
       })
+      /**
+       * 🔴 **必须自己判状态码与非 JSON 响应**（2026-10-26 修）。
+       *
+       * 症状（使用者截图报的）：
+       *   出错：拉评论失败（第 1 页）：Unexpected token '<', "<!DOCTYPE "... is not valid JSON
+       *
+       * 根因：`r.json()` 是**无脑解析** —— B站 被风控时返回的是
+       *   **HTTP 412 + 一整页 HTML**（`<!DOCTYPE html>...`），
+       *   于是 `JSON.parse` 在第一个 '<' 上炸掉，把一句**对用户毫无意义**的
+       *   解析错误抛了上去。用户看到"Unexpected token"只会以为插件坏了。
+       *
+       * ⇒ 这里显式分三种情况说清楚：
+       *    · 412 / 412 那一类风控     → 告诉用户"被拦了，歇几分钟"
+       *    · 其它非 2xx               → 报真实状态码
+       *    · 2xx 但返回 HTML/非 JSON  → 说明"接口返回了网页，通常也是风控"
+       */
+      const ct = String(r.headers.get('content-type') || '')
+      if (r.status === 412) {
+        const e = new Error('B站 把你拦下来了（HTTP 412 风控）—— 歇几分钟再试，或换个网络/换个号')
+        e.httpStatus = 412
+        throw e
+      }
+      if (!r.ok) {
+        const e = new Error(`B站 返回 HTTP ${r.status}`)
+        e.httpStatus = r.status
+        throw e
+      }
+      if (!/json/i.test(ct)) {
+        // 2xx 但不是 JSON ⇒ 多半也是风控页 / 登录页
+        const e = new Error('B站 返回的是网页不是数据（通常也是风控或需要登录）—— 歇一会再试')
+        e.httpStatus = r.status
+        throw e
+      }
       return await r.json()
     } finally {
       clearTimeout(timer)
