@@ -89,6 +89,26 @@ try {
     { message: out.trim() })
 }
 
+/**
+ * 🔴 **再查「每一段 UI 到底归属于哪个 tab」**（2026-10-26 加）。
+ *
+ * 为什么单独一条：面板切页靠 CSS 按 `data-bd-tabin` 切，
+ * 而**写在那个小节 `)` 之后的段落不属于任何 tab** ⇒ **每一页都渲染**。
+ * 这个错 `node --check` 与上面两条守卫**都抓不到**（语法完全合法）。
+ * 本项目已经踩过两次（2026-10-18 私信开关 / 2026-10-26 评论区整理），
+ * 库里的教训原话就是「这条值得做成守卫（本项目还没做）」—— 现在做了。
+ */
+try {
+  const { execFileSync } = await import('node:child_process')
+  const out = execFileSync(process.execPath, ['tools/check-tab-ownership.mjs', 'client.js'],
+    { stdio: 'pipe', encoding: 'utf8' })
+  for (const line of String(out).split('\n')) if (line.trim()) console.log(line)
+} catch (e) {
+  const out = String(e?.stdout ?? '') + String(e?.stderr ?? '')
+  fail('有段落落在所有 tab 小节之外 —— 它会在每一页都渲染（括号少了一个 )）',
+    { message: out.trim() })
+}
+
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 let loaded = null
 const prevWindow = globalThis.window

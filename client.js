@@ -4241,7 +4241,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               + '⚠️ 两种模式都仍然是让模型自己组合搜索词去搜，区别只在"你能把意思说多清楚"。',
             on: sw('freeformWatch'),
             onChange: (v) => patch({ freeformWatch: v }, '自由描述关注点'),
-          })),
+          }),
 
           /* ════════ 评论区整理（2026-10-26 加，实验功能）════════
            *
@@ -4457,7 +4457,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       } finally { setCleanBusy(false) }
                     },
                   }, '确认执行（会真删）')))) : null)
-            : null),   // ← 折叠区结束（`sw('cleanUiOpen') ? ... : null`）
+            : null)),   // ← 折叠区结束 + **lab 小节在这里收尾**（2026-10-26 修）
 
           /* ⚠️ 这里原来有三块「开关状态」条件渲染，2026-10-18 按使用者要求全部删掉 ——
              使用者原话：「开关下面的状态那些都不要。3 行已打开都不要。」
