@@ -313,10 +313,26 @@ window.__ModuleLoader__.load({
  *       纯 CSS 表达不了"第一个可见的"（没有反向兄弟选择器），
  *       那时更稳的做法是渲染时给每个 tab 的首个分节打个标记属性。
  */
-[data-bd-page][data-bd-tab="artifacts"] [data-bd-tabin="artifacts"],
-[data-bd-page][data-bd-tab="prompt"] [data-bd-tabin="prompt"],
-[data-bd-page][data-bd-tab="env"] [data-bd-tabin="env"],
-[data-bd-page][data-bd-tab="lab"] [data-bd-tabin="lab"]{border-top:0;margin-top:0;padding-top:20px;}
+/* 🔴 **[data-bd-first] 标记"该页的第一个分节"**（2026-10-26 修）。
+ *
+ * 上一版是按 tab **点名**那一页的分节（[data-bd-tab="lab"] [data-bd-tabin="lab"]），
+ * 前提是「这几个页各自只有一个分节」—— 而这条前提**已经不成立**：
+ * 实验功能页加了「评论区整理」第二个分节 ⇒ 那条规则把**两个**的上边线都去掉了
+ * ⇒ 使用者看到的就是「两个小节之间没有分割线」。
+ *
+ * ⚠️ 为什么不用 :first-of-type 之类：其它 tab 的分节被 display:none 藏着，
+ *    而 **display:none 不影响兄弟选择器**（它们仍在 DOM 里）⇒ 选不中"第一个可见的"。
+ *    纯 CSS 表达不了这个（没有反向兄弟选择器）。
+ * ⇒ **渲染时就给首节打个标记**（这就是上面注释里早就写下的建议做法）。
+ *
+ * ⭐ 现在语义清楚了：
+ *    · [data-bd-first]   ⇒ 该页第一个分节：**不画上边线**、不吃 28px 上间距
+ *    · 其它分节          ⇒ 正常画那根满宽的 border-top（[data-bd-sec] 基础规则）
+ *
+ * 🔴 **加新分节时不用改这里**（这正是换写法的好处）；但**新开一个 tab 时**，
+ *    要给它的第一个分节打上 data-bd-first —— 否则那页顶上会多一根线。
+ */
+[data-bd-sec][data-bd-first]{border-top:0;margin-top:0;padding-top:20px;}
 
 /* ── 分节大标题 ──
    ⭐ **比正文大一号**（2026-10-16 使用者要求："所有大标题的字号都大一号"）。
@@ -1109,7 +1125,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       const draft = String(value ?? '')
       const isDefault = Boolean(defaultText) && draft.trim() === String(defaultText).trim()
       const dirty = value !== null && saved !== null && value !== saved
-      return h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
+      /* ⭐ 只有**该页第一个分节**才该打 data-bd-first 标记（2026-10-26）。
+       *    ⚠️ 不能在组件里写死 —— PromptDoc 被调用 3 次（章程 / 发评论规范 / 报告规范），
+       *    写死的话 3 个都会去掉上边线，中间那两根满宽分割线就消失（既有行为回归）。
+       *    ⭐ 实际用法：prompt 页的第一个分节是「它的人设」（不是本组件），
+       *    所以这里的 props.first 永远不传 ⇒ 本组件的 3 个分节都正常画线。 */
+      const secAttrs = { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' }
+      if (props.first) secAttrs['data-bd-first'] = ''
+      return h('div', secAttrs,
         h('div', { 'data-bd-h': '' }, title),
         hint ? h('div', { 'data-bd-note': '' }, hint) : null,
         warn ? h('div', { 'data-bd-note': '' }, warn) : null,
@@ -1562,6 +1585,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         })
         : null
 
+      /* ⚠️ 这是 env 页的**第二个**分节（「后台跑要用哪个 dsh」）⇒ **不能**打 data-bd-first。
+       *    env 页的第一个分节是「环境与账号」（那个在面板主体里，由调用处打标记）。
+       *    ⭐ 2026-10-26：上一版误把标记写在这里，导致"首节有线、次节没线"，正好反了。 */
       return h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
         h('div', { 'data-bd-h': '' }, '后台跑要用哪个 dsh'),
         head,
@@ -3550,7 +3576,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 
            ⚠️ **搜索只搜标题**（使用者明确说"搜索标题即可"），
               不搜正文 —— 那需要把每份都读进来，200 份会很慢，且他没要。 */
-        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'artifacts' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'artifacts', 'data-bd-first': '' },
           (() => {
             const all = Array.isArray(reports?.files) ? reports.files : []
             const q = artQuery.trim().toLowerCase()
@@ -3672,9 +3698,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               }, '‹ 返回列表'))
           })()),
 
-        /* ════════ 七、它的人设（长文本 ⇒ 留保存按钮）════════ */
         /* ════════ 七、它的人设（→ 子导航「提示词」页）════════ */
-        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt' },
+        /* ⭐ 这是 prompt 页的**第一个分节** ⇒ 打 data-bd-first（顶上不画线）。
+           ⚠️ 后面的 3 个 PromptDoc（章程 / 发评论规范 / 报告规范）都不能打，
+              它们之间要各有一条满宽分割线。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'prompt', 'data-bd-first': '' },
           h('div', { 'data-bd-h': '' }, '它的人设'),
           h(ToggleRow, {
             label: '启用下面这份人设',
@@ -4147,7 +4175,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
           }
         })(),
         /* ════════ 八、环境与账号（→ 子导航「环境与账号」页）════════ */
-        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env' },
+        /* ⭐ 这是 env 页的**第一个分节** ⇒ 打 data-bd-first（顶上不画线）。
+           ⚠️ 后面还有个「后台跑要用哪个 dsh」（renderDshBlock）不能打。 */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'env', 'data-bd-first': '' },
           h('div', { 'data-bd-h': '' }, '环境与账号'),
           h('div', { 'data-bd-note': '' },
             !st.venvReady ? (st.installFailed ? '上次没装成 → 看下面日志' : '还没装 → 先点「装主依赖」')
@@ -4178,7 +4208,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 
         /* ════════ 实验功能（→ 子导航「实验功能」页，2026-10-17 加）════════
            ⭐ 这一页放"打开就会改变行为边界"的开关。 */
-        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab' },
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab', 'data-bd-first': '' },
           h('div', { 'data-bd-h': '' }, '实验功能'),
           h('div', { 'data-bd-note': '' },
             '这里的开关会改变它的行为边界 —— 打开前先读完说明。'),

@@ -60,10 +60,54 @@ L.forEach((l, i) => {
 })
 
 /* ── ③ 判定 ── */
+/**
+ * ⚠️ **显式白名单：这些行区间在"组件定义"内部，静态归属查不了**（2026-10-26）。
+ *
+ * 这个守卫按**行号线性扫描**，假设所有 `data-bd-sec` 都写在页面那棵树的实参列表里。
+ * 但**可复用组件**不是：`PromptDoc` 内部也 return 一个 `data-bd-sec`，
+ * 它出现在源码很前面，而真正归属取决于**谁调用它、在哪个 tab 调**。
+ *
+ * 🔴 **为什么用"按函数名找区间"而不是"往上找最近的 function"**：
+ *    我第一版写成"往上 400 行内遇到 function 就算组件内部"⇒
+ *    **把评论区整理那个真 bug 也跳过了**（它前面 400 行里正好有函数），
+ *    守卫于是永远放行。这就是「守卫必须验反证」要防的东西 ——
+ *    反例一跑就露馅，所以改成**精确区间**。
+ *
+ * 区间由 `findComponentRange('PromptDoc')` 从源码里算出来（见下）。
+ */
+const findComponentRange = (name) => {
+  const startRe = new RegExp(`^\\s{0,8}function\\s+${name}\\s*\\(`)
+  let start = -1
+  for (let i = 0; i < L.length; i++) {
+    if (startRe.test(L[i])) { start = i; break }
+  }
+  if (start < 0) return null
+  // 从函数头开始算大括号深度，回到 0 就是函数结束
+  let d = 0
+  let seen = false
+  for (let k = start; k < L.length; k++) {
+    for (const c of L[k]) {
+      if (c === '{') { d++; seen = true } else if (c === '}') d--
+    }
+    if (seen && d === 0 && k > start) return { from: start, to: k }
+  }
+  return { from: start, to: L.length - 1 }
+}
+
+/** 可复用组件的区间清单（新增这类组件时往这里加） */
+const COMPONENT_RANGES = ['PromptDoc', 'renderDshBlock']
+  .map(findComponentRange)
+  .filter(Boolean)
+
+const inComponent = (line) => COMPONENT_RANGES.some((r) => line >= r.from && line <= r.to)
+
 const orphans = []
+let skippedInComponent = 0
 for (const t of targets) {
   const hit = secs.find((s) => t.line >= s.from && t.line <= s.to)
-  if (!hit) orphans.push(t)
+  if (hit) continue
+  if (inComponent(t.line)) { skippedInComponent++; continue }
+  orphans.push(t)
 }
 
 /* ── ④ 报告 ── */
@@ -72,6 +116,9 @@ console.log(`  · 找到 ${secs.length} 个 tab 小节（${tabs.join(' / ')}）`
 console.log(`  · 检查 ${targets.length} 个容器（sub / 无 tabin 的 sec）`)
 
 if (orphans.length === 0) {
+  if (skippedInComponent) {
+    console.log(`  · 另有 ${skippedInComponent} 个在**组件定义**内部（由真渲染探针保证归属，静态查不了）`)
+  }
   console.log('  ✓ 全部都有归属（没有会"每页都渲染"的野段落）')
   process.exit(0)
 }
