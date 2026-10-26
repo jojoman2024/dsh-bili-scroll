@@ -354,6 +354,13 @@ export const Config = !z ? undefined : z.object({
    */
   cleanKwUname: z.string().default('').extra('volatile', true),
   cleanKwMessage: z.string().default('').extra('volatile', true),
+  /**
+   * ⭐ **收纳楼的文案**（2026-10-26 加，使用者要求面板可改）。
+   *
+   * 空串 = 用默认值（`DEFAULT_FLOOR_TEXT`）。
+   * ⚠️ 只在**新建**楼时用到；已有的楼不会因为改了文案而变化。
+   */
+  cleanFloorText: z.string().default('').extra('volatile', true),
   /** 上次成功执行的时间戳（增量扫描用） */
   cleanLastScanAt: z.number().default(0).extra('volatile', true),
   /**
@@ -517,6 +524,15 @@ export function apply(ctx, config) {
    *      `20:31:05  ✓  第 2 页：20 条原始 / 18 条入选`
    */
   const cleanLogFile = join(stateDir, 'clean.log')
+  /**
+   * ⭐ **收纳楼默认文案**（2026-10-26）。
+   *
+   * 面板上那个 textarea 的"恢复默认"也用它 ——
+   * ⚠️ 所以它必须与面板显示的值**逐字一致**，改这里就等于改出厂文案。
+   */
+  const DEFAULT_FLOOR_TEXT = '【收纳楼】这里收纳本视频下机器人代发的留言。'
+    + '原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。'
+    + '本楼只做归档，不参与讨论。'
   const CLEAN_LOG_MAX = 300
   const cleanLogBuf = []      // 只放最近 N 条（内存）
   let cleanLogSeq = 0         // 递增序号，前端据此判断"有没有新行"
@@ -573,6 +589,7 @@ export function apply(ctx, config) {
     cleanIntervalMin: 30, cleanLastRunEndAt: 0,
     cleanBatchSize: 30, cleanBatchGapSec: 30,
     cleanKwUname: '', cleanKwMessage: '',
+    cleanFloorText: '',
     adminMode: false,
     /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
     absoluteGuard: true,
@@ -5116,9 +5133,15 @@ export function apply(ctx, config) {
     }
 
     if (!floorRpid) {
-      const floorText = '【收纳楼】这里收纳本视频下机器人代发的留言。'
-        + '原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。'
-        + '本楼只做归档，不参与讨论。'
+      /**
+       * ⭐ **收纳楼文案可在面板里改**（2026-10-26 使用者要求：
+       *    「收纳楼的文案，也放到面板里供用户修改吧。给个 textarea。」）
+       *
+       * 用户改了存进 `cleanFloorText`，下次建楼用它；没改就用 `DEFAULT_FLOOR_TEXT`。
+       * ⚠️ **空串要回落默认** —— 不能真发一条空评论（B站 会拒，而且很傻）。
+       * ⚠️ 只在**新建**楼时用到；已有楼（含复用的）不会改它的文案。
+       */
+      const floorText = String(cfg.cleanFloorText || '').trim() || DEFAULT_FLOOR_TEXT
       const buildOnce = async () => {
         const f = await call('bili_reply', { bvid, text: floorText, rpid: 0 })
         let fr = f
@@ -8678,6 +8701,12 @@ export function apply(ctx, config) {
         cleanWhitelist: _wl,
         cleanSelfMid: selfMid(),
         /**
+         * ⭐ **收纳楼文案的出厂默认值**（2026-10-26）。
+         * 面板上那个 textarea 的「恢复默认」按钮要用它 ——
+         * ⚠️ 由后端给，**前端不要自己抄一份**（两边不一致就永远对不上）。
+         */
+        cleanFloorTextDefault: DEFAULT_FLOOR_TEXT,
+        /**
          * ⭐ **整理日志**（2026-10-26 加，面板实时日志区用）。
          * `seq` 是递增序号 —— 前端只在"序号变了"时重绘，避免每 2 秒无谓刷新。
          */
@@ -8726,6 +8755,8 @@ export function apply(ctx, config) {
         'cleanBatchSize', 'cleanBatchGapSec',
         // 筛选关键词（2026-10-26）：昵称 / 正文，分开两个
         'cleanKwUname', 'cleanKwMessage',
+        // ⭐ 收纳楼文案（2026-10-26 加）：空串 = 用出厂默认
+        'cleanFloorText',
         // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
         'absoluteGuard',
         'personaEnabled', 'personaMaxChars',

@@ -644,6 +644,17 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-logline][data-bd-lv="step"]>[data-bd-logmsg]{color:#60a5fa;}
 [data-bd-logline][data-bd-lv="info"]>[data-bd-logmsg]{color:#d1d5db;}
 
+/* ════════ 多行输入（2026-10-26 加，收纳楼文案用）════════
+ * 复用 [data-bd-input] 的边框/圆角/字号，只补多行特有的几条。
+ */
+[data-bd-textareawrap]{display:flex;flex-direction:column;gap:6px;width:100%;}
+[data-bd-textarea]{resize:vertical;min-height:84px;max-height:240px;
+  /* ⚠️ 多行要 line-height 才好看，且 padding 上下对称 */
+  line-height:20px;padding:8px 10px;
+  font-family:inherit;white-space:pre-wrap;word-break:break-word;}
+[data-bd-textareafoot]{display:flex;align-items:center;gap:8px;}
+[data-bd-textareafoot]>[data-bd-note]{flex:1 1 0%;min-width:0;margin:0;}
+
 [data-bd-confirm]{position:fixed;inset:0;z-index:60;display:flex;
   align-items:center;justify-content:center;padding:16px;
   background:rgba(0,0,0,.38);}
@@ -2088,6 +2099,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        */
       const [cleanKwUname, setCleanKwUname] = React.useState('')
       const [cleanKwMessage, setCleanKwMessage] = React.useState('')
+      /**
+       * ⭐ **收纳楼文案的草稿**（2026-10-26 加）。
+       * 与 `cfg.cleanFloorText` 的关系：
+       *   · 配置空串 = "用出厂默认"，但输入框里要**显示默认文案**（不然一片空白）
+       *   · 用户改动 → onBlur 时 patch 真值
+       *   · 「恢复默认」→ 输入框填默认文案、配置写回空串
+       */
+      const [cleanFloorText, setCleanFloorText] = React.useState('')
 
       /* ⭐⭐ **所有浮现式提示的统一入口 —— 一律会自己消失**（2026-10-18 修）。
        *
@@ -2253,6 +2272,15 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         if (c.cleanBvid) setCleanDraft(String(c.cleanBvid))
         if (c.cleanKwUname) setCleanKwUname(String(c.cleanKwUname))
         if (c.cleanKwMessage) setCleanKwMessage(String(c.cleanKwMessage))
+        /**
+         * ⭐ 收纳楼文案（2026-10-26）。
+         * ⚠️ **配置里是空串时，要显示"出厂默认"而不是空框** ——
+         *    否则用户会以为文案没了，一打开面板就是一片空白。
+         *    ⇒ 用后端给的 `cleanFloorTextDefault` 填进去。
+         *    ⚠️ 但**不写回配置**（配置保持空串 = "用默认"），
+         *       所以这里只 setState，不 patch。
+         */
+        setCleanFloorText(String(c.cleanFloorText || st?.cleanFloorTextDefault || ''))
       }, [st?.config])
 
       React.useEffect(() => {
@@ -4719,6 +4747,52 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   if (v !== String(cfg.cleanKwMessage || '')) patch({ cleanKwMessage: v }, '按评论内容筛选')
                 },
               }),
+            }),
+
+            /**
+             * ⭐ **收纳楼文案**（2026-10-26 使用者要求：
+             *    「收纳楼的文案，也放到面板里供用户修改吧。给个 textarea。」）
+             *
+             * 🔴 为什么值得给：这句话是**发在用户自己视频下面的公开评论**，
+             *    语气/口径得他自己定（有人想正式、有人想随意）。
+             *
+             * ⚠️ 三个设计点：
+             *    ① **只在新建楼时用到** —— 已有的楼不会因为改了文案而变化（楼已经发出去了）
+             *    ② **空串 = 用出厂默认** —— 后端会回落，不能真发空评论
+             *    ③ 「恢复默认」的值**从后端拿**（`st.cleanFloorTextDefault`），
+             *       前端不抄一份 —— 否则两边不一致，永远对不上
+             */
+            h(Field, {
+              label: '收纳楼文案',
+              note: '新建收纳楼时用的正文。留空则用出厂默认。改这个不会影响已经建好的楼。',
+              stack: true,
+              children: h('div', { 'data-bd-textareawrap': '' },
+                h('textarea', {
+                  'data-bd-input': '',
+                  'data-bd-textarea': '',
+                  rows: 4,
+                  placeholder: st.cleanFloorTextDefault || '【收纳楼】这里收纳本视频下机器人代发的留言…',
+                  value: cleanFloorText,
+                  onInput: (e) => setCleanFloorText(e.target.value),
+                  onBlur: () => {
+                    const v = String(cleanFloorText || '').trim()
+                    if (v !== String(cfg.cleanFloorText || '')) patch({ cleanFloorText: v }, '收纳楼文案')
+                  },
+                }),
+                h('div', { 'data-bd-textareafoot': '' },
+                  h('span', { 'data-bd-note': '', 'data-bd-noteonly': '' },
+                    `${String(cleanFloorText || '').length} / 1000 字`
+                    + (String(cleanFloorText || '').trim() ? '' : '（留空 = 用出厂默认）')),
+                  h('button', {
+                    'data-bd-btn': '',
+                    'data-bd-mini': '',
+                    onClick: () => {
+                      // ⭐ 从后端拿默认值（前端不抄一份）
+                      const d = String(st.cleanFloorTextDefault || '')
+                      setCleanFloorText(d)
+                      patch({ cleanFloorText: '' }, '收纳楼文案')   // 空串 = 用默认
+                    },
+                  }, '恢复默认'))),
             }),
 
             // ── 操作按钮 ──
