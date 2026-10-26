@@ -4798,25 +4798,43 @@ export function apply(ctx, config) {
    */
   const withRetry = async (fn, retryable, delaysMs = [1500, 3000, 6000]) => {
     let lastErr = ''
+    let lastCode = null
     for (let i = 0; i <= delaysMs.length; i++) {
       try {
         return { ok: true, value: await fn(), tries: i + 1 }
       } catch (e) {
         lastErr = String(e?.message ?? e)
+        // ⭐ 把错误码也带出去 —— 调用方要靠它分辨"索引延迟"还是"真没了"，
+        //    从错误文本里正则抠 code 太脆（2026-10-26）
+        lastCode = e?.biliCode != null ? Number(e.biliCode) : null
         const canRetry = retryable(e)
-        if (!canRetry || i === delaysMs.length) return { ok: false, error: lastErr, tries: i + 1 }
+        if (!canRetry || i === delaysMs.length) return { ok: false, error: lastErr, code: lastCode, tries: i + 1 }
         log(`第 ${i + 1} 次失败（${lastErr}），${delaysMs[i] / 1000} 秒后重试`)
         await new Promise((s) => setTimeout(s, delaysMs[i]))
       }
     }
-    return { ok: false, error: lastErr, tries: delaysMs.length + 1 }
+    return { ok: false, error: lastErr, code: lastCode, tries: delaysMs.length + 1 }
   }
 
-  /** 这个 B站 错误码值不值得重试（-509 限流 / -352 风控 / 网络类） */
+  /**
+   * 这个 B站 错误码值不值得重试（-509 限流 / -352 风控 / 网络类）。
+   *
+   * 🔴 **`12006` 必须可重试**（2026-10-26 真机踩出来的）：
+   *    它字面是「没有该评论」，但有**两种完全不同的含义**：
+   *      ① **父评论（收纳楼）刚建好、评论树索引还没生效** ⇒ 等一两秒再发就好 ✅
+   *      ② 评论**真的被删了** ⇒ 再试多少次都没用
+   *    ⇒ 分不清，所以**都给两次机会**（`withRetry` 的退避会拉开间隔）。
+   *    实测证据（BV1h741187D2，22:44:23）：
+   *      建楼 `.379` → 第 1 条搬运 `.538`（隔 158ms）⇒ **12006**
+   *      → 第 2 条搬运 `25.504`（隔 2.1s，**同一栋楼**）⇒ **成功**
+   *    同一栋楼、同一条代码路径，只差 2 秒 ⇒ 是时序，不是逻辑。
+   */
   const codeRetryable = (code) => {
     const c = Number(code)
     if (c === -509 || c === -352 || c === -412) return true   // 限流 / 风控
     if (c === -500 || c === -502 || c === -503 || c === -504) return true // 服务端抖动
+    // ⭐ 父评论索引延迟（也可能真是被删了 —— 试两次就能分开）
+    if (c === 12006) return true
     // 其余（-403 权限 / -101 登录 / 12022 已删 / -404 不存在）都不值得再试
     return false
   }
@@ -4882,7 +4900,22 @@ export function apply(ctx, config) {
         }
         return rid
       }
-      const r1 = await withRetry(sendOnce, (e) => codeRetryable(e?.biliCode))
+      /**
+       * ⚠️ **`12006` 用一套单独的退避**（2026-10-26）。
+       *
+       * 通用的 `[1500,3000,6000]` 是给限流/抖动的，对 `12006` 不合适：
+       *   · 索引延迟通常 **1~3 秒**就好 ⇒ 1.5 秒那次大概率还不行，白等
+       *   · 真被删了 ⇒ 后面 3 次全是浪费
+       * ⇒ 折中：**间隔 3s / 8s，只给 2 次机会**（约 11 秒内能分开两种情况）。
+       */
+      const is12006 = (e) => Number(e?.biliCode) === 12006
+      // 第一轮：12006 不参与（它走下面那套专用退避）
+      let r1 = await withRetry(sendOnce, (e) => codeRetryable(e?.biliCode) && !is12006(e))
+      // 如果第一轮就是 12006 死的 ⇒ 用专用退避再试（父评论索引延迟通常 1~3 秒就好）
+      if (!r1.ok && Number(r1.code) === 12006) {
+        clog('父评论可能还没进索引，等 3 秒重试…', 'info')
+        r1 = await withRetry(sendOnce, (e) => codeRetryable(e?.biliCode), [3000, 8000])
+      }
       if (!r1.ok) {
         markFail(bvid, item, 'move', null, r1.error, text)
         return { ok: false, step: 'move', error: `搬进收纳楼失败（试了 ${r1.tries} 次）：${r1.error}` }
@@ -5051,6 +5084,47 @@ export function apply(ctx, config) {
       saveFloor(bvid, floorRpid, sc.title)
       floorCreated = true
       clog(`收纳楼已建：rpid ${floorRpid}`, 'ok')
+
+      /**
+       * 🔴🔴 **新建的楼要等它"进索引"再往里发楼中楼**（2026-10-26 真机踩出来的）。
+       *
+       * ── 现象 ──────────────────────────────────────────────────
+       *    22:44:23.379  建楼成功，拿到 rpid
+       *    22:44:23.538  第 1 条搬运 ⇒ **`12006 没有该评论`**（隔 158 毫秒）
+       *    22:44:25.504  第 2 条搬运 ⇒ **成功**（隔 2.1 秒，**同一栋楼**）
+       *    ⇒ 同一条代码路径、同一栋楼，只差 2 秒。**是索引延迟，不是逻辑错。**
+       *
+       * ── 做法 ──────────────────────────────────────────────────
+       *    建完楼先**读一次评论列表确认它真的出现了**，出现了才继续；
+       *    没出现就等一会儿再确认，最多 3 次（约 6 秒）。
+       *    ⚠️ 确认不了也**继续**（不拦）：`12006` 现在也是可重试的（见 `codeRetryable`），
+       *       万一真慢，`withRetry` 那层会兜住。
+       *    ⚠️ 只在**新建**楼时等；复用已有的楼（早就生效了）不等，别白拖时间。
+       */
+      const waitFloorReady = async (maxTries = 3) => {
+        for (let i = 1; i <= maxTries; i++) {
+          await new Promise((s) => setTimeout(s, 2000))
+          try {
+            /**
+             * ⚠️ **不能用 `scanPage`** —— 它返回的是**筛选后**的候选
+             *    （只含"带 @"或"命中关键词"的），而收纳楼的正文
+             *    （「【收纳楼】这里收纳本视频下机器人代发的留言…」）**不含 @**，
+             *    很可能不在候选里 ⇒ 会永远"确认不到"。
+             * ⇒ 这里直接问 Python 要**第 1 页原始列表**。
+             */
+            const r = await runCommentsPy(bvid, 1, 'time')
+            if (!r.ok) continue
+            const raw = Array.isArray(r.data?.comments) ? r.data.comments : []
+            if (raw.some((x) => String(x.rpid) === String(floorRpid))) {
+              clog(`收纳楼已进索引（第 ${i} 次确认，等了 ${i * 2} 秒）`, 'info')
+              return true
+            }
+          } catch { /* 查不到就再等一轮 */ }
+        }
+        clog('收纳楼索引确认超时（继续，12006 会自动重试兜住）', 'warn')
+        return false
+      }
+      await waitFloorReady()
     } else {
       clog(`复用已有收纳楼：rpid ${floorRpid}`, 'info')
     }
