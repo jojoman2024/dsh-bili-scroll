@@ -4326,8 +4326,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              *    ⚠️ 默认关 —— 这是面板里唯一会删别人内容的功能。 */
             h(ToggleRow, {
               label: '启用评论区整理',
-              note: '默认关闭。关闭时下面的设置全部折叠。'
-                + '打开后才会出现目标视频、扫描、执行这些选项。',
+              note: '展开下面的设置。关掉时这块收起，不影响已经开着的自动整理。',
               on: sw('cleanUiOpen'),
               onChange: (v) => patch({ cleanUiOpen: v }, '启用评论区整理'),
             }),
@@ -4337,8 +4336,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 
             h(Field, {
               label: '目标视频',
-              note: '填 BV 号，或者直接粘贴视频链接（会自动抠出 BV 号）。'
-                + '⚠️ 只有这个视频的 UP 主能删它下面的评论。',
+              note: '要整理哪个视频的评论区。填 BV 号或粘贴视频链接都行。',
               children: h('input', {
                 'data-bd-input': '',
                 type: 'text',
@@ -4353,13 +4351,16 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             }),
 
             /* ⭐ **自动整理 = 独立开关**（2026-10-26 使用者要求：
-             *    「还是给他单独开关吧，关闭时折叠间隔的设置。打开时可以设置间隔。」）
-             * ⇒ 关着时**间隔输入框不渲染**（折叠），打开才出现。 */
+             *    「还是给他单独开关吧，关闭时折叠间隔的设置。打开时可以设置间隔。」
+             * ⇒ 关着时**间隔输入框不渲染**（折叠），打开才出现。
+             *
+             * 📝 文案规矩（2026-10-26 使用者明确要求，别再加回来）：
+             *    「描述里只讲功能」「默认关闭、默认多少秒多少条这种都去掉」「提示也去掉」。
+             *    ⇒ 这里只讲**自动整理是干什么的**，重点说清它面对的是"增量"。 */
             h(ToggleRow, {
               label: '自动整理',
-              note: '默认关闭。打开后会定期跑一轮（间隔在下面设）：'
-                + '扫描 → 把带 @ 的机器人留言搬到收纳楼 → 删掉原留言。'
-                + '⚠️ 这一套会真的删评论，且不可撤销 —— 建议先手动「扫描」看几轮清单再开。',
+              note: '定期清掉后续新冒出来的机器人留言 —— 一条条搬进收纳楼再删原留言。'
+                + '已经手动清干净之后再开它，就是让新留言也被自动收进去。',
               on: sw('cleanEnabled'),
               onChange: (v) => patch({ cleanEnabled: v }, '自动整理'),
             }),
@@ -4371,9 +4372,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              *    否则他会以为"设了 5 分钟就该每 5 分钟看到一次动静"。 */
             sw('cleanEnabled') ? h(Field, {
               label: '整理间隔（分钟）',
-              note: '默认 30 分钟。'
-                + '⚠️ 计时是「上一轮跑完之后」才开始算 —— 不是每 N 分钟准时启动一次。'
-                + '所以一轮如果跑了 3 分钟，下一轮在它结束后再过这么久才开，不会叠加。',
+              note: '每隔多久清一次新冒出来的留言。计时从上一轮跑完才开始，不会叠加。',
               children: h('input', {
                 'data-bd-input': '',
                 type: 'number',
@@ -4391,9 +4390,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              *    **直到清完或失败**。 */
             h(Field, {
               label: '每批处理几条',
-              note: '默认 30 条。执行时会一直循环（每批这么多、批间停下面那个秒数），'
-                + '直到清完或失败 —— 不是"处理完这批就收工"。'
-                + '⚠️ 每一条要发一次评论再删一次评论（2 次写请求），调太大会被 B站 限流（-509）。',
+              note: '一次搬多少条。执行会一批批接着做，直到清完。',
               children: h('input', {
                 'data-bd-input': '',
                 type: 'number',
@@ -4406,7 +4403,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 
             h(Field, {
               label: '批次之间停几秒',
-              note: '默认 30 秒。两批之间歇一会，避免写请求太密被 B站 限流。填 0 = 不停。',
+              note: '两批之间歇多久，歇久一点不容易被 B站 限流。',
               children: h('input', {
                 'data-bd-input': '',
                 type: 'number',
@@ -4422,8 +4419,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '扫描 / 执行'),
                 h('div', { 'data-bd-note': '' },
-                  '「扫描」只读 —— 列出现在会处理哪些评论、搬过去长什么样，不删任何东西。'
-                  + '「执行」才会真删，而且会先弹确认。')),
+                  '扫描只看不改，先看清单。执行会真的搬走并删掉原留言。')),
               h('div', { 'data-bd-acts': '' },
                 h('button', {
                   'data-bd-btn': '',
