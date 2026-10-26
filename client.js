@@ -607,6 +607,39 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
 [data-bd-foot="loading"]{color:var(--dsw-alias-state-business-primary,#4176e6);}
 [data-bd-foot="no-more"]{color:var(--dsw-alias-label-tertiary,#81858c);}
 
+/* ════════ 整理日志区（2026-10-26 加）════════
+ * 使用者要求：「黑底白字。主要排版和美观。」
+ * 🔴 **故意不跟主题走** —— 终端观感，浅色/暗色主题下都保持黑底。
+ */
+[data-bd-logbox]{display:flex;flex-direction:column;gap:8px;
+  margin-top:14px;padding-top:14px;
+  border-top:1px solid var(--dsw-alias-border-l2,#0000001a);}
+[data-bd-loghead]{display:flex;align-items:center;gap:8px;}
+[data-bd-logtitle]{flex:1 1 0%;min-width:0;
+  font-size:var(--dsw-font-xs-13-font-size,13px);line-height:20px;font-weight:500;
+  color:var(--dsw-alias-label-primary,#0f1115);}
+[data-bd-loghint]{flex:none;
+  font-size:var(--dsw-font-xxxs-11-font-size,11px);line-height:14px;
+  color:var(--dsw-alias-label-tertiary,#81858c);}
+/* 终端本体 */
+[data-bd-logscroll]{max-height:260px;overflow-y:auto;overscroll-behavior:contain;
+  border-radius:var(--dsw-radius-sm,8px);
+  background:#0f1115;padding:10px 12px;
+  /* ⚠️ 等宽 + pre 换行：时间/正文才对得齐 */
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:12px;line-height:18px;}
+[data-bd-logline]{display:flex;gap:8px;align-items:flex-start;
+  white-space:pre-wrap;word-break:break-word;}
+/* 时间戳固定宽度 ⇒ 三个数字列永远对齐 */
+[data-bd-logts]{flex:none;width:62px;color:#6b7280;}
+[data-bd-logmsg]{flex:1 1 0%;min-width:0;color:#e5e7eb;}
+/* 级别配色（黑底上要够亮） */
+[data-bd-logline][data-bd-lv="ok"]>[data-bd-logmsg]{color:#4ade80;}
+[data-bd-logline][data-bd-lv="err"]>[data-bd-logmsg]{color:#f87171;}
+[data-bd-logline][data-bd-lv="warn"]>[data-bd-logmsg]{color:#fbbf24;}
+[data-bd-logline][data-bd-lv="step"]>[data-bd-logmsg]{color:#60a5fa;}
+[data-bd-logline][data-bd-lv="info"]>[data-bd-logmsg]{color:#d1d5db;}
+
 [data-bd-confirm]{position:fixed;inset:0;z-index:60;display:flex;
   align-items:center;justify-content:center;padding:16px;
   background:rgba(0,0,0,.38);}
@@ -1966,6 +1999,23 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        *    否则会在已关闭的浮窗上设置状态。
        */
       const [cleanFoot, setCleanFoot] = React.useState('')
+      /**
+       * ⭐⭐ **实时日志**（2026-10-26 加，使用者要求：
+       *    「执行的时候，加个实时日志区吧，放在评论区整理小节的尾部。
+       *     黑底白字。主要排版和美观。轮询时间短一些。」）
+       *
+       * 🔴 为什么要单独一个短轮询（1.5 秒）而不复用 `/status` 的 5 秒：
+       *    整理时每 1.5 秒处理一条，5 秒轮询会让日志**一跳五个**，
+       *    看不出"正在处理哪一条"。但也不能太快（0.5 秒以下纯浪费）。
+       *
+       * ⚠️ 只在"正在跑"或"刚跑完"时才轮询 —— 空闲时停掉，
+       *    否则面板开着就一直在打请求。
+       */
+      const [cleanLog, setCleanLog] = React.useState({ seq: 0, lines: [] })
+      const [cleanLogOn, setCleanLogOn] = React.useState(false)
+      const cleanLogSeq = React.useRef(0)
+      /** 跑完后延缓关轮询的定时器（30 秒） */
+      const cleanLogTimer = React.useRef(null)
       const cleanFootTimer = React.useRef(null)
       const flashFoot = (kind, ms = 1000) => {
         if (cleanFootTimer.current) clearTimeout(cleanFootTimer.current)
@@ -2081,6 +2131,35 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       }, [])
 
       // ② 本地 tab 变了 ⇒ 推给别的面板（让它们立刻跟上，不用等切会话）
+      /**
+       * ⭐ **整理日志的短轮询**（2026-10-26 加）。
+       *
+       * - 只读 `/status` 里那一段（`cleanLog`），不额外开路由
+       * - 1.5 秒一次；`cleanLogOn` 关着时**完全不发请求**
+       * - `seq` 没变就不 setState ⇒ 不触发重渲染
+       *
+       * ⚠️ `cleanLogOn` 由"点执行 / 开自动整理"打开、跑完 10 秒后自动关 ——
+       *    免得面板开着就永远在轮询。
+       */
+      React.useEffect(() => {
+        if (!cleanLogOn) return undefined
+        let dead = false
+        const tick = async () => {
+          try {
+            const d = await jget('/status')
+            if (dead) return
+            const lg = d?.cleanLog
+            if (lg && Number(lg.seq) !== Number(cleanLogSeq.current)) {
+              cleanLogSeq.current = Number(lg.seq)
+              setCleanLog({ seq: Number(lg.seq), lines: Array.isArray(lg.lines) ? lg.lines : [] })
+            }
+          } catch { /* 网络抖一下不打断 */ }
+        }
+        tick()
+        const h = setInterval(tick, 1500)
+        return () => { dead = true; clearInterval(h) }
+      }, [cleanLogOn])
+
       /**
        * ⭐ **评论区整理那三个输入框的草稿，第一次拿到 cfg 时初始化一次**（2026-10-26 修）。
        *
@@ -4826,6 +4905,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       setCleanConfirm(false)
                       setCleanBusy(true)
                       setCleanRun(null)
+                      /**
+                       * ⭐ **开始实时日志**（2026-10-26）。
+                       * 打开轮询 ⇒ 日志区会一条条往外冒（1.5 秒一批）。
+                       * ⚠️ 跑完之后**不立刻关** —— 让用户能看最后几条，
+                       *    30 秒后自动停（见下面的 finally）。
+                       */
+                      setCleanLogOn(true)
+                      if (cleanLogTimer.current) clearTimeout(cleanLogTimer.current)
                       try {
                         const r = await jpost('/clean/run', {
                           bvid: cleanDraft || cfg.cleanBvid,
@@ -4836,10 +4923,53 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                         await reload()          // 刷新白名单计数等
                       } catch (e) {
                         setCleanRun({ ok: false, error: String(e?.message || e) })
-                      } finally { setCleanBusy(false) }
+                      } finally {
+                        setCleanBusy(false)
+                        // ⭐ 跑完别立刻停轮询 —— 留 30 秒让最后几条日志落地再停
+                        if (cleanLogTimer.current) clearTimeout(cleanLogTimer.current)
+                        cleanLogTimer.current = setTimeout(() => { setCleanLogOn(false); cleanLogTimer.current = null }, 30000)
+                      }
                     },
                   }, '确认执行（会真删）')))) : null)
-            : null),   // ← 折叠区结束 + 评论区整理这个 sec 在这里收尾
+            : null),   // ← 折叠区结束
+
+            /* ⭐⭐ **实时日志区**（2026-10-26 加，使用者要求：
+             *    「执行的时候，加个实时日志区吧，放在评论区整理小节的尾部。
+             *     黑底白字。主要排版和美观。轮询时间短一些。」）
+             *
+             * 🔴 位置：**折叠区外面**（所以上面先把 `sw('cleanUiOpen') ? … : null` 收掉）——
+             *    因为关掉「启用评论区整理」之后，自动整理可能还在后台跑，日志仍该看得见。
+             *
+             * 🔴 配色：黑底白字（`#0f1115`，跟官方主按钮同色系），
+             *    按级别上色：ok=绿、err=红、warn=琥珀、step=蓝、info=灰。
+             *    ⚠️ **故意不跟主题走** —— 使用者明确要"黑底白字"，切主题也保持黑底。
+             *
+             * ⚠️ 等宽字体 + 固定宽度时间戳 ⇒ 时间/正文两列对齐。
+             */
+            (cleanLog.lines.length > 0 || cleanLogOn)
+              ? h('div', { 'data-bd-logbox': '' },
+                h('div', { 'data-bd-loghead': '' },
+                  h('span', { 'data-bd-logtitle': '' }, '整理日志'),
+                  h('span', { 'data-bd-loghint': '' },
+                    cleanLogOn ? '实时刷新中…' : '已停止刷新'),
+                  h('button', {
+                    'data-bd-btn': '',
+                    'data-bd-mini': '',
+                    onClick: () => setCleanLogOn((v) => !v),
+                  }, cleanLogOn ? '暂停' : '继续')),
+                h('div', {
+                  'data-bd-logscroll': '',
+                  /* 自动滚到底：内容变了就把 scrollTop 拉到底。
+                     ⚠️ 用 ref 回调而不是 useEffect —— 这块是条件渲染的，ref 更直接。 */
+                  ref: (el) => { if (el) el.scrollTop = el.scrollHeight },
+                },
+                  cleanLog.lines.map((x) => h('div', {
+                    'data-bd-logline': '',
+                    'data-bd-lv': x.level || 'info',
+                  },
+                    h('span', { 'data-bd-logts': '' }, x.ts),
+                    h('span', { 'data-bd-logmsg': '' }, x.msg)))))
+              : null,
 
           /* ⚠️ 这里原来有三块「开关状态」条件渲染，2026-10-18 按使用者要求全部删掉 ——
              使用者原话：「开关下面的状态那些都不要。3 行已打开都不要。」

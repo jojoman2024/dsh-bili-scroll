@@ -502,6 +502,50 @@ export function apply(ctx, config) {
     try { ctx.logger?.info?.(`[bili-duty] ${msg}`) } catch { /* 没有 logger 就算了 */ }
   }
 
+  /**
+   * ⭐⭐ **评论区整理的专用日志**（2026-10-26 加，使用者要求：
+   *    「执行的时候加个实时日志区…可以单独给他写个log文件，不要挤 duty.log 了」）。
+   *
+   * 三条设计（每条都对应一个具体问题）：
+   *   ① **独立文件** `clean.log` —— 整理过程会把 duty.log 冲得全是翻页流水，
+   *      想看"刷B站那一轮"的日志反而找不到。
+   *   ② **内存环形缓冲**（`cleanLogBuf`，最多 300 条）——
+   *      面板轮询时直接读内存，**不用每次去读盘**（读盘 + 切片在 2 秒轮询下太浪费）。
+   *   ③ **只在有整理任务时才写** —— 别让空闲时的轮询也刷屏。
+   *
+   * ⚠️ 格式故意做成"时间 + 级别 + 正文"三段，前端用等宽字体对齐着好看：
+   *      `20:31:05  ✓  第 2 页：20 条原始 / 18 条入选`
+   */
+  const cleanLogFile = join(stateDir, 'clean.log')
+  const CLEAN_LOG_MAX = 300
+  const cleanLogBuf = []      // 只放最近 N 条（内存）
+  let cleanLogSeq = 0         // 递增序号，前端据此判断"有没有新行"
+
+  /**
+   * 写一条整理日志。
+   * @param {string} msg  正文
+   * @param {'info'|'ok'|'warn'|'err'|'step'} level  级别（决定前端颜色）
+   */
+  const clog = (msg, level = 'info') => {
+    const d = new Date()
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    const ss = String(d.getSeconds()).padStart(2, '0')
+    const ts = `${hh}:${mm}:${ss}`
+    const entry = { i: ++cleanLogSeq, ts, level, msg: String(msg) }
+    cleanLogBuf.push(entry)
+    if (cleanLogBuf.length > CLEAN_LOG_MAX) cleanLogBuf.splice(0, cleanLogBuf.length - CLEAN_LOG_MAX)
+    // 落盘（失败不致命 —— 内存里还有）
+    try { appendFileSync(cleanLogFile, `${d.toISOString()} [${level}] ${msg}\n`, 'utf8') } catch { /* 写不进去也不致命 */ }
+    return entry
+  }
+
+  /** 清空整理日志（新开一轮整理时调，免得把上一轮的混进来） */
+  const clearCleanLog = (note) => {
+    cleanLogBuf.length = 0
+    try { appendFileSync(cleanLogFile, `\n===== ${new Date().toISOString()} ${note || '新一轮'} =====\n`, 'utf8') } catch { /* */ }
+  }
+
   // ⭐ 把「宿主依赖是从哪儿取的」写进 duty.log（2026-10-16）。
   //    为什么必须写：README 里让**桌面版装不起来的用户**把日志那几行发来排查 ——
   //    而 `loadHostDeps()` 只把结果收在内存数组里，**不落盘就翻不到**。
@@ -4601,8 +4645,8 @@ export function apply(ctx, config) {
     }
 
     const f = filterPage(list, sinceTime)
-    log(`评论第 1 页：${list.length} 条原始 / ${f.items.length} 条入选`
-      + `（B站 显示总回复 ${statReply}，一级共 ${rec.total || '?'} 条）`)
+    clog(`第 1 页：${list.length} 条原始 / ${f.items.length} 条入选`
+      + `（B站 显示总回复 ${statReply}，一级共 ${rec.total || '?'} 条）`, 'step')
 
     return {
       ok: true,
@@ -4636,7 +4680,7 @@ export function apply(ctx, config) {
     const rec = r.data || {}
     const list = Array.isArray(rec.comments) ? rec.comments : []
     const f = filterPage(list, 0)
-    log(`评论第 ${p} 页：${list.length} 条原始 / ${f.items.length} 条入选`)
+    clog(`第 ${p} 页：${list.length} 条原始 / ${f.items.length} 条入选`, 'step')
     return {
       ok: true,
       page: p,
@@ -4852,7 +4896,7 @@ export function apply(ctx, config) {
       markMoved(bvid, item.rpid, movedRpid)
     } else {
       skippedMove = true
-      log(`评论 ${item.rpid} 已经搬过（${movedRpid}），这轮直接重试删除，不重复搬`)
+      clog(`rpid ${item.rpid} 已搬过（→${movedRpid}），只补删不重复搬`, 'warn')
     }
 
     /* ── ② 删除原评论 ─────────────────────────────────────
@@ -4935,10 +4979,21 @@ export function apply(ctx, config) {
     // 安全上限：防止"清不完"时无限循环（比如删失败导致同一条反复被扫到）
     const maxRounds = Math.max(1, Math.min(Number(opt.maxRounds) || 20, 100))
 
+    /**
+     * ⭐ **开一轮整理 ⇒ 先清掉上一轮的日志**（2026-10-26）。
+     *    否则实时日志区会把几轮的内容混在一起，看不出这轮跑到哪了。
+     */
+    clearCleanLog(`开始整理 ${bvid}`)
+    clog(`开始整理：每批 ${batchSize} 条 / 批间 ${batchGapSec} 秒`, 'step')
+
     const sc = await scanComments(bvid)
-    if (!sc.ok) return { ok: false, error: sc.error, log: [] }
+    if (!sc.ok) {
+      clog(`扫描失败：${sc.error}`, 'err')
+      return { ok: false, error: sc.error, log: [] }
+    }
     const pending = sc.items.filter((it) => !it.whitelisted && !it.isSelf)
     if (!pending.length) {
+      clog('没有需要处理的评论。', 'info')
       return { ok: true, bvid, scanned: sc.total, todo: 0, done: 0, failed: 0, log: [], note: '没有需要处理的评论。' }
     }
 
@@ -4995,9 +5050,9 @@ export function apply(ctx, config) {
       floorRpid = rb.value
       saveFloor(bvid, floorRpid, sc.title)
       floorCreated = true
-      log(`收纳楼已建：${floorRpid}（${bvid}）`)
+      clog(`收纳楼已建：rpid ${floorRpid}`, 'ok')
     } else {
-      log(`复用已有收纳楼：${floorRpid}（${bvid}）`)
+      clog(`复用已有收纳楼：rpid ${floorRpid}`, 'info')
     }
 
     /**
@@ -5042,17 +5097,29 @@ export function apply(ctx, config) {
         pageItems = (np.items || []).filter((it) => !it.whitelisted && !it.isSelf)
         rawTotal += np.raw || (np.items || []).length
         if (np.isEnd === true) allClear = true
-        log(`执行整理：翻到第 ${pageNo} 页（原始 ${np.raw ?? '?'} 条 / 待处理 ${pageItems.length} 条）`)
+        clog(`翻到第 ${pageNo} 页（原始 ${np.raw ?? '?'} / 待处理 ${pageItems.length}）`, 'step')
         if (!pageItems.length && np.isEnd === true) break
         if (!pageItems.length) continue          // 这一页全是白名单/无 @ ⇒ 继续翻
       }
 
       round++
       const batch = pageItems.slice(0, batchSize)
+      clog(`第 ${round} 批开始：${batch.length} 条（本页第 ${pageNo} 页，累计成功 ${doneTotal} / 失败 ${failedTotal}）`, 'step')
       for (const it of batch) {
         const r = await moveOne(it, bvid, floorRpid)
         if (r.ok) doneTotal++
         else failedTotal++
+        /**
+         * ⭐ 逐条日志（2026-10-26）—— 实时日志区最主要的内容。
+         *    用 `✓ / ✗` 开头，配合等宽字体一眼扫下来。
+         */
+        if (r.ok) {
+          clog(r.skippedMove
+            ? `✓ ${it.uname}（rpid ${it.rpid}）补删成功`
+            : `✓ ${it.uname}（rpid ${it.rpid}）已搬运并删除`, 'ok')
+        } else {
+          clog(`✗ ${it.uname}（rpid ${it.rpid}）${r.step === 'move' ? '搬进收纳楼' : r.step === 'del' ? '删原评论' : ''}失败：${r.error || '未知'}`, 'err')
+        }
         logItems.push({
           批: round,
           页: pageNo,
@@ -5079,7 +5146,7 @@ export function apply(ctx, config) {
       pageItems = pageItems.slice(batch.length)
       // ⭐ 批次之间停一会（使用者要求可配，默认 30 秒）
       if (pageItems.length && batchGapSec > 0) {
-        log(`第 ${round} 批完成（本页还剩 ${pageItems.length} 条），等 ${batchGapSec} 秒再继续`)
+        clog(`第 ${round} 批完成，本页还剩 ${pageItems.length} 条，等 ${batchGapSec} 秒`, 'info')
         await new Promise((s) => setTimeout(s, batchGapSec * 1000))
       }
     }
@@ -7306,9 +7373,9 @@ export function apply(ctx, config) {
         .then((r) => {
           if (r?.ok) {
             saveCfg({ cleanLastScanAt: Date.now() })
-            log(`自动整理完成：扫到 ${r.scanned} 条，处理 ${r.todo} 条，成功 ${r.done}，失败 ${r.failed}`)
+            clog(`自动整理完成：扫到 ${r.scanned} / 成功 ${r.done} / 失败 ${r.failed}`, 'ok')
           } else {
-            log(`自动整理失败（已兜住）：${r?.error ?? '未知'}`)
+            clog(`自动整理失败：${r?.error ?? '未知'}`, 'err')
           }
         })
         .catch((e) => log(`自动整理抛错（已兜住）：${e?.stack ?? e}`))
@@ -7318,7 +7385,7 @@ export function apply(ctx, config) {
           saveCfg({ cleanLastRunEndAt: Date.now() })
         })
     } catch (e) {
-      log(`自动整理这一跳出错（已兜住）：${e?.stack ?? e}`)
+      clog(`自动整理这一跳出错：${e?.message ?? e}`, 'err')
       cleanRunning = false
     }
   }
@@ -8328,6 +8395,11 @@ export function apply(ctx, config) {
         ...status(),
         cleanWhitelist: _wl,
         cleanSelfMid: selfMid(),
+        /**
+         * ⭐ **整理日志**（2026-10-26 加，面板实时日志区用）。
+         * `seq` 是递增序号 —— 前端只在"序号变了"时重绘，避免每 2 秒无谓刷新。
+         */
+        cleanLog: { seq: cleanLogSeq, lines: cleanLogBuf.slice(-160) },
         /**
          * ⭐ 当前目标视频的失败清单（面板每 5 秒轮询就自动对齐）。
          * 按使用者选的 C 方案：**只展示、不跳过**。
