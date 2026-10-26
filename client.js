@@ -1967,6 +1967,48 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        *    否则你粘贴 BV 号打到一半会被冲掉（这个坑面板里踩过多次）。
        */
       const [cleanDraft, setCleanDraft] = React.useState('')
+      /**
+       * ⭐ **把「视频链接」归一化成 BV 号**（2026-10-26 加，使用者给的规则：
+       *    「用 /BV 作为起始，后面一个 / 或者结束作为终止。然后把前后的 / 去掉即可。」）
+       *
+       * 🔴 为什么抽成函数、而不只写在 onBlur 里：
+       *    扫描/执行时传的是 `cleanDraft || cfg.cleanBvid` —— **原始草稿**。
+       *    如果用户粘贴链接后**直接点扫描**（没失焦、或失焦事件没赶上），
+       *    `cleanDraft` 还是整条 URL ⇒ 后端拿到 URL。虽然后端也会归一化，
+       *    但前端这一层能保证"不管什么时机点，送出去的都是干净 BV"。
+       *
+       * 规则（完全照使用者说的）：
+       *    `.../video/BV1hXnQ6nEde/?spm=...` → `BV1hXnQ6nEde`
+       *    `.../video/BV1hXnQ6nEde`          → `BV1hXnQ6nEde`
+       *    `BV1hXnQ6nEde`（直接填）          → 原样
+       */
+      const bvOf = (raw) => {
+        const s = String(raw || '').trim()
+        if (!s) return ''
+        let cut = s
+        const i = s.search(/\/BV/)
+        if (i >= 0) {
+          const from = s.slice(i + 1)          // 跳过那个 '/'
+          const j = from.indexOf('/')
+          cut = (j >= 0 ? from.slice(0, j) : from).trim() || s
+        }
+        /**
+         * 🔴 **截完还要再校验一次**（2026-10-26，探针抓到前后端不一致才补的）。
+         *
+         * 反例：`https://www.bilibili.com/video/BV1hXnQ6nEde?p=2&t=30`
+         *   上面截出来是 `BV1hXnQ6nEde?p=2&t=30` —— 因为 `?` 后面**没有 `/`**，
+         *   「遇到 / 才停」这条规则在这里停不下来。
+         * ⇒ 只要结果不是"BV + 10 位"，就用正则兜一次底。
+         * ⚠️ **必须和后端 `index.js` 那段完全同一套**，否则同一串输入两边算出不同结果。
+         */
+        if (!/^BV[0-9A-Za-z]{10}$/.test(cut)) {
+          const m = /BV[0-9A-Za-z]{10}/.exec(s)
+          if (m) cut = m[0]
+        }
+        return cut
+      }
+      /** 扫描/执行真正送出去的 BV（草稿优先，但**先归一化**） */
+      const cleanBvNow = () => bvOf(cleanDraft || cfg?.cleanBvid || '')
       const [cleanBusy, setCleanBusy] = React.useState(false)
       const [cleanResult, setCleanResult] = React.useState(null)   // 扫描结果
       const [cleanRun, setCleanRun] = React.useState(null)         // 执行结果
@@ -4531,7 +4573,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 value: cleanDraft,
                 onInput: (e) => setCleanDraft(e.target.value),
                 onBlur: () => {
-                  const v = String(cleanDraft || '').trim()
+                  const v = bvOf(cleanDraft)
+                  if (v !== cleanDraft) setCleanDraft(v)   // 就地显示成干净的 BV 号
                   if (v !== String(cfg.cleanBvid || '')) patch({ cleanBvid: v }, '目标视频')
                 },
               }),
@@ -4615,7 +4658,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              * ⚠️ 输入框绑的是草稿 state，不能让 5 秒轮询冲掉（这坑踩过）。 */
             h(Field, {
               label: '按昵称筛选',
-              note: '只匹配作者昵称，多个词用空格分隔，命中任一就算机器人。留空则不按昵称筛。',
+              note: '只匹配用户昵称，多个词用空格分隔，命中任一就算机器人。留空则不按昵称筛。',
               stack: true,
               children: h('input', {
                 'data-bd-input': '',
@@ -4666,7 +4709,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     setCleanFoot('')
                     if (cleanFootTimer.current) { clearTimeout(cleanFootTimer.current); cleanFootTimer.current = null }
                     try {
-                      const r = await jpost('/clean/scan', { bvid: cleanDraft || cfg.cleanBvid })
+                      const r = await jpost('/clean/scan', { bvid: cleanBvNow() })
                       setCleanResult(r)
                     } catch (e) {
                       setCleanResult({ ok: false, error: String(e?.message || e) })
@@ -4915,7 +4958,7 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       if (cleanLogTimer.current) clearTimeout(cleanLogTimer.current)
                       try {
                         const r = await jpost('/clean/run', {
-                          bvid: cleanDraft || cfg.cleanBvid,
+                          bvid: cleanBvNow(),
                           batchSize: cfg.cleanBatchSize || 30,
                           batchGapSec: cfg.cleanBatchGapSec ?? 30,
                         })

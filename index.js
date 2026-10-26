@@ -8459,9 +8459,37 @@ export function apply(ctx, config) {
       /* 评论区整理（2026-10-26） */
       if ('cleanEnabled' in patch) patch.cleanEnabled = Boolean(patch.cleanEnabled)
       if ('cleanBvid' in patch) {
-        // 只留 BV 号本身：粘贴整条链接时也能用（从 URL 里抠出 BV…）
-        const m = /(BV[0-9A-Za-z]{10})/.exec(String(patch.cleanBvid || ''))
-        patch.cleanBvid = m ? m[1] : String(patch.cleanBvid || '').trim()
+        /**
+         * ⭐ **把输入链接处理成 BV 号**（2026-10-26 按使用者给的规则重写）。
+         *
+         * 使用者原话：「用 /BV 作为起始，后面一个 / 或者结束作为终止。
+         * 然后把前后的 / 去掉即可。」
+         *
+         * 🔴 原来为什么不好使：正则写的是 `BV[0-9A-Za-z]{10}` —— **必须正好 10 位**。
+         *    而带参数的链接（`.../BV1hXnQ6nEde/?spm_id_from=xxx`）里，
+         *    `{10}` 会**先匹配到 10 位就停**，把后面的字符留在原地；
+         *    更糟的是有些链接 `BV` 后面跟的不是正好 10 位，整条就匹配不上 ⇒ 原样存进配置。
+         *
+         * ⇒ 改成**按分隔符截**（不数长度）：
+         *    `.../video/BV1hXnQ6nEde/?spm=...` → `BV1hXnQ6nEde`
+         *    `.../video/BV1hXnQ6nEde`          → `BV1hXnQ6nEde`
+         *    `BV1hXnQ6nEde`（直接填）          → `BV1hXnQ6nEde`
+         * ⚠️ 截完再用 `{10}` 校验一遍：**合法就存，不合法就报错**（别把一串垃圾存进配置）。
+         */
+        const raw = String(patch.cleanBvid || '').trim()
+        let bv = raw
+        const i = raw.search(/\/BV/)
+        if (i >= 0) {
+          const from = raw.slice(i + 1)           // 跳过那个 '/'
+          const j = from.indexOf('/')
+          bv = (j >= 0 ? from.slice(0, j) : from).trim()
+        }
+        // 兜底：如果上面没截出合法 BV，再扫一次（应对 "https://b23.tv/xxxx" 这种短链解析后的形态）
+        if (!/^BV[0-9A-Za-z]{10}$/.test(bv)) {
+          const m = /BV[0-9A-Za-z]{10}/.exec(raw)
+          bv = m ? m[0] : bv
+        }
+        patch.cleanBvid = bv
       }
       if ('cleanBatchSize' in patch) patch.cleanBatchSize = Math.max(1, Math.min(Math.floor(Number(patch.cleanBatchSize) || 30), 100))
       if ('cleanBatchGapSec' in patch) patch.cleanBatchGapSec = Math.max(0, Math.min(Math.floor(Number(patch.cleanBatchGapSec) ?? 30), 600))
