@@ -4379,22 +4379,41 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 type: 'number',
                 min: '0',
                 max: '1440',
-                value: String(cfg.cleanIntervalMin ?? 5),
+                value: String(cfg.cleanIntervalMin ?? 30),
                 onChange: (e) => patch({ cleanIntervalMin: Number(e.target.value) }, '整理间隔'),
               }),
             }) : null,
 
+            /* ⭐ **批次参数**（2026-10-26 按使用者要求）。
+             * 原来这里是「每轮最多处理几条」，语义是"一轮只处理 N 条就停" ——
+             * 使用者否掉了：「如果没有自动整理，他处理完5条就停了？」。
+             * ⇒ 现在改成**批次**：执行时会一直循环处理，每批 N 条、批间停 M 秒，
+             *    **直到清完或失败**。 */
             h(Field, {
-              label: '每轮最多处理几条',
-              note: '默认 5 条。每一条要发一次评论再删一次评论（2 次写请求），'
-                + '调太大会被 B站 限流（-509）。',
+              label: '每批处理几条',
+              note: '默认 30 条。执行时会一直循环（每批这么多、批间停下面那个秒数），'
+                + '直到清完或失败 —— 不是"处理完这批就收工"。'
+                + '⚠️ 每一条要发一次评论再删一次评论（2 次写请求），调太大会被 B站 限流（-509）。',
               children: h('input', {
                 'data-bd-input': '',
                 type: 'number',
                 min: '1',
-                max: '50',
-                value: String(cfg.cleanPerRound || 5),
-                onChange: (e) => patch({ cleanPerRound: Number(e.target.value) || 5 }, '每轮最多处理几条'),
+                max: '100',
+                value: String(cfg.cleanBatchSize || 30),
+                onChange: (e) => patch({ cleanBatchSize: Number(e.target.value) || 30 }, '每批处理几条'),
+              }),
+            }),
+
+            h(Field, {
+              label: '批次之间停几秒',
+              note: '默认 30 秒。两批之间歇一会，避免写请求太密被 B站 限流。填 0 = 不停。',
+              children: h('input', {
+                'data-bd-input': '',
+                type: 'number',
+                min: '0',
+                max: '600',
+                value: String(cfg.cleanBatchGapSec ?? 30),
+                onChange: (e) => patch({ cleanBatchGapSec: Number(e.target.value) }, '批次之间停几秒'),
               }),
             }),
 
@@ -4476,8 +4495,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
               ? h('div', { 'data-bd-cleanbox': '' },
                 h('div', { 'data-bd-note': '' },
                   cleanRun.ok
-                    ? `本轮：扫到 ${cleanRun.scanned} 条，处理 ${cleanRun.todo} 条 —— `
-                      + `成功 ${cleanRun.done} 条，失败 ${cleanRun.failed} 条。收纳楼 rpid：${cleanRun.floorRpid || '（无）'}`
+                    ? `扫到 ${cleanRun.scanned} 条；跑了 ${cleanRun.rounds} 批 —— `
+                      + `成功 ${cleanRun.done} 条，失败 ${cleanRun.failed} 条。`
+                      + (cleanRun.allClear ? '✅ 已清完。' : '⚠️ 还有剩（到了上限或中途失败），再点一次会接着处理。')
+                      + `收纳楼 rpid：${cleanRun.floorRpid || '（无）'}`
+                      + (cleanRun.floorCreated ? '（新建）' : '（复用已有）')
                     : '执行失败：' + (cleanRun.error || '未知')),
                 (cleanRun.log || []).map((x) => h('div', {
                   'data-bd-cleanitem': '',
@@ -4505,7 +4527,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 h('div', { 'data-bd-confirm-body': '' },
                   '会删除本视频下「带 @ 且不在白名单」的机器人留言 —— '
                   + '删掉的评论不可恢复（内容会先搬进收纳楼，但原评论本身找不回来）。'
-                  + `最多处理 ${cfg.cleanPerRound || 5} 条。`),
+                  + `每批处理 ${cfg.cleanBatchSize || 30} 条、批间停 ${cfg.cleanBatchGapSec ?? 30} 秒，`
+                  + '一直循环到清完或失败（可能要跑一阵，别关页面）。'),
                 h('div', { 'data-bd-confirm-foot': '' },
                   h('button', { 'data-bd-btn': '', onClick: () => setCleanConfirm(false) }, '取消'),
                   h('button', {
@@ -4518,7 +4541,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       try {
                         const r = await jpost('/clean/run', {
                           bvid: cleanDraft || cfg.cleanBvid,
-                          limit: cfg.cleanPerRound || 5,
+                          batchSize: cfg.cleanBatchSize || 30,
+                          batchGapSec: cfg.cleanBatchGapSec ?? 30,
                         })
                         setCleanRun(r)
                         await reload()          // 刷新白名单计数等

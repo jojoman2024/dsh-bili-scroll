@@ -319,10 +319,24 @@ export const Config = !z ? undefined : z.object({
    *      **不会叠加**、也不会追赶。
    *    这是使用者明确要求的：「5 分钟间隔指的是前一次处理完成后才计时 5 分钟，
    *    不是 5 分钟就启动一次。」
+   *
+   * ⭐ **2026-10-26 改成默认 30 分钟** —— 使用者原话：
+   *    「自动整理的意义是面向后续不断产生的增量的意思是，整理间隔默认调成30分钟吧。」
+   *    ⇒ 定位是"兜住后面零星冒出来的新留言"，不是"一口气清历史"（那个用手动执行）。
    */
-  cleanIntervalMin: z.number().default(5).extra('volatile', true),
-  /** 每轮最多处理几条（⚠️ 每条约 2 次写请求，调大会 -509） */
-  cleanPerRound: z.number().default(5).extra('volatile', true),
+  cleanIntervalMin: z.number().default(30).extra('volatile', true),
+  /**
+   * ⭐ **每批处理多少条**（2026-10-26 加，使用者要求默认 30）。
+   * 执行时会**一直循环**，每处理一批停 `cleanBatchGapSec` 秒，
+   * **直到清完或失败** —— 不是"处理完这批就收工"。
+   *
+   * ⚠️ 它取代了原来的 `cleanPerRound`（那个的语义是"一轮只处理 N 条就停"，
+   *    正好是使用者否掉的用法：「如果没有自动整理，他处理完5条就停了？」）。
+   *    老配置里残留的 `cleanPerRound` 会被 `normalize()` 静默忽略（不报错、也不删）。
+   */
+  cleanBatchSize: z.number().default(30).extra('volatile', true),
+  /** ⭐ **批次之间的间隔（秒）**，默认 30。防 -509 限流。 */
+  cleanBatchGapSec: z.number().default(30).extra('volatile', true),
   /** 上次成功执行的时间戳（增量扫描用） */
   cleanLastScanAt: z.number().default(0).extra('volatile', true),
   /**
@@ -494,8 +508,9 @@ export function apply(ctx, config) {
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
     freeformWatch: true, watchNote: '',
     commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
-    cleanBvid: '', cleanEnabled: false, cleanPerRound: 5, cleanLastScanAt: 0, cleanUiOpen: false,
-    cleanIntervalMin: 5, cleanLastRunEndAt: 0,
+    cleanBvid: '', cleanEnabled: false, cleanLastScanAt: 0, cleanUiOpen: false,
+    cleanIntervalMin: 30, cleanLastRunEndAt: 0,
+    cleanBatchSize: 30, cleanBatchGapSec: 30,
     adminMode: false,
     /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
     absoluteGuard: true,
@@ -4064,6 +4079,35 @@ export function apply(ctx, config) {
 
   /** 白名单文件：存 `mid`（一个账号一次永久跳过，不管他发几条） */
   const whitelistFile = join(stateDir, 'comment-whitelist.json')
+
+  /**
+   * ⭐ **收纳楼账本**（2026-10-26 加，使用者要求：
+   *    「一个视频处理，只用一个楼」「这个楼的 rpid 应该跟视频绑定。可以存个账本去做」）。
+   *
+   * 结构：`{ "<BV号>": { floorRpid, at, title } }`
+   * ⇒ 同一个视频**永远复用同一个收纳楼**，不管跑多少轮、多少批次。
+   *
+   * ⚠️ 为什么不放在 `config.json`：那是**设置**（使用者可见可改），
+   *    而这个是**运行账本**（插件自己维护）。混在一起会让面板出现一堆内部字段。
+   */
+  const floorFile = join(stateDir, 'comment-floors.json')
+  const readFloors = () => {
+    const j = readJson(floorFile, null)
+    return (j && typeof j === 'object' && !Array.isArray(j)) ? j : {}
+  }
+  const getFloor = (bvid) => {
+    const f = readFloors()[String(bvid || '').trim()]
+    return f && f.floorRpid ? String(f.floorRpid) : ''
+  }
+  const saveFloor = (bvid, floorRpid, title) => {
+    const all = readFloors()
+    all[String(bvid || '').trim()] = {
+      floorRpid: String(floorRpid),
+      at: Date.now(),
+      title: String(title || ''),
+    }
+    writeJson(floorFile, all)
+  }
   const readWhitelist = () => {
     const j = readJson(whitelistFile, null)
     if (!j || typeof j !== 'object') return { mids: [], names: {} }
@@ -4275,49 +4319,128 @@ export function apply(ctx, config) {
     }
   }
 
-  /** 一轮整理（扫描 → 逐条搬运）；返回详细日志 */
-  const runCommentClean = async (bvid, limit) => {
+  /**
+   * 一轮整理（扫描 → 循环批次搬运）；返回详细日志。
+   *
+   * ── 🔴 处理顺序（使用者明确要求，不能改）────────────────────────
+   *   ① **先建收纳楼**（一个视频只建一次，rpid 记在 `comment-floors.json`）
+   *   ② 每条：**先发**楼中楼（提醒 + 原文）→ **校验发成功** → **再删**原评论
+   *   ⚠️ 反过来一旦中途失败（断网/限流/进程崩），原评论就没了、楼也没建成
+   *      ⇒ **信息永久丢失**。先发后删最坏只是"重复一条"（可再删）。
+   *
+   * ── 🔴 批次循环（2026-10-26 按使用者要求加）──────────────────────
+   *   使用者原话：「应该C，可以设置批次处理多少条（默认30条）
+   *   和批次之间间隔多少（默认30秒）。直到清完或者失败。」
+   *   ⇒ 这里**一直处理到清完或失败**，不是"处理 limit 条就停"。
+   *   ⚠️ 每处理完一批停 `batchGapSec` 秒（默认 30）—— 防 -509 限流。
+   *
+   * @param {string} bvid
+   * @param {{batchSize?:number, batchGapSec?:number, maxRounds?:number}} opt
+   */
+  const runCommentClean = async (bvid, opt = {}) => {
+    const batchSize = Math.max(1, Math.min(Number(opt.batchSize) || 30, 100))
+    const batchGapSec = Math.max(0, Math.min(Number(opt.batchGapSec) || 30, 600))
+    // 安全上限：防止"清不完"时无限循环（比如删失败导致同一条反复被扫到）
+    const maxRounds = Math.max(1, Math.min(Number(opt.maxRounds) || 20, 100))
+
     const sc = await scanComments(bvid)
     if (!sc.ok) return { ok: false, error: sc.error, log: [] }
-    const todo = sc.items.filter((it) => !it.whitelisted && !it.isSelf).slice(0, Math.max(1, limit))
-    if (!todo.length) return { ok: true, scanned: sc.total, todo: 0, log: [], note: '没有需要处理的评论。' }
-
-    // ① 建收纳楼（如果这一轮有活干）
-    const floorText = `【收纳楼】这里收纳本视频下机器人代发的留言。原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。本楼只做归档，不参与讨论。\n（整理时间：${new Date().toISOString().slice(0, 19).replace('T', ' ')}）`
-    let floorRpid = ''
-    try {
-      const f = await call('bili_reply', { bvid, text: floorText, rpid: 0 })
-      let fr = f
-      if (typeof fr === 'string') { try { fr = JSON.parse(fr) } catch { /* */ } }
-      floorRpid = fr?.rpid != null ? String(fr.rpid) : ''
-      if (!floorRpid) return { ok: false, error: '建收纳楼失败（拿不到 rpid）', log: [] }
-    } catch (e) {
-      return { ok: false, error: `建收纳楼失败：${e?.message ?? e}`, log: [] }
+    const pending = sc.items.filter((it) => !it.whitelisted && !it.isSelf)
+    if (!pending.length) {
+      return { ok: true, bvid, scanned: sc.total, todo: 0, done: 0, failed: 0, log: [], note: '没有需要处理的评论。' }
     }
 
-    const log = []
-    for (const it of todo) {
-      const r = await moveOne(it, bvid, floorRpid)
-      log.push({
-        原rpid: it.rpid,
-        作者: it.uname,
-        at谁: it.at.map((a) => a.uname),
-        ...(r.ok
-          ? { 结果: '✅ 已搬运并删除', 新rpid: r.movedRpid, 文本: r.text }
-          : { 结果: '❌ 失败', 错误: r.error, 已搬rpid: r.movedRpid || null }),
-      })
-      // 每条之间留一点间隔（写操作太密会 -509）
-      await new Promise((s) => setTimeout(s, 1500))
+    /**
+     * ① **先建（或复用）收纳楼**。
+     * ⭐ 使用者要求：「一个视频处理，只用一个楼」「rpid 跟视频绑定，存个账本」。
+     * ⇒ 已有就直接用，没有才建。跨轮次、跨批次都复用同一个。
+     */
+    let floorRpid = getFloor(bvid)
+    let floorCreated = false
+    if (!floorRpid) {
+      const floorText = '【收纳楼】这里收纳本视频下机器人代发的留言。'
+        + '原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。'
+        + '本楼只做归档，不参与讨论。'
+      try {
+        const f = await call('bili_reply', { bvid, text: floorText, rpid: 0 })
+        let fr = f
+        if (typeof fr === 'string') { try { fr = JSON.parse(fr) } catch { /* */ } }
+        floorRpid = fr?.rpid != null ? String(fr.rpid) : ''
+        if (!floorRpid) return { ok: false, error: '建收纳楼失败（拿不到 rpid）', log: [] }
+        saveFloor(bvid, floorRpid, sc.title)
+        floorCreated = true
+        log(`收纳楼已建：${floorRpid}（${bvid}）`)
+      } catch (e) {
+        return { ok: false, error: `建收纳楼失败：${e?.message ?? e}`, log: [] }
+      }
+    } else {
+      log(`复用已有收纳楼：${floorRpid}（${bvid}）`)
     }
+
+    /**
+     * ② 循环批次处理 —— **直到清完或失败**。
+     *    ⚠️ 每批之间重新扫描一次（而不是拿最初那份清单重复跑）：
+     *      因为上一批已经把那些评论删了，重新扫才能知道"还剩几条"、
+     *      也才能发现这一批期间新冒出来的。
+     */
+    const logItems = []
+    let doneTotal = 0
+    let failedTotal = 0
+    let round = 0
+    let allClear = false
+
+    while (round < maxRounds) {
+      round++
+      const cur = round === 1 ? { ok: true, items: pending } : await scanComments(bvid)
+      if (!cur.ok) {
+        failedTotal++
+        logItems.push({ 结果: '❌ 失败', 错误: `第 ${round} 批扫描失败：${cur.error || '未知'}` })
+        break
+      }
+      const left = (cur.items || []).filter((it) => !it.whitelisted && !it.isSelf)
+      if (!left.length) { allClear = true; break }
+
+      const batch = left.slice(0, batchSize)
+      for (const it of batch) {
+        const r = await moveOne(it, bvid, floorRpid)
+        if (r.ok) doneTotal++
+        else failedTotal++
+        logItems.push({
+          批: round,
+          原rpid: it.rpid,
+          作者: it.uname,
+          at谁: it.at.map((a) => a.uname),
+          ...(r.ok
+            ? { 结果: '✅ 已搬运并删除', 新rpid: r.movedRpid, 文本: r.text }
+            : { 结果: '❌ 失败', 错误: r.error, 已搬rpid: r.movedRpid || null }),
+        })
+        // 每条之间留一点间隔（写操作太密会 -509）
+        await new Promise((s) => setTimeout(s, 1500))
+      }
+
+      // 这一批已处理完 —— 看还有没有剩的
+      const rest = left.length - batch.length
+      if (rest <= 0) { allClear = true; break }
+      // ⭐ 批次之间停一会（使用者要求可配，默认 30 秒）
+      if (batchGapSec > 0) {
+        log(`第 ${round} 批完成（还剩约 ${rest} 条），等 ${batchGapSec} 秒再继续`)
+        await new Promise((s) => setTimeout(s, batchGapSec * 1000))
+      }
+    }
+
     return {
       ok: true,
       bvid,
       scanned: sc.total,
-      todo: todo.length,
       floorRpid,
-      done: log.filter((x) => x.结果.startsWith('✅')).length,
-      failed: log.filter((x) => x.结果.startsWith('❌')).length,
-      log,
+      floorCreated,
+      rounds: round,
+      done: doneTotal,
+      failed: failedTotal,
+      /** ⭐ 是否**清干净了**（false 表示到了安全上限或中途失败，还有剩） */
+      allClear,
+      ...(allClear ? {} : { note: `还有没处理完的：到了上限（${maxRounds} 批）或中途失败。再跑一次会接着处理。` }),
+      log: logItems,
     }
   }
 
@@ -4332,12 +4455,12 @@ export function apply(ctx, config) {
     parameters: {
       bvid: { type: 'string', description: '目标视频 BV 号' },
       dryRun: { type: 'boolean', description: 'true（默认）= 只扫描出清单，不动手；要真执行传 false' },
-      limit: { type: 'number', description: '这一轮最多处理几条（默认 5）' },
+      batchSize: { type: 'number', description: '每批处理几条（默认取设置里的「每批条数」，30）' },
+      batchGapSec: { type: 'number', description: '批次之间停几秒（默认取设置里的，30）' },
     },
     async execute(args) {
       const bvid = String(args.bvid ?? '').trim()
       if (!bvid) return { ok: false, error: '缺少 bvid。' }
-      const limit = Math.max(1, Math.min(Number(args.limit) || 5, 50))
       const dryRun = args.dryRun !== false          // ⚠️ 默认就是干跑
 
       if (dryRun) {
@@ -4362,7 +4485,11 @@ export function apply(ctx, config) {
         }
       }
 
-      const r = await runCommentClean(bvid, limit)
+      // ⭐ 真执行：**循环批次直到清完或失败**（批次大小与间隔来自配置）
+      const r = await runCommentClean(bvid, {
+        batchSize: Number(args.batchSize) || Number(cfg.cleanBatchSize) || 30,
+        batchGapSec: Number(args.batchGapSec) ?? Number(cfg.cleanBatchGapSec) ?? 30,
+      })
       return r
     },
   })
@@ -6492,7 +6619,10 @@ export function apply(ctx, config) {
        *    但**必须自己兜住 rejection**（定时器里外冒的异常会杀宿主）。
        */
       Promise.resolve()
-        .then(() => runCommentClean(String(cfg.cleanBvid).trim(), Number(cfg.cleanPerRound) || 5))
+        .then(() => runCommentClean(String(cfg.cleanBvid).trim(), {
+          batchSize: Number(cfg.cleanBatchSize) || 30,
+          batchGapSec: Number(cfg.cleanBatchGapSec) ?? 30,
+        }))
         .then((r) => {
           if (r?.ok) {
             saveCfg({ cleanLastScanAt: Date.now() })
@@ -7533,8 +7663,9 @@ export function apply(ctx, config) {
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
         'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
-        // 评论区整理（2026-10-26）：目标视频 / 开关 / 间隔 / 每轮上限
-        'cleanBvid', 'cleanEnabled', 'cleanIntervalMin', 'cleanPerRound', 'cleanLastScanAt', 'cleanLastRunEndAt', 'cleanUiOpen',
+        // 评论区整理（2026-10-26）：目标视频 / 开关 / 间隔 / 批次 / 每轮上限
+        'cleanBvid', 'cleanEnabled', 'cleanIntervalMin', 'cleanLastScanAt', 'cleanLastRunEndAt', 'cleanUiOpen',
+        'cleanBatchSize', 'cleanBatchGapSec',
         // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
         'absoluteGuard',
         'personaEnabled', 'personaMaxChars',
@@ -7563,7 +7694,8 @@ export function apply(ctx, config) {
         const m = /(BV[0-9A-Za-z]{10})/.exec(String(patch.cleanBvid || ''))
         patch.cleanBvid = m ? m[1] : String(patch.cleanBvid || '').trim()
       }
-      if ('cleanPerRound' in patch) patch.cleanPerRound = Math.max(1, Math.min(Math.floor(Number(patch.cleanPerRound) || 5), 50))
+      if ('cleanBatchSize' in patch) patch.cleanBatchSize = Math.max(1, Math.min(Math.floor(Number(patch.cleanBatchSize) || 30), 100))
+      if ('cleanBatchGapSec' in patch) patch.cleanBatchGapSec = Math.max(0, Math.min(Math.floor(Number(patch.cleanBatchGapSec) ?? 30), 600))
       /**
        * ⭐ 间隔（分钟）：**`0` 是合法值**（表示不自动清理），不要用 `|| 5` 兜掉。
        *    上限给 1440（一天）—— 再大就没意义了，还会让"看起来没在跑"。
@@ -8069,10 +8201,14 @@ export function apply(ctx, config) {
         ok: true,
         bvid: String(cfg.cleanBvid || ''),
         enabled: cfg.cleanEnabled === true,
-        limit: Number(cfg.cleanPerRound) || 5,
+        intervalMin: Number(cfg.cleanIntervalMin) ?? 30,
+        batchSize: Number(cfg.cleanBatchSize) || 30,
+        batchGapSec: Number(cfg.cleanBatchGapSec) ?? 30,
         lastScanAt: Number(cfg.cleanLastScanAt) || 0,
+        lastRunEndAt: Number(cfg.cleanLastRunEndAt) || 0,
         whitelist: wl,
         selfMid: selfMid(),
+        floors: readFloors(),
         note: '插件自己的账号（selfMid）永远跳过，不在 whitelist 里、也删不掉。',
       })
     }
@@ -8132,8 +8268,16 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const bvid = String(body.bvid || cfg.cleanBvid || '').trim()
       if (!bvid) return sendJson(res, 400, { ok: false, error: '还没填目标视频的 BV 号。' })
-      const limit = Math.max(1, Math.min(Number(body.limit) || Number(cfg.cleanPerRound) || 5, 50))
-      const r = await runCommentClean(bvid, limit)
+      /**
+       * ⭐ **手动执行 = 循环批次直到清完或失败**（2026-10-26 按使用者要求改）。
+       *    使用者原话：「可以设置批次处理多少条（默认30条）和批次之间间隔多少（默认30秒）。
+       *    直到清完或者失败。」
+       * ⚠️ 批次参数可以随请求覆盖（面板上改了不用先存配置）。
+       */
+      const r = await runCommentClean(bvid, {
+        batchSize: Number(body.batchSize) || Number(cfg.cleanBatchSize) || 30,
+        batchGapSec: Number(body.batchGapSec) ?? Number(cfg.cleanBatchGapSec) ?? 30,
+      })
       if (r.ok) saveCfg({ cleanLastScanAt: Date.now() })
       return sendJson(res, 200, r)
     }
