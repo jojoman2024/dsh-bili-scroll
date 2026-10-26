@@ -574,6 +574,33 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
    ⚠️ 背景用**半透明黑**，不用模糊：省一层合成，也避开"祖先有 backdrop-filter 时
       fixed 会退化成相对该祖先定位"那个坑（库内记过）。
    ⚠️ 若在真机上发现它被限制在某个祖先里（就是上面那个坑），改成在 JS 里量面板 rect。 */
+/* ════════ 扫描结果浮窗（2026-10-26 加）════════
+ *
+ * 使用者原话：「扫描这个给个可以滚动的浮窗吧，初始加载30条，滑到底加载更多？
+ *               不然一下子几百条，把面板撑爆了。」
+ *
+ * 🔴 为什么必须 fixed：600 条评论内联摊开会把整个设置页撑到几万像素，
+ *    上下找别的设置都没法用。fixed 之后它自己滚、面板高度不受影响。
+ * ⚠️ fixed 的定位坑见上面 [data-bd-confirm] 那段注释（祖先有 transform 时会失效）
+ *    —— 这里跟它用同一套定位，真机若发现被限制住，一起改。
+ */
+[data-bd-sheet]{position:fixed;inset:0;z-index:55;display:flex;
+  align-items:center;justify-content:center;padding:16px;
+  background:rgba(0,0,0,.32);}
+[data-bd-sheetbox]{width:min(92vw,520px);max-height:82vh;
+  border-radius:var(--dsw-radius-md,12px);
+  background:var(--dsw-alias-bg-base,#fff);padding:14px 14px 10px;
+  box-shadow:0 8px 28px rgba(0,0,0,.22);
+  display:flex;flex-direction:column;gap:8px;overflow:hidden;}
+[data-bd-sheethead]{display:flex;align-items:center;gap:8px;flex:none;}
+[data-bd-sheethead]>div:first-child{flex:1 1 0%;min-width:0;}
+[data-bd-sheetnote]{flex:none;}
+/* ⭐ 列表自己滚 —— 这是"不撑爆面板"的关键 */
+[data-bd-cleanlist]{flex:1 1 auto;min-height:0;overflow-y:auto;
+  display:flex;flex-direction:column;gap:8px;
+  padding:2px 2px 4px;overscroll-behavior:contain;}
+[data-bd-more]{flex:none;text-align:center;padding:6px 0 0;}
+
 [data-bd-confirm]{position:fixed;inset:0;z-index:60;display:flex;
   align-items:center;justify-content:center;padding:16px;
   background:rgba(0,0,0,.38);}
@@ -622,12 +649,14 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
  * ⚠️ 这些是**新组件**，几何尽量复用已有规则（行/按钮），只补"列表"这一块。
  */
 [data-bd-acts]{display:flex;gap:8px;flex:none;}
-/* 扫描结果 / 执行结果的容器 */
+/* 执行结果 / 失败清单的容器（**内联**，不是浮窗） */
 [data-bd-cleanbox]{display:flex;flex-direction:column;gap:10px;
-  padding:12px 0 4px;border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
-/* 清单本体：限高 + 滚动，避免几十条把面板撑爆 */
-[data-bd-cleanlist]{display:flex;flex-direction:column;gap:8px;
-  max-height:360px;overflow-y:auto;}
+  padding:12px 0 4px;border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);
+  /* ⚠️ 执行日志可能几千条（一次跑 600 条）⇒ 必须限高自己滚，
+     否则面板照样被撑爆 —— 这是和扫描结果同一个病（2026-10-26）。 */
+  max-height:420px;overflow-y:auto;}
+/* 清单本体：滚动由浮窗那条规则给（[data-bd-sheet] 里那段），
+   ⚠️ 这里**不要再写 max-height** —— 会跟浮窗的 flex 布局打架（2026-10-26）。 */
 [data-bd-cleanitem]{display:flex;flex-direction:column;gap:4px;
   padding:10px 12px;border-radius:var(--dsw-radius-sm,8px);
   border:1px solid var(--dsw-alias-border-l3,#0000001f);
@@ -1903,6 +1932,16 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       const [cleanResult, setCleanResult] = React.useState(null)   // 扫描结果
       const [cleanRun, setCleanRun] = React.useState(null)         // 执行结果
       const [cleanConfirm, setCleanConfirm] = React.useState(false) // 执行前确认浮层
+      /**
+       * ⭐ **扫描结果浮窗**（2026-10-26 加，使用者要求：
+       *    「扫描这个给个可以滚动的浮窗吧，初始加载30条，滑到底加载更多？
+       *     不然一下子几百条，把面板撑爆了。」）
+       *
+       * 为什么不用内联列表：600 条评论直接摊在面板里，整个设置页被撑到几万像素，
+       * 上下滑动找别的设置都没法用了。
+       * ⚠️ 初始 30 条、滑到底再加 30 条（`cleanShown` 是"现在显示到第几条"）。
+       */
+      const [cleanShown, setCleanShown] = React.useState(30)
 
       /* ⭐⭐ **所有浮现式提示的统一入口 —— 一律会自己消失**（2026-10-18 修）。
        *
@@ -4452,47 +4491,79 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                 }, '执行'),
               )),
 
-            // ── 扫描结果 ──
+            /* ── 扫描结果：**浮窗 + 滚动 + 分批加载**（2026-10-26 改）──
+             * 使用者原话：「给个可以滚动的浮窗吧，初始加载30条，滑到底加载更多？
+             *   不然一下子几百条，把面板撑爆了。」
+             *
+             * 🔴 为什么必须浮窗：600 条评论内联摊开会把整个设置页撑到几万像素，
+             *    别的设置都找不到了。浮窗固定在视口里、自己滚。
+             * ⭐ 分批：初始 30 条，滚到底再加 30 条（见下面的 onScroll）。 */
             cleanResult
               ? (cleanResult.ok === false
                 ? h('div', { 'data-bd-note': '', 'data-bd-warn': '' }, '出错：' + (cleanResult.error || '未知'))
-                : h('div', { 'data-bd-cleanbox': '' },
-                  h('div', { 'data-bd-note': '' },
-                    `${cleanResult.title || ''} —— 共 ${cleanResult.total} 条一级评论，`
-                    + `带 @ 的 ${cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
-                    + `跳过 ${cleanResult.skipped} 条（白名单 / 插件自己）。`),
-                  h('div', { 'data-bd-cleanlist': '' },
-                    (cleanResult.items || []).slice(0, 60).map((it) => h('div', {
-                      'data-bd-cleanitem': '',
-                      'data-bd-dim': (it.whitelisted || it.isSelf) ? '' : undefined,
-                    },
-                      h('div', { 'data-bd-cleanhead': '' },
-                        h('span', { 'data-bd-cleanu': '' }, it.uname),
-                        h('span', { 'data-bd-cleantag': '' }, it.isSelf ? '插件自己（永远跳过）'
-                          : it.whitelisted ? '白名单（跳过）' : '待处理'),
-                        h('span', { 'data-bd-cleantag': '' }, `mid ${it.mid}`)),
-                      h('div', { 'data-bd-cleanmsg': '' }, it.message),
-                      h('div', { 'data-bd-cleanwill': '' }, '→ 将发布：' + it.willPost),
-                      // ⭐ 「加入白名单」按 **mid**（一个账号一次永久跳过，不管他发几条）
-                      (it.whitelisted || it.isSelf) ? null : h('button', {
+                : h('div', { 'data-bd-sheet': '' },
+                  h('div', { 'data-bd-sheetbox': '' },
+                    h('div', { 'data-bd-sheethead': '' },
+                      h('div', { 'data-bd-label': '' }, '扫描结果'),
+                      h('button', {
                         'data-bd-btn': '',
-                        'data-bd-mini': '',
-                        onClick: async () => {
-                          const r = await jpost('/clean/whitelist', {
-                            action: 'add', mids: it.mid, names: it.uname,
-                          })
-                          if (r?.ok) {
-                            // 就地把它标成白名单，不用重新扫描
-                            setCleanResult((prev) => prev ? {
-                              ...prev,
-                              items: prev.items.map((x) => x.mid === it.mid ? { ...x, whitelisted: true } : x),
-                              pending: Math.max(0, (prev.pending || 1) - 1),
-                              skipped: (prev.skipped || 0) + 1,
-                            } : prev)
-                          }
-                        },
-                      }, '加入白名单'))))
-                ))
+                        'data-bd-icon': '',
+                        title: '关闭',
+                        onClick: () => setCleanResult(null),
+                      }, '✕')),
+                    h('div', { 'data-bd-note': '', 'data-bd-sheetnote': '' },
+                      `${cleanResult.title || ''} —— 共 ${cleanResult.total} 条一级评论，`
+                      + `带 @ 的 ${cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
+                      + `跳过 ${cleanResult.skipped} 条（白名单 / 插件自己）。`
+                      + `现在显示 ${Math.min(cleanShown, (cleanResult.items || []).length)} / ${(cleanResult.items || []).length} 条。`),
+                    h('div', {
+                      'data-bd-cleanlist': '',
+                      // ⭐ 滑到底自动加 30 条 —— 不用按钮、不用回顶部
+                      onScroll: (e) => {
+                        const el = e.currentTarget
+                        if (!el) return
+                        const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 120
+                        if (nearBottom) {
+                          const total = (cleanResult.items || []).length
+                          setCleanShown((n) => (n >= total ? n : Math.min(n + 30, total)))
+                        }
+                      },
+                    },
+                      (cleanResult.items || []).slice(0, cleanShown).map((it) => h('div', {
+                        'data-bd-cleanitem': '',
+                        'data-bd-dim': (it.whitelisted || it.isSelf) ? '' : undefined,
+                      },
+                        h('div', { 'data-bd-cleanhead': '' },
+                          h('span', { 'data-bd-cleanu': '' }, it.uname),
+                          h('span', { 'data-bd-cleantag': '' }, it.isSelf ? '插件自己（永远跳过）'
+                            : it.whitelisted ? '白名单（跳过）' : '待处理'),
+                          h('span', { 'data-bd-cleantag': '' }, `mid ${it.mid}`)),
+                        h('div', { 'data-bd-cleanmsg': '' }, it.message),
+                        h('div', { 'data-bd-cleanwill': '' }, '→ 将发布：' + it.willPost),
+                        // ⭐ 「加入白名单」按 **mid**（一个账号一次永久跳过，不管他发几条）
+                        (it.whitelisted || it.isSelf) ? null : h('button', {
+                          'data-bd-btn': '',
+                          'data-bd-mini': '',
+                          onClick: async () => {
+                            const r = await jpost('/clean/whitelist', {
+                              action: 'add', mids: it.mid, names: it.uname,
+                            })
+                            if (r?.ok) {
+                              // 就地把它标成白名单，不用重新扫描
+                              setCleanResult((prev) => prev ? {
+                                ...prev,
+                                items: prev.items.map((x) => x.mid === it.mid ? { ...x, whitelisted: true } : x),
+                                pending: Math.max(0, (prev.pending || 1) - 1),
+                                skipped: (prev.skipped || 0) + 1,
+                              } : prev)
+                            }
+                          },
+                        }, '加入白名单'))),
+                      // 还有更多时给一句提示（滑到底会自动加载）
+                      (cleanShown < (cleanResult.items || []).length)
+                        ? h('div', { 'data-bd-note': '', 'data-bd-more': '' },
+                          `继续往下滑，还有 ${(cleanResult.items || []).length - cleanShown} 条`)
+                        : null))))
               : null,
 
             // ── 执行结果 ──
