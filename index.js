@@ -4351,6 +4351,7 @@ export function apply(ctx, config) {
     let newestCtime = 0
     let hitOld = false
     let cursorNext = 0
+    let stall = 0          // 游标连续没前进的次数（≥2 才停，给容错）
     let lastErr = ''
     // 增量最多翻 3 页（新的都在前面）；全量上限 40 页（634 条约 19 页够）
     const maxPages = incremental ? 3 : 40
@@ -4385,14 +4386,50 @@ export function apply(ctx, config) {
       }
       if (hitOld) break
       if (cur.is_end === true) break
-      // ⚠️ 游标不前进（还是同一个值）⇒ 再翻就是死循环，停
+      /**
+       * ⚠️ **游标不前进才停**（2026-10-26）。
+       *
+       * 这里原来写的是 `Number(nxt) === Number(cursorNext)` 就停 ——
+       * 但 `cursor.next` **不一定是数字**（可能是字符串），`Number("CAEiAggC")` 是 `NaN`，
+       * `NaN === NaN` 为 false ⇒ 不会误停；但如果某页**真的**返回同一个值，
+       * 就说明卡住了。现在改成：**同值连出现 2 次才停**（给一点容错，
+       * 避免"B站 偶尔回同一个游标"导致提前结束）。
+       *
+       * 🔴 更要紧的是：**别因为"拿到 137 条就停"**。
+       *    使用者报过一次「实际 757 条却只扫到 137」——
+       *    ⇒ 现在**每页打日志**，面板/日志里能看出停在哪一页、为什么停。
+       */
       const nxt = cur.next
-      if (nxt === undefined || nxt === null || Number(nxt) === Number(cursorNext)) break
+      if (nxt === undefined || nxt === null) {
+        log(`评论翻页第 ${page} 页：没有 cursor.next，停（已拿 ${all.length} 条）`)
+        break
+      }
+      const nxtKey = String(nxt)
+      if (nxtKey === String(cursorNext)) {
+        stall++
+        if (stall >= 2) {
+          log(`评论翻页：游标连续 ${stall} 次没前进（next=${nxtKey}），停（已拿 ${all.length} 条）`)
+          break
+        }
+      } else {
+        stall = 0
+      }
       cursorNext = nxt
-      // 节奏：知识库实测每页 1.3~2s，每 5 页歇 30s
-      await new Promise((r) => setTimeout(r, 900))
-      if (page % 5 === 0) await new Promise((r) => setTimeout(r, 3000))
+      /**
+       * 🔴 **节奏按知识库实测值**（934209ac）：
+       *    「每页之间 1.3~2 s、每 5~7 页歇 30 s，可稳定翻完约 19 页」。
+       *
+       * ⚠️ 我原来写 900ms + 每 5 页歇 3s —— **比实测值激进一倍**，
+       *    而且配合"num=500 硬翻 25 页"把账号送进了 -412。
+       *    （使用者 2026-10-25 那轮 bilij_comments 调了 384 次、num 最大只到 100，全程没被拦。）
+       */
+      await new Promise((r) => setTimeout(r, 1500))
+      if (page % 5 === 0) {
+        log(`评论翻页：已翻 ${page} 页（${all.length} 条），歇 30 秒继续`)
+        await new Promise((r) => setTimeout(r, 30000))
+      }
     }
+    log(`评论翻页结束：共 ${scannedPages} 页 / ${all.length} 条（is_end 或游标停）`)
 
     /**
      * ⚠️ **一条都没拿到**时要分辨原因（别笼统说"没评论"）：
