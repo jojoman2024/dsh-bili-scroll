@@ -4226,6 +4226,22 @@ export function apply(ctx, config) {
     writeJson(floorFile, all)
   }
   /**
+   * ⭐ **忘掉这栋楼**（2026-10-26 加）。
+   *
+   * 用途：确认收纳楼已经被删了（用户手动删 / 被举报删）⇒ 账本里的 rpid 是死的，
+   * 留着只会让下一轮继续拿它去发、继续撞 `12022`。
+   * ⇒ 摘掉它，下一轮就会重新建一栋。
+   *
+   * ⚠️ **只删这一条**，别的视频的楼不动。
+   */
+  const clearFloor = (bvid) => {
+    const k = String(bvid || '').trim()
+    const all = readFloors()
+    if (!all[k]) return
+    delete all[k]
+    writeJson(floorFile, all)
+  }
+  /**
    * ⭐ **失败账本**（2026-10-26 加，使用者要求
    *    「每一步都要有回执，失败重试，失败记录并跳过」）。
    *
@@ -4916,6 +4932,20 @@ export function apply(ctx, config) {
         clog('父评论可能还没进索引，等 3 秒重试…', 'info')
         r1 = await withRetry(sendOnce, (e) => codeRetryable(e?.biliCode), [3000, 8000])
       }
+      /**
+       * 🔴 **`12022`（父评论已被删除）⇒ 这栋楼不能用了**（2026-10-26）。
+       *
+       * 使用者先手动删了收纳楼，然后跑整理 ⇒ 三条全撞 `12022`。
+       * 光靠"开头校验一次"不够：**校验之后、搬运期间楼被删**也是可能的。
+       *
+       * ⇒ 这里把 `12022` 标出来，交给上层 `runCommentClean` **重建楼并重试整轮**
+       *    （见那里的 `floorGone` 分支）。`12022` 本身仍然**不可重试**
+       *    —— 同一栋楼再试多少次都是 12022。
+       */
+      if (!r1.ok && Number(r1.code) === 12022) {
+        clog('收纳楼已被删除 —— 这一轮停下来，重建楼后重跑', 'err')
+        return { ok: false, step: 'move', floorGone: true, error: '收纳楼已被删除（12022）' }
+      }
       if (!r1.ok) {
         markFail(bvid, item, 'move', null, r1.error, text)
         return { ok: false, step: 'move', error: `搬进收纳楼失败（试了 ${r1.tries} 次）：${r1.error}` }
@@ -5041,6 +5071,45 @@ export function apply(ctx, config) {
      */
     let floorRpid = getFloor(bvid)
     let floorCreated = false
+
+    /**
+     * 🔴🔴 **复用之前必须校验这栋楼还在不在**（2026-10-26 真机踩出来的）。
+     *
+     * ── 现象 ──────────────────────────────────────────────────
+     *    使用者先**手动把收纳楼删了**，然后跑整理：
+     *      15:08:32  复用已有收纳楼：rpid 321977316352   ← 账本里有，但楼已经没了
+     *      15:08:36  ✗ code 12022「已经被删除了」×3
+     *      15:08:45  整理结束：0 成功 / 3 失败
+     *    ⇒ 三条全废，而且**账本会一直记着这个死 rpid**，下一轮继续全废。
+     *
+     * ── 为什么原来没发现 ──────────────────────────────────────
+     *    `comment-floors.json` 只是"我们建过一栋楼"的记忆，
+     *    **它不代表那栋楼现在还在** —— 用户可能在 B站 页面上手动删掉、
+     *    也可能被对方举报删掉。
+     *
+     * ── 做法 ──────────────────────────────────────────────────
+     *    复用前先**翻第 1 页原始评论**看这个 rpid 在不在；
+     *    不在 ⇒ **当作没有楼**，重新建一栋（并把账本覆盖成新 rpid）。
+     *    ⚠️ 校验失败（网络/接口错）**不当作"楼没了"** —— 那会白白多建一栋。
+     *       只有"确实查到了、但里面没有它"才重建。
+     */
+    const floorStillExists = async (rpid) => {
+      if (!rpid) return false
+      try {
+        const r = await runCommentsPy(bvid, 1, 'time')
+        if (!r.ok) return true        // ⚠️ 查不到就**别乱判死**，宁可沿用
+        const raw = Array.isArray(r.data?.comments) ? r.data.comments : []
+        return raw.some((x) => String(x.rpid) === String(rpid))
+      } catch {
+        return true                   // 同上：异常时保守处理，不重建
+      }
+    }
+
+    if (floorRpid && !(await floorStillExists(floorRpid))) {
+      clog(`原来那栋收纳楼（rpid ${floorRpid}）已经不在了（可能被手动删了），重新建一栋`, 'warn')
+      floorRpid = ''
+    }
+
     if (!floorRpid) {
       const floorText = '【收纳楼】这里收纳本视频下机器人代发的留言。'
         + '原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。'
@@ -5156,6 +5225,8 @@ export function apply(ctx, config) {
     let allClear = false
     let pageItems = (pending || [])   // 第 1 页（已经拿过了，别重复请求）
     let rawTotal = sc.total || pageItems.length
+    /** ⭐ 本轮撞到"收纳楼已被删除"了吗（撞到就要重建 + 重跑一轮） */
+    let floorGoneHit = false
 
     while (round < maxRounds) {
       // ① 本页处理完了 ⇒ 取下一页
@@ -5181,6 +5252,17 @@ export function apply(ctx, config) {
       clog(`第 ${round} 批开始：${batch.length} 条（本页第 ${pageNo} 页，累计成功 ${doneTotal} / 失败 ${failedTotal}）`, 'step')
       for (const it of batch) {
         const r = await moveOne(it, bvid, floorRpid)
+        /**
+         * 🔴 **楼被删了 ⇒ 整轮立刻停**（2026-10-26）。
+         *    继续跑只会让剩下的每条都撞一次 `12022`、还全记进失败账本。
+         *    ⇒ 停下来、把楼从账本里摘掉，交给**外层重跑一次**（会重建楼）。
+         */
+        if (r.floorGone) {
+          clog('收纳楼已经不在了 —— 清掉账本里的记录，本轮中止', 'err')
+          clearFloor(bvid)
+          floorGoneHit = true
+          break
+        }
         if (r.ok) doneTotal++
         else failedTotal++
         /**
@@ -5218,10 +5300,38 @@ export function apply(ctx, config) {
       }
       // 本页剩下的留到下一轮（取下一页之前先处理完这一页）
       pageItems = pageItems.slice(batch.length)
+      // 🔴 楼被删了 ⇒ 别再往下跑（剩下的每条都会撞 12022、还全记进失败账本）
+      if (floorGoneHit) break
       // ⭐ 批次之间停一会（使用者要求可配，默认 30 秒）
       if (pageItems.length && batchGapSec > 0) {
         clog(`第 ${round} 批完成，本页还剩 ${pageItems.length} 条，等 ${batchGapSec} 秒`, 'info')
         await new Promise((s) => setTimeout(s, batchGapSec * 1000))
+      }
+    }
+
+    /**
+     * 🔴🔴 **楼被删了 ⇒ 重建 + 重跑一轮**（2026-10-26）。
+     *
+     * 使用者的现场：他先手动把收纳楼删了，再跑整理 ⇒
+     *   15:08:32 复用 rpid 321977316352（其实已删）
+     *   15:08:36 三条全 `12022`
+     * ⇒ 光在开头校验一次不够（校验完到真正搬之间也可能被删）。
+     *
+     * 这里：撞到 `12022` ⇒ 楼已从账本摘掉 ⇒ **递归跑一次**（会走"没有楼 ⇒ 建新楼"那条路）。
+     * ⚠️ **只重跑一次**（`retriedAfterFloorGone`），避免"建了又被删"无限递归。
+     * ⚠️ 重跑的那一轮是**全新的**（新的 doneTotal/failedTotal），
+     *    所以这里把它的结果合并回来。
+     */
+    if (floorGoneHit && !opt.retriedAfterFloorGone) {
+      clog('重建收纳楼后重跑这一轮…', 'warn')
+      const again = await runCommentClean(bvid, { ...opt, retriedAfterFloorGone: true })
+      return {
+        ...again,
+        /** ⭐ 如实告诉调用方"中间重建过一次" */
+        floorRebuilt: true,
+        done: doneTotal + (Number(again.done) || 0),
+        failed: (Number(again.failed) || 0),
+        rounds: round + (Number(again.rounds) || 0),
       }
     }
 
