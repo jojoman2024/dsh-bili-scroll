@@ -4304,146 +4304,152 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 扫描：拉一级评论，按「带 @」筛出候选。
+   * ⭐⭐ **用 `bilibili_api`（Python）取全部一级评论**（2026-10-26 定案）。
    *
-   * ⭐ **增量模式（2026-10-26 加）**：`x/v2/reply?sort=0` 是**按时间倒序**，
-   *   新的在前面 ⇒ 只翻前几页、遇到比 `sinceTime` 更早的就停。
-   *   实测：599 条的评论区全量要翻 30 页 ≈ 24 秒；增量只要 1~3 页。
+   * ── 为什么终于落到这条路上（三次错，留个完整的教训）──────────────
+   *   ① 自己拼 `/x/v2/reply?sort=0&pn=N` → **-412**。我却三次归因"风控"。
+   *   ② 改用 MCP 的 `bili_comments`（`num: 500`）→ 它内部 `while` 硬翻 25+ 页、
+   *      异常被 `except: break` 吞掉 ⇒ 面板显示"取到 0 条"。
+   *   ③ 再自己拼 `/x/v2/reply/main` + 游标 → 小视频能通、大视频（757 条）只拿到 137 条。
    *
-   * ⚠️ **代价**：如果老评论后来被"顶上来"（有新回复），增量模式可能漏。
-   *   使用者确认接受这个代价（他要每 5 分钟跑一次，全量太重）。
+   * 🔴 **真正的答案：直接用 `bilibili_api`**（MCP 背后就是它，使用者跑过 384 次没被拦）。
+   *    实测对比（同一个视频 BV1hXnQ6nEde）：
+   *      我手写的游标翻页     → 137 条
+   *      bilibili_api + TIME  → **38 页 / 748 条**（stat.reply=765）
+   *
+   * ⭐ 关键差别不是"接口"而是**`order=TIME` + 它自己的翻页/签名/cookie 处理**。
+   *    `bilibili_api.comment.get_comments(page_index=N, order=TIME)` 会一直翻到没有为止。
+   *
+   * ⚠️ **为什么不改 vendor 的 mcp_server.py**：那份会被重铺（库 `cbba9982`）。
+   *    所以脚本放在**插件自己的** `python/fetch_comments.py`，运行前铺到家目录。
+   */
+  const commentsScriptSrc = join(pluginDir, 'python', 'fetch_comments.py')
+  const commentsScriptDst = join(stateDir, 'fetch_comments.py')
+  /**
+   * ⚠️ **Python 取评论的超时**：给足 10 分钟。
+   *    实测 765 条总回复要翻 38 页，脚本里每页 sleep 1.5s、每 5 页再歇 20s
+   *    ⇒ 光等待就 ~90 秒，加上请求本身约 2~3 分钟。
+   *    给小了会把正常的大视频判成失败。
+   */
+  const COMMENTS_PY_TIMEOUT_MS = 10 * 60 * 1000
+
+  /**
+   * 把脚本铺到家目录（内容变了才写，免得每次扫都写盘）。
+   * ⚠️ 失败不抛 —— 交给调用方判断（可能是只读环境）。
+   */
+  const ensureCommentsScript = () => {
+    try {
+      const want = readFileSync(commentsScriptSrc, 'utf8')
+      let cur = ''
+      try { cur = readFileSync(commentsScriptDst, 'utf8') } catch { /* 没有就写 */ }
+      if (cur !== want) writeFileSync(commentsScriptDst, want, 'utf8')
+      return commentsScriptDst
+    } catch (e) {
+      log(`铺 fetch_comments.py 失败：${e?.message ?? e}`)
+      return null
+    }
+  }
+
+  /**
+   * spawn 一次 Python 脚本，把 stdout 当 JSON 读回来。
+   * @returns {Promise<{ok:boolean, data?:object, error?:string}>}
+   */
+  const runCommentsPy = (bvid, want) => new Promise((resolve) => {
+    const script = ensureCommentsScript()
+    if (!script) return resolve({ ok: false, error: '铺不了 fetch_comments.py（家目录写不进去？）' })
+
+    const py = String(cfg.pythonPath || 'python')
+    let child
+    try {
+      child = spawn(py, [script, String(bvid), String(want)], {
+        cwd: stateDir,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: pyEnv(py, null),
+      })
+    } catch (e) {
+      return resolve({ ok: false, error: `起不来 Python：${e?.message ?? e}` })
+    }
+
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => {
+      try { child.kill() } catch { /* 已经死了 */ }
+      resolve({ ok: false, error: `Python 取评论超时（${Math.round(COMMENTS_PY_TIMEOUT_MS / 1000)}s），可能是页数太多` })
+    }, COMMENTS_PY_TIMEOUT_MS)
+    timer.unref?.()
+
+    child.stdout?.on('data', (b) => { out += String(b) })
+    child.stderr?.on('data', (b) => { err += String(b) })
+    child.on('error', (e) => {
+      clearTimeout(timer)
+      resolve({ ok: false, error: `Python 起不来：${e?.message ?? e}` })
+    })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      const text = out.trim()
+      if (!text) {
+        return resolve({ ok: false, error: `Python 没输出（exit ${code}）${err ? '：' + err.slice(-300) : ''}` })
+      }
+      let j
+      try { j = JSON.parse(text) } catch {
+        return resolve({ ok: false, error: `Python 输出不是 JSON（exit ${code}）：${text.slice(0, 300)}` })
+      }
+      if (j?.ok === false) return resolve({ ok: false, error: String(j.error || 'Python 侧报错') })
+      resolve({ ok: true, data: j })
+    })
+  })
+
+  /**
+   * 扫描：拉一级评论，按「带 @」∪「命中关键词」筛出候选。
+   *
+   * ⭐ 数据源：`python/fetch_comments.py`（内部用 `bilibili_api`，`order=TIME` 翻到底）。
+   * ⚠️ 字段是 B站 原样（`mid` / `content.members` 都有），所以白名单能按 mid 精确判。
    *
    * @param {string} bvid
-   * @param {number} [sinceTime] 只关心 `ctime > sinceTime` 的；不传 = 全量
-   * @returns {Promise<{ok:boolean, total:number, items:Array, scannedPages:number, newestCtime:number, error?:string}>}
+   * @param {number} [sinceTime] 只关心 `ctime > sinceTime` 的（增量模式先少拿些）
    */
   const scanComments = async (bvid, sinceTime = 0) => {
-    const meta = await bvidMeta(bvid, credCookie())
-    if (!meta?.aid) return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `拿不到 ${bvid} 的视频信息（视频被删了 / 登录过期）。` }
-
-    /**
-     * 🔴🔴 **用 `/x/v2/reply/main` + 游标翻页**（2026-10-26 重写，依据知识库 934209ac）。
-     *
-     * ── 我错在哪（留住教训，别改回去）──────────────────────────
-     *   ① 我原来自己拼 `GET /x/v2/reply?type=1&oid=…&sort=0&pn=N`，被 **-412** 拒。
-     *      而 `/x/v2/reply/main` 同一秒、同一 IP、同一 Cookie 是**通的**
-     *      ⇒ 根本不是风控，是**我用错了接口**。我却连着三次归因风控。
-     *   ② 之后想"那就走 MCP 的 bili_comments"，但它是
-     *      `while len < num` 硬顶 + `except: break` 吞异常 ——
-     *      给大 `num` 会连续翻二三十页，中途一失败就**连第一页都拿不到**
-     *      （真机报"取到 0 条"）。而且它对外只暴露 6 个字段（无 mid、无 members）。
-     *
-     * ── 正确做法（知识库 934209ac 实测过：634 条总回复 → 374 条一级评论）──
-     *   · 接口：`GET /x/v2/reply/main?type=1&oid=<aid>&mode=2&next=<cursor>&ps=20`
-     *   · `mode=2` = **按时间**，能翻到底；`mode=3` = 热门，约 40 条就 is_end（拿不全）
-     *   · `next` 首次为 0，之后用回包的 **`data.cursor.next`（游标整数，不是页码）**
-     *   · `cursor.is_end === true` 就停
-     *   · `mode=2` 首页可能只回 3~18 条（混有置顶），**别据此断定接口坏了**
-     *   · 节奏：每页 1.3~2s、每 5~7 页歇 30s（防风控）
-     *
-     * ⭐ 好处：字段是 B站 原样（有 `member.mid`、有 `content.members`），
-     *    白名单能按 mid 精确判，"带 @"也能用 members + 正文双保险。
-     */
-    const cookie = credCookie()
     const incremental = Number(sinceTime) > 0
-    const all = []
-    let scannedPages = 0
-    let newestCtime = 0
-    let hitOld = false
-    let cursorNext = 0
-    let stall = 0          // 游标连续没前进的次数（≥2 才停，给容错）
-    let lastErr = ''
-    // 增量最多翻 3 页（新的都在前面）；全量上限 40 页（634 条约 19 页够）
-    const maxPages = incremental ? 3 : 40
+    // 增量模式少拿（新的在前面）；全量给足（实测 765 条总回复 → 748 条一级）
+    const want = incremental ? 200 : 1000
 
-    for (let page = 1; page <= maxPages; page++) {
-      let j
-      try {
-        j = await biliGet(
-          `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${meta.aid}&mode=2&next=${cursorNext}&ps=20`,
-          cookie,
-        )
-      } catch (e) {
-        lastErr = String(e?.message ?? e)
-        // 已经拿到部分就照用（增量模式下这是正常的）
-        if (all.length) break
-        return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `取评论失败（第 ${page} 页）：${lastErr}` }
-      }
-      if (Number(j?.code) !== 0) {
-        lastErr = `code=${j?.code} ${j?.message ?? ''}`.trim()
-        if (all.length) break
-        return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `取评论失败（第 ${page} 页）：${lastErr}` }
-      }
-      const reps = Array.isArray(j?.data?.replies) ? j.data.replies : []
-      const cur = j?.data?.cursor || {}
-      scannedPages = page
-      for (const x of reps) {
-        const ct = Number(x.ctime) || 0
-        if (ct > newestCtime) newestCtime = ct
-        // 增量：比"上次扫到的时间"还早 ⇒ 后面的更早，可以停
-        if (incremental && ct <= Number(sinceTime)) { hitOld = true; continue }
-        all.push(x)
-      }
-      if (hitOld) break
-      if (cur.is_end === true) break
-      /**
-       * ⚠️ **游标不前进才停**（2026-10-26）。
-       *
-       * 这里原来写的是 `Number(nxt) === Number(cursorNext)` 就停 ——
-       * 但 `cursor.next` **不一定是数字**（可能是字符串），`Number("CAEiAggC")` 是 `NaN`，
-       * `NaN === NaN` 为 false ⇒ 不会误停；但如果某页**真的**返回同一个值，
-       * 就说明卡住了。现在改成：**同值连出现 2 次才停**（给一点容错，
-       * 避免"B站 偶尔回同一个游标"导致提前结束）。
-       *
-       * 🔴 更要紧的是：**别因为"拿到 137 条就停"**。
-       *    使用者报过一次「实际 757 条却只扫到 137」——
-       *    ⇒ 现在**每页打日志**，面板/日志里能看出停在哪一页、为什么停。
-       */
-      const nxt = cur.next
-      if (nxt === undefined || nxt === null) {
-        log(`评论翻页第 ${page} 页：没有 cursor.next，停（已拿 ${all.length} 条）`)
-        break
-      }
-      const nxtKey = String(nxt)
-      if (nxtKey === String(cursorNext)) {
-        stall++
-        if (stall >= 2) {
-          log(`评论翻页：游标连续 ${stall} 次没前进（next=${nxtKey}），停（已拿 ${all.length} 条）`)
-          break
-        }
-      } else {
-        stall = 0
-      }
-      cursorNext = nxt
-      /**
-       * 🔴 **节奏按知识库实测值**（934209ac）：
-       *    「每页之间 1.3~2 s、每 5~7 页歇 30 s，可稳定翻完约 19 页」。
-       *
-       * ⚠️ 我原来写 900ms + 每 5 页歇 3s —— **比实测值激进一倍**，
-       *    而且配合"num=500 硬翻 25 页"把账号送进了 -412。
-       *    （使用者 2026-10-25 那轮 bilij_comments 调了 384 次、num 最大只到 100，全程没被拦。）
-       */
-      await new Promise((r) => setTimeout(r, 1500))
-      if (page % 5 === 0) {
-        log(`评论翻页：已翻 ${page} 页（${all.length} 条），歇 30 秒继续`)
-        await new Promise((r) => setTimeout(r, 30000))
-      }
+    const r = await runCommentsPy(bvid, want)
+    if (!r.ok) {
+      return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `取评论失败：${r.error}` }
     }
-    log(`评论翻页结束：共 ${scannedPages} 页 / ${all.length} 条（is_end 或游标停）`)
+    const rec = r.data || {}
+    const list = Array.isArray(rec.comments) ? rec.comments : []
+    const statReply = Number(rec.statReply) || 0
 
     /**
-     * ⚠️ **一条都没拿到**时要分辨原因（别笼统说"没评论"）：
-     *    · 接口真返回空（视频确实没评论）
-     *    · 被拦/报错（`lastErr` 有值）
-     * 两种情况给完全不同的提示。
+     * ⚠️ 一条都没拿到时要分清原因（别笼统说"没评论"）。
+     * `statReply` 是 B站 的评论总数（**含楼中楼**）——
+     * 它 > 0 但我们拿到 0 条 ⇒ 是接口出问题了，不是视频没人评论。
      */
-    if (!all.length && lastErr) {
-      return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `取评论失败：${lastErr}` }
+    if (!list.length) {
+      if (statReply > 0) {
+        return {
+          ok: false, total: 0, items: [], scannedPages: rec.pages || 0, newestCtime: 0,
+          error: `B站 显示这个视频有 ${statReply} 条评论，但一条都没取回来`
+            + `${rec.lastErr ? '（' + rec.lastErr + '）' : ''}。可能是接口临时抽风，再点一次「扫描」试试。`,
+        }
+      }
+      // statReply=0 ⇒ 真的没评论
+      return { ok: true, total: 0, items: [], scannedPages: 0, newestCtime: 0, kwActive: false, hasAtCount: 0, kwExtra: 0, note: '这个视频没有评论。' }
     }
-    if (!all.length && !scannedPages) {
-      return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: '接口一条都没返回，先确认这个视频有没有评论。' }
+
+    let newestCtime = 0
+    const all = []
+    for (const x of list) {
+      const ct = Number(x.ctime) || 0
+      if (ct > newestCtime) newestCtime = ct
+      if (incremental && ct <= Number(sinceTime)) continue
+      all.push(x)
     }
-    // ⚠️ 拿到 0 条但不是错误（`scannedPages > 0`、`lastErr` 空）⇒ 视频确实没评论，照常往下走
+    const scannedPages = Number(rec.pages) || 1
+    log(`评论取回：${all.length} 条一级评论 / ${scannedPages} 页（B站 显示总回复 ${statReply}）`)
+
     const items = []
     const kwActive = (() => {
       const split = (s) => String(s || '').split(/\s+/).filter(Boolean)
@@ -4453,15 +4459,16 @@ export function apply(ctx, config) {
     let hasAtCount = 0     // 带 @ 的条数
     for (const x of all) {
       /**
-       * ⭐ **字段按 B站 原始 JSON**（`/x/v2/reply/main` 原样返回，不再经 MCP 裁剪）：
-       *    `member.uname` / `member.mid` / `content.message` / `content.members`
-       * ⇒ **mid 和 members 都有**，白名单能按 mid 精确判。
+       * ⭐ **字段按 `python/fetch_comments.py` 的输出**（扁平结构，2026-10-26）：
+       *    `{ rpid, user, mid, content, members, like, rcount, ctime, state }`
+       * ⚠️ 不是 B站 原始的 `member.uname` / `content.message` 那种嵌套 ——
+       *    脚本在 Python 侧已经把它拍平了（这样 JS 这边不用再解一层）。
+       * ⇒ **mid 和 members 都在**，白名单能按 mid 精确判。
        */
-      const ct = x.content || {}
-      const mem = x.member || {}
-      const mems = Array.isArray(ct.members) ? ct.members : []
-      const msg = String(ct.message || '')
-      const uname = String(mem.uname || '')
+      const msg = String(x.content || '')
+      const uname = String(x.user || '')
+      const mid = String(x.mid || '')
+      const mems = Array.isArray(x.members) ? x.members : []
       /**
        * 🔴 **「带 @」= `content.members` 非空 OR 正文里有 `@xxx`**（2026-10-26）。
        *
@@ -4496,20 +4503,19 @@ export function apply(ctx, config) {
       if (!take) continue
       items.push({
         rpid: String(x.rpid),
-        /** ⭐ mid 有（B站 原始字段）⇒ 白名单能按 mid 精确判 */
-        mid: String(mem.mid || ''),
+        mid,
         uname,
         message: msg,
-        /** ⭐ members 也有（B站 原始字段）—— "搬进楼"拼文本时能用上真实 @ 对象 */
+        /** members 也在（脚本给的）—— "搬进楼"拼文本时能用上真实 @ 对象 */
         at: mems.map((m) => ({ mid: String(m.mid || ''), uname: String(m.uname || '') })),
         like: Number(x.like) || 0,
         rcount: Number(x.rcount) || 0,
         ctime: Number(x.ctime) || 0,
         state: Number(x.state) || 0,
         /** 插件自己发的 ⇒ 按 mid 精确判（和"永远跳过自己"那条一脉相承） */
-        isSelf: String(mem.mid || '') === selfMid(),
+        isSelf: mid === selfMid(),
         /** 白名单：mid 优先，昵称兜底（有些老条目只存了名字） */
-        whitelisted: inWhitelist(mem.mid) || inWhitelistByName(uname),
+        whitelisted: inWhitelist(mid) || inWhitelistByName(uname),
         /**
          * ⭐ **这条是怎么被选中的**（2026-10-26）：
          *   · `'hasAt'` —— 带 @（主体，无条件要）
@@ -4523,8 +4529,15 @@ export function apply(ctx, config) {
       ok: true,
       total: all.length,
       items,
-      aid: meta.aid,
-      title: meta.title,
+      /**
+       * ⚠️ `aid` / `title` 现在从 **Python 脚本的返回**里取（`rec.aid`），
+       *    不再调 `bvidMeta`（那条路是插件自己发 HTTP，现在没必要了）。
+       *    标题脚本没返回就留空 —— 面板上显示空标题不影响功能。
+       */
+      aid: rec.aid ?? null,
+      title: String(rec.title || ''),
+      /** ⭐ B站 自己报的评论总数（含楼中楼）—— 面板上用来对照"拿到多少 / 一共多少" */
+      statReply,
       scannedPages,
       newestCtime,
       incremental,
@@ -4997,6 +5010,9 @@ export function apply(ctx, config) {
           bvid,
           title: sc.title,
           总数: sc.total,
+          /** ⭐ B站 自己报的评论总数（含楼中楼）—— 用来对照"拿到多少 / 一共多少" */
+          B站评论总数: sc.statReply ?? null,
+          翻了页数: sc.scannedPages,
           带at: sc.items.length,
           待处理: pending.length,
           跳过_白名单或自己: sc.items.length - pending.length,
@@ -8792,6 +8808,9 @@ export function apply(ctx, config) {
         bvid,
         title: sc.title,
         total: sc.total,
+        /** ⭐ B站 自己报的评论总数（含楼中楼）+ 实际翻了几个 —— 面板上对照用 */
+        statReply: sc.statReply ?? null,
+        pages: sc.scannedPages,
         /** ⚠️ 现在是"入选总条数"（带 @ 的 + 关键词额外捞的），不只是带 @ 的 */
         withAt: sc.items.length,
         pending: pending.length,

@@ -4586,8 +4586,14 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                         onClick: () => setCleanResult(null),
                       }, '✕')),
                     h('div', { 'data-bd-note': '', 'data-bd-sheetnote': '' },
-                      `${cleanResult.title || ''} —— 共 ${cleanResult.total} 条一级评论，`
-                      + `带 @ 的 ${cleanResult.hasAtCount ?? cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
+                      `${cleanResult.title || ''} —— 取到 ${cleanResult.total} 条一级评论`
+                      /* ⭐ 把「B站 报的总数」和「翻了几页」也显示出来 ——
+                       * 2026-10-26 排查"757 条只扫到 137"时加的：
+                       * 有这两个数，一眼能看出是"拿少了"还是"本来就这么多"。 */
+                      + (cleanResult.statReply != null
+                        ? `（B站 显示总回复 ${cleanResult.statReply} 条，含楼中楼；共翻 ${cleanResult.pages || '?'} 页）`
+                        : '')
+                      + `，带 @ 的 ${cleanResult.hasAtCount ?? cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
                       + `跳过 ${cleanResult.skipped} 条（白名单 / 插件自己）。`
                       /* ⭐ 关键词额外捞到多少（2026-10-26）——
                        * 🔴 关键词是**额外捞取**、不是过滤：带 @ 的永远全保留，
