@@ -4240,6 +4240,59 @@ export function apply(ctx, config) {
   }
 
   /**
+   * ⭐⭐ **搬运留痕表**（2026-10-26 加，使用者：「重复 @ 别人的影响比较坏」）。
+   *
+   * ── 为什么失败账本不够 ────────────────────────────────────────
+   *   失败账本只在**删失败**时记 `movedRpid`。它盖不住这种情况：
+   *      搬成功 → **进程崩了 / 断电 / 宿主被杀** → 账本没写成
+   *      ⇒ 下一轮扫到同一条 ⇒ **再搬一次** ⇒ 楼里两条一样的、被 @ 的人被通知两次。
+   *
+   * ⇒ 再加一层「**这个视频已经搬过哪些原评论**」的留痕：
+   *    结构 `{ "<BV>": { "<原rpid>": { movedRpid, at } } }`
+   *    **只要搬成功就立刻写**（不管后面删除成没成）。
+   *    判据变成"原rpid 在留痕里 ⇒ **绝不重复搬**"，与失败账本无关。
+   *
+   * ⚠️ 两个表**职责不同、都在用**：
+   *    · `comment-failures.json` —— 记录"哪一步失败了、错了几次"（给人看、驱动重试）
+   *    · `comment-moved.json`    —— 记录"这条已经搬进楼了"（**只用来防重复**）
+   *    删成功后**都清掉**（评论都没了，留痕没意义，留着会让文件无限长）。
+   */
+  const movedFile = join(stateDir, 'comment-moved.json')
+  const readMoved = () => {
+    const j = readJson(movedFile, null)
+    return (j && typeof j === 'object' && !Array.isArray(j)) ? j : {}
+  }
+  /** 这条原评论搬到收纳楼的哪一层了？（没有就返回 ''） */
+  const getMoved = (bvid, rpid) => {
+    const one = readMoved()[String(bvid || '').trim()]
+    if (!one || typeof one !== 'object') return ''
+    const rec = one[String(rpid)]
+    return rec && rec.movedRpid ? String(rec.movedRpid) : ''
+  }
+  /** 搬成功后立刻留痕（**这一步必须在发成功后马上做**） */
+  const markMoved = (bvid, rpid, movedRpid) => {
+    const k = String(bvid || '').trim()
+    const id = String(rpid || '')
+    if (!k || !id || !movedRpid) return
+    const all = readMoved()
+    const one = (all[k] && typeof all[k] === 'object') ? all[k] : {}
+    one[id] = { movedRpid: String(movedRpid), at: Date.now() }
+    all[k] = one
+    writeJson(movedFile, all)
+  }
+  /** 整条处理成功（已搬 + 已删）⇒ 清掉留痕 */
+  const clearMoved = (bvid, rpid) => {
+    const k = String(bvid || '').trim()
+    const all = readMoved()
+    const one = all[k]
+    if (!one || typeof one !== 'object') return
+    if (!one[String(rpid)]) return
+    delete one[String(rpid)]
+    if (Object.keys(one).length === 0) delete all[k]
+    writeJson(movedFile, all)
+  }
+
+  /**
    * 读白名单。
    *
    * 🔴 **读取时就做一次去重**（2026-10-26 修）。
@@ -4731,10 +4784,14 @@ export function apply(ctx, config) {
    *    「应该要建楼、留言、删除，每一步都要有回执，失败重试，失败记录并跳过」）。
    *    按他后来选的 C 方案：**只记录、不跳过**（失败项下一轮照样重试）。
    *
-   * 🔴 **防重复搬运**：如果上一轮"发成功了但删失败"，原评论还在 ⇒
-   *    这一轮会再扫到它、再搬一次 ⇒ **楼里出现两条一样的**。
-   *    ⇒ 记账里若显示上一步是 `del` 失败、且**已经记过 movedRpid**，
-   *      这一轮就**跳过搬运、直接重试删除**。这是"先发后删"必须配的补丁。
+   * 🔴 **防重复搬运**（两层，缺一不可）：
+   *    ① **留痕表**（`comment-moved.json`）：搬成功就立刻写。
+   *       只要原 rpid 在留痕里 ⇒ **绝不重复搬**，不管删除成没成、进程有没有崩。
+   *    ② **失败账本**（`comment-failures.json`）：记 `step='del'` + `movedRpid`，
+   *       用于"知道上一步卡在删除"（给重试策略用）。
+   *
+   * ⚠️ 为什么必须两层：只靠失败账本，**"搬成功后立刻崩溃"** 那种情况账本没写成
+   *    ⇒ 下一轮又搬一次 ⇒ 被 @ 的人被通知两次。使用者明确说过这个影响比较坏。
    *
    * @param {object} item  { rpid, uname, message, at, ... }
    * @param {string} bvid
@@ -4745,10 +4802,14 @@ export function apply(ctx, config) {
     const text = buildMovedText(item)
 
     /* ── ① 搬运（发楼中楼）─────────────────────────────────
-     * 先查账：上一轮是不是"已经搬过一次、只是删失败"？
-     * 那种情况不能再搬（否则楼里重复），直接进删除。 */
+     * 🔴 **先查两张表**（顺序：留痕表优先，它更权威）：
+     *    · 留痕表有 ⇒ 已经搬过了，直接进删除（哪怕失败账本里没有）
+     *    · 失败账本显示 step='del' 且有 movedRpid ⇒ 同上（老数据兼容）
+     * 任一成立都**绝不能**再发一次楼中楼。 */
     const knownFail = listFails(bvid)[String(item.rpid)] || {}
-    const alreadyMoved = knownFail.step === 'del' ? String(knownFail.movedRpid || '') : ''
+    const traced = getMoved(bvid, item.rpid)
+    const fromFail = knownFail.step === 'del' ? String(knownFail.movedRpid || '') : ''
+    const alreadyMoved = traced || fromFail
     let movedRpid = alreadyMoved
     let skippedMove = false
 
@@ -4783,9 +4844,15 @@ export function apply(ctx, config) {
         return { ok: false, step: 'move', error: `搬进收纳楼失败（试了 ${r1.tries} 次）：${r1.error}` }
       }
       movedRpid = r1.value
+      /**
+       * 🔴🔴 **搬成功 ⇒ 立刻留痕**（在做任何别的事之前）。
+       *    这一行之后，即使进程下一秒崩、删除还没发，下一轮也**绝不会**再搬一遍。
+       *    这是"重复 @ 别人影响比较坏"那条要求的落点。
+       */
+      markMoved(bvid, item.rpid, movedRpid)
     } else {
       skippedMove = true
-      log(`评论 ${item.rpid} 上一轮已搬过（${movedRpid}），这轮直接重试删除，不重复搬`)
+      log(`评论 ${item.rpid} 已经搬过（${movedRpid}），这轮直接重试删除，不重复搬`)
     }
 
     /* ── ② 删除原评论 ─────────────────────────────────────
@@ -4838,8 +4905,9 @@ export function apply(ctx, config) {
       }
     }
 
-    // ⭐ 成功 ⇒ 清掉这条的失败记录（账本里不该留已修好的）
+    // ⭐ 成功 ⇒ 两张表都清掉（评论都没了，留着只会让文件无限长）
     clearFail(bvid, item.rpid)
+    clearMoved(bvid, item.rpid)
     return { ok: true, movedRpid, deleted: true, text, skippedMove }
   }
 
@@ -4933,35 +5001,61 @@ export function apply(ctx, config) {
     }
 
     /**
-     * ② 循环批次处理 —— **直到清完或失败**。
-     *    ⚠️ 每批之间重新扫描一次（而不是拿最初那份清单重复跑）：
-     *      因为上一批已经把那些评论删了，重新扫才能知道"还剩几条"、
-     *      也才能发现这一批期间新冒出来的。
+     * ② **边处理边翻页**（2026-10-26 按使用者选的 B 方案改）。
+     *
+     * ── 为什么不能"先全量拉、再处理" ────────────────────────────
+     *    771 条要翻 39 页 ≈ 3 分钟，全拉完才开始处理，用户等太久；
+     *    而且开始时吃到的清单到后面可能已经变了（新评论冒出来、别人也删了）。
+     *
+     * ── 现在的流程 ────────────────────────────────────────────
+     *    取第 1 页 → 挑批次处理 → 一页处理完取第 2 页 → … 直到没有下一页。
+     *    ⇒ 内存里只放一页，进度是**连续的**，用户能看到一条条在动。
+     *
+     * 🔴 **绝不能按"重扫同一页"来推进**（原来就是这个 bug）：
+     *    `scanComments` 只取第 1 页，处理完再扫**还是那页**（删掉的没了、剩下的还在这页）
+     *    ⇒ 会来回扫同一批，后面的页永远轮不到。
+     *
+     * ⚠️ 每页内部仍按 `batchSize` 分批、批间停 `batchGapSec` 秒。
+     * ⚠️ 重复处理同一批**没关系**（`moveOne` 有留痕表，绝不会重复 @ 别人），
+     *    所以这里不追求"严格不重复"，只追求"一直往前推进"。
      */
     const logItems = []
     let doneTotal = 0
     let failedTotal = 0
-    let round = 0
+    let round = 0              // 批次序号（跨页累计）
+    let pageNo = 1             // 当前处理到第几页
     let allClear = false
+    let pageItems = (pending || [])   // 第 1 页（已经拿过了，别重复请求）
+    let rawTotal = sc.total || pageItems.length
 
     while (round < maxRounds) {
-      round++
-      const cur = round === 1 ? { ok: true, items: pending } : await scanComments(bvid)
-      if (!cur.ok) {
-        failedTotal++
-        logItems.push({ 结果: '❌ 失败', 错误: `第 ${round} 批扫描失败：${cur.error || '未知'}` })
-        break
+      // ① 本页处理完了 ⇒ 取下一页
+      if (!pageItems.length) {
+        if (pageNo >= 60) { log('执行整理：已翻到 60 页上限，停'); break }
+        pageNo++
+        const np = await scanPage(bvid, pageNo)
+        if (!np.ok) {
+          failedTotal++
+          logItems.push({ 结果: '❌ 失败', 错误: `翻到第 ${pageNo} 页失败：${np.error || '未知'}` })
+          break
+        }
+        pageItems = (np.items || []).filter((it) => !it.whitelisted && !it.isSelf)
+        rawTotal += np.raw || (np.items || []).length
+        if (np.isEnd === true) allClear = true
+        log(`执行整理：翻到第 ${pageNo} 页（原始 ${np.raw ?? '?'} 条 / 待处理 ${pageItems.length} 条）`)
+        if (!pageItems.length && np.isEnd === true) break
+        if (!pageItems.length) continue          // 这一页全是白名单/无 @ ⇒ 继续翻
       }
-      const left = (cur.items || []).filter((it) => !it.whitelisted && !it.isSelf)
-      if (!left.length) { allClear = true; break }
 
-      const batch = left.slice(0, batchSize)
+      round++
+      const batch = pageItems.slice(0, batchSize)
       for (const it of batch) {
         const r = await moveOne(it, bvid, floorRpid)
         if (r.ok) doneTotal++
         else failedTotal++
         logItems.push({
           批: round,
+          页: pageNo,
           原rpid: it.rpid,
           作者: it.uname,
           at谁: it.at.map((a) => a.uname),
@@ -4981,13 +5075,11 @@ export function apply(ctx, config) {
         // 每条之间留一点间隔（写操作太密会 -509）
         await new Promise((s) => setTimeout(s, 1500))
       }
-
-      // 这一批已处理完 —— 看还有没有剩的
-      const rest = left.length - batch.length
-      if (rest <= 0) { allClear = true; break }
+      // 本页剩下的留到下一轮（取下一页之前先处理完这一页）
+      pageItems = pageItems.slice(batch.length)
       // ⭐ 批次之间停一会（使用者要求可配，默认 30 秒）
-      if (batchGapSec > 0) {
-        log(`第 ${round} 批完成（还剩约 ${rest} 条），等 ${batchGapSec} 秒再继续`)
+      if (pageItems.length && batchGapSec > 0) {
+        log(`第 ${round} 批完成（本页还剩 ${pageItems.length} 条），等 ${batchGapSec} 秒再继续`)
         await new Promise((s) => setTimeout(s, batchGapSec * 1000))
       }
     }
@@ -4995,7 +5087,8 @@ export function apply(ctx, config) {
     return {
       ok: true,
       bvid,
-      scanned: sc.total,
+      scanned: rawTotal,
+      pages: pageNo,
       floorRpid,
       floorCreated,
       rounds: round,
