@@ -4166,11 +4166,26 @@ export function apply(ctx, config) {
     writeJson(failFile, all)
   }
 
+  /**
+   * 读白名单。
+   *
+   * 🔴 **读取时就做一次去重**（2026-10-26 修）。
+   *
+   * 写入路径本来就有去重（`if (!wl.mids.includes(...))`），但那只挡"新增"，
+   * **不清理文件里已经存在的重复**。实测：手动把文件改成
+   * `{"mids":["999","999","888"]}` 之后，再 add 一次 999，仍然是两个 999 ——
+   * 因为 `includes` 判断的是"有没有"，而不是"有几个"。
+   *
+   * ⇒ 在**读入口**统一用 `Set` 去重，这样无论文件是怎么变脏的
+   *   （手动编辑 / 老版本数据 / 并发写入），拿到手的都是干净的。
+   *   ⚠️ 这也会让面板上「白名单：N 个账号」的计数准确 —— 原来会被重复项撑大。
+   *   ⚠️ 去重**不改写文件**（读操作不该有副作用）；下次任何一次写操作会用干净数据落盘。
+   */
   const readWhitelist = () => {
     const j = readJson(whitelistFile, null)
     if (!j || typeof j !== 'object') return { mids: [], names: {} }
     return {
-      mids: Array.isArray(j.mids) ? j.mids.map(String) : [],
+      mids: [...new Set(Array.isArray(j.mids) ? j.mids.map(String) : [])],
       names: (j.names && typeof j.names === 'object') ? j.names : {},
     }
   }
