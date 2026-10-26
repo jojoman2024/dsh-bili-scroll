@@ -577,6 +577,39 @@ select[data-bd-input],[data-bd-select]{cursor:pointer;appearance:none;-webkit-ap
   border-color:var(--dsw-alias-button-primary-hover,#43454a);}
 [data-bd-btn][disabled]{opacity:.45;cursor:default;}
 
+/* ════════ 评论区整理（2026-10-26 加）════════
+ *
+ * ⚠️ 全部走 token，暗色自动跟上（写死颜色会在暗色主题下崩）。
+ * ⚠️ 这些是**新组件**，几何尽量复用已有规则（行/按钮），只补"列表"这一块。
+ */
+[data-bd-acts]{display:flex;gap:8px;flex:none;}
+/* 扫描结果 / 执行结果的容器 */
+[data-bd-cleanbox]{display:flex;flex-direction:column;gap:10px;
+  padding:12px 0 4px;border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);}
+/* 清单本体：限高 + 滚动，避免几十条把面板撑爆 */
+[data-bd-cleanlist]{display:flex;flex-direction:column;gap:8px;
+  max-height:360px;overflow-y:auto;}
+[data-bd-cleanitem]{display:flex;flex-direction:column;gap:4px;
+  padding:10px 12px;border-radius:var(--dsw-radius-sm,8px);
+  border:1px solid var(--dsw-alias-border-l3,#0000001f);
+  background:var(--dsw-alias-bg-module-platform,#f5f6f7);}
+/* 被跳过的（白名单 / 插件自己）压暗，一眼能分开 */
+[data-bd-cleanitem][data-bd-dim]{opacity:.55;}
+[data-bd-cleanhead]{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+[data-bd-cleanu]{font-size:var(--dsw-font-xs-13-font-size,13px);line-height:20px;
+  font-weight:500;color:var(--dsw-alias-label-primary,#0f1115);}
+[data-bd-cleantag]{font-size:var(--dsw-font-xxxs-11-font-size,11px);line-height:14px;
+  padding:1px 6px;border-radius:var(--dsw-radius-sm,8px);
+  color:var(--dsw-alias-label-tertiary,#81858c);
+  border:1px solid var(--dsw-alias-border-l3,#0000001f);}
+[data-bd-cleanmsg]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  color:var(--dsw-alias-label-secondary,#61666b);word-break:break-word;}
+[data-bd-cleanwill]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  color:var(--dsw-alias-state-business-primary,#4176e6);word-break:break-word;}
+/* 小号按钮（清单里那个「加入白名单」） */
+[data-bd-btn][data-bd-mini]{padding:3px 8px;align-self:flex-start;
+  font-size:var(--dsw-font-xxxs-11-font-size,11px);line-height:16px;}
+
 /* ── 开关：官方品牌色（近黑），不是蓝 ── */
 [data-bd-sw]{flex:none;width:38px;height:22px;border-radius:11px;padding:0;cursor:pointer;position:relative;
   border:1px solid var(--dsw-alias-border-l3,#0000001f);
@@ -1812,6 +1845,15 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
+      /* ── 评论区整理（2026-10-26 加）──
+       * ⚠️ `cleanDraft` 是**草稿**，不能让 5 秒轮询直接绑 cfg ——
+       *    否则你粘贴 BV 号打到一半会被冲掉（这个坑面板里踩过多次）。
+       */
+      const [cleanDraft, setCleanDraft] = React.useState('')
+      const [cleanBusy, setCleanBusy] = React.useState(false)
+      const [cleanResult, setCleanResult] = React.useState(null)   // 扫描结果
+      const [cleanRun, setCleanRun] = React.useState(null)         // 执行结果
+      const [cleanConfirm, setCleanConfirm] = React.useState(false) // 执行前确认浮层
 
       /* ⭐⭐ **所有浮现式提示的统一入口 —— 一律会自己消失**（2026-10-18 修）。
        *
@@ -4177,6 +4219,192 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             on: sw('freeformWatch'),
             onChange: (v) => patch({ freeformWatch: v }, '自由描述关注点'),
           })),
+
+          /* ════════ 评论区整理（2026-10-26 加，实验功能）════════
+           *
+           * 使用者原话：
+           *   「我发了宣传片，但是有很多使用我插件的用户，让他们的AI来到我的视频留言，
+           *     一定程度上污染了我的工作区。把这些机器人的留言删掉，
+           *     同时建一层评论，把机器人的评论和他@的主人都移到这层楼里来。」
+           *
+           * 🔴 这是面板里**唯一会删别人内容**的功能，所以：
+           *    · 默认关闭、默认不填视频；
+           *    · 「扫描」只读，永远不删；
+           *    · 「执行」要二次确认（用 confirmOpen，跟「恢复默认」同一套浮层）；
+           *    · 每一步的结果都摊在面板上，不藏在控制台。
+           *
+           * ⚠️ 面板是**纯文本**（不渲染 markdown）⇒ 文案里**不能写星号**，守卫会查。
+           */
+          h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-h': '' }, '评论区整理'),
+
+            h(Field, {
+              label: '目标视频',
+              note: '填 BV 号，或者直接粘贴视频链接（会自动抠出 BV 号）。'
+                + '⚠️ 只有这个视频的 UP 主能删它下面的评论。',
+              children: h('input', {
+                'data-bd-input': '',
+                type: 'text',
+                placeholder: 'BV1xxxxxxxxx 或 https://www.bilibili.com/video/BV...',
+                value: cleanDraft,
+                onInput: (e) => setCleanDraft(e.target.value),
+                onBlur: () => {
+                  const v = String(cleanDraft || '').trim()
+                  if (v !== String(cfg.cleanBvid || '')) patch({ cleanBvid: v }, '目标视频')
+                },
+              }),
+            }),
+
+            h(ToggleRow, {
+              label: '每 5 分钟自动整理',
+              note: '默认关闭。开着且填了目标视频时，后台每 5 分钟跑一轮：'
+                + '扫描 → 把带 @ 的机器人留言搬到收纳楼 → 删掉原留言。'
+                + '⚠️ 这一套会真的删评论，且不可撤销 —— 建议先手动「扫描」看几轮清单再开。',
+              on: sw('cleanEnabled'),
+              onChange: (v) => patch({ cleanEnabled: v }, '每 5 分钟自动整理'),
+            }),
+
+            h(Field, {
+              label: '每轮最多处理几条',
+              note: '默认 5 条。每一条要发一次评论再删一次评论（2 次写请求），'
+                + '调太大会被 B站 限流（-509）。',
+              children: h('input', {
+                'data-bd-input': '',
+                type: 'number',
+                min: '1',
+                max: '50',
+                value: String(cfg.cleanPerRound || 5),
+                onChange: (e) => patch({ cleanPerRound: Number(e.target.value) || 5 }, '每轮最多处理几条'),
+              }),
+            }),
+
+            // ── 操作按钮 ──
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '扫描 / 执行'),
+                h('div', { 'data-bd-note': '' },
+                  '「扫描」只读 —— 列出现在会处理哪些评论、搬过去长什么样，不删任何东西。'
+                  + '「执行」才会真删，而且会先弹确认。')),
+              h('div', { 'data-bd-acts': '' },
+                h('button', {
+                  'data-bd-btn': '',
+                  disabled: cleanBusy ? '' : undefined,
+                  onClick: async () => {
+                    setCleanBusy(true)
+                    setCleanResult(null)
+                    try {
+                      const r = await jpost('/clean/scan', { bvid: cleanDraft || cfg.cleanBvid })
+                      setCleanResult(r)
+                    } catch (e) {
+                      setCleanResult({ ok: false, error: String(e?.message || e) })
+                    } finally { setCleanBusy(false) }
+                  },
+                }, cleanBusy ? '扫描中…' : '扫描'),
+                h('button', {
+                  'data-bd-btn': '',
+                  'data-bd-danger': '',
+                  disabled: cleanBusy ? '' : undefined,
+                  onClick: () => setCleanConfirm(true),
+                }, '执行'),
+              )),
+
+            // ── 扫描结果 ──
+            cleanResult
+              ? (cleanResult.ok === false
+                ? h('div', { 'data-bd-note': '', 'data-bd-warn': '' }, '出错：' + (cleanResult.error || '未知'))
+                : h('div', { 'data-bd-cleanbox': '' },
+                  h('div', { 'data-bd-note': '' },
+                    `${cleanResult.title || ''} —— 共 ${cleanResult.total} 条一级评论，`
+                    + `带 @ 的 ${cleanResult.withAt} 条，待处理 ${cleanResult.pending} 条，`
+                    + `跳过 ${cleanResult.skipped} 条（白名单 / 插件自己）。`),
+                  h('div', { 'data-bd-cleanlist': '' },
+                    (cleanResult.items || []).slice(0, 60).map((it) => h('div', {
+                      'data-bd-cleanitem': '',
+                      'data-bd-dim': (it.whitelisted || it.isSelf) ? '' : undefined,
+                    },
+                      h('div', { 'data-bd-cleanhead': '' },
+                        h('span', { 'data-bd-cleanu': '' }, it.uname),
+                        h('span', { 'data-bd-cleantag': '' }, it.isSelf ? '插件自己（永远跳过）'
+                          : it.whitelisted ? '白名单（跳过）' : '待处理'),
+                        h('span', { 'data-bd-cleantag': '' }, `mid ${it.mid}`)),
+                      h('div', { 'data-bd-cleanmsg': '' }, it.message),
+                      h('div', { 'data-bd-cleanwill': '' }, '→ 将发布：' + it.willPost),
+                      // ⭐ 「加入白名单」按 **mid**（一个账号一次永久跳过，不管他发几条）
+                      (it.whitelisted || it.isSelf) ? null : h('button', {
+                        'data-bd-btn': '',
+                        'data-bd-mini': '',
+                        onClick: async () => {
+                          const r = await jpost('/clean/whitelist', {
+                            action: 'add', mids: it.mid, names: it.uname,
+                          })
+                          if (r?.ok) {
+                            // 就地把它标成白名单，不用重新扫描
+                            setCleanResult((prev) => prev ? {
+                              ...prev,
+                              items: prev.items.map((x) => x.mid === it.mid ? { ...x, whitelisted: true } : x),
+                              pending: Math.max(0, (prev.pending || 1) - 1),
+                              skipped: (prev.skipped || 0) + 1,
+                            } : prev)
+                          }
+                        },
+                      }, '加入白名单'))))
+                ))
+              : null,
+
+            // ── 执行结果 ──
+            cleanRun
+              ? h('div', { 'data-bd-cleanbox': '' },
+                h('div', { 'data-bd-note': '' },
+                  cleanRun.ok
+                    ? `本轮：扫到 ${cleanRun.scanned} 条，处理 ${cleanRun.todo} 条 —— `
+                      + `成功 ${cleanRun.done} 条，失败 ${cleanRun.failed} 条。收纳楼 rpid：${cleanRun.floorRpid || '（无）'}`
+                    : '执行失败：' + (cleanRun.error || '未知')),
+                (cleanRun.log || []).map((x) => h('div', {
+                  'data-bd-cleanitem': '',
+                  'data-bd-dim': x.结果.startsWith('✅') ? undefined : '',
+                },
+                  h('div', { 'data-bd-cleanhead': '' },
+                    h('span', { 'data-bd-cleanu': '' }, x.作者),
+                    h('span', { 'data-bd-cleantag': '' }, x.结果)),
+                  h('div', { 'data-bd-cleanmsg': '' }, '原 rpid ' + x.原rpid + ' · @' + (x.at谁 || []).join('、')),
+                  x.文本 ? h('div', { 'data-bd-cleanwill': '' }, '→ ' + x.文本) : null,
+                  x.错误 ? h('div', { 'data-bd-cleanwill': '' }, '⚠️ ' + x.错误) : null)))
+              : null,
+
+            // ── 白名单摘要 ──
+            h('div', { 'data-bd-note': '' },
+              `白名单：${(st.cleanWhitelist?.mids || []).length} 个账号`
+              + `（插件自己 mid ${st.cleanSelfMid || '?'} 永远跳过，不在名单里也删不掉）`),
+
+            // ── 执行前确认浮层（复用「恢复默认」那套 data-bd-confirm）──
+            cleanConfirm ? h('div', { 'data-bd-confirm': '' },
+              h('div', { 'data-bd-confirm-box': '' },
+                h('div', { 'data-bd-confirm-title': '' }, '真的要执行吗？'),
+                h('div', { 'data-bd-confirm-body': '' },
+                  '会删除本视频下「带 @ 且不在白名单」的机器人留言 —— '
+                  + '删掉的评论不可恢复（内容会先搬进收纳楼，但原评论本身找不回来）。'
+                  + `最多处理 ${cfg.cleanPerRound || 5} 条。`),
+                h('div', { 'data-bd-confirm-foot': '' },
+                  h('button', { 'data-bd-btn': '', onClick: () => setCleanConfirm(false) }, '取消'),
+                  h('button', {
+                    'data-bd-btn': '',
+                    'data-danger': '',
+                    onClick: async () => {
+                      setCleanConfirm(false)
+                      setCleanBusy(true)
+                      setCleanRun(null)
+                      try {
+                        const r = await jpost('/clean/run', {
+                          bvid: cleanDraft || cfg.cleanBvid,
+                          limit: cfg.cleanPerRound || 5,
+                        })
+                        setCleanRun(r)
+                        await reload()          // 刷新白名单计数等
+                      } catch (e) {
+                        setCleanRun({ ok: false, error: String(e?.message || e) })
+                      } finally { setCleanBusy(false) }
+                    },
+                  }, '确认执行（会真删）')))) : null),
 
           /* ⚠️ 这里原来有三块「开关状态」条件渲染，2026-10-18 按使用者要求全部删掉 ——
              使用者原话：「开关下面的状态那些都不要。3 行已打开都不要。」

@@ -293,6 +293,20 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+
+  /* ── 评论区整理（2026-10-26 加，面板「实验功能」页） ──
+   *
+   * ⚠️ **默认全关** —— 这一套会**删别人的评论**，不可撤销。
+   *    使用者要自己填视频、自己点扫描、自己点执行。
+   */
+  /** 目标视频 BV 号（面板输入框） */
+  cleanBvid: z.string().default('').extra('volatile', true),
+  /** 是否开启「每 5 分钟自动整理」—— 默认关 */
+  cleanEnabled: z.boolean().default(false).extra('volatile', true),
+  /** 每轮最多处理几条（⚠️ 每条约 2 次写请求，调大会 -509） */
+  cleanPerRound: z.number().default(5).extra('volatile', true),
+  /** 上次成功执行的时间戳（增量扫描用） */
+  cleanLastScanAt: z.number().default(0).extra('volatile', true),
   /**
    * ⭐⭐ **管理员权限**（2026-10-17 加，面板「实验功能」页里的那个开关）。
    *
@@ -454,6 +468,7 @@ export function apply(ctx, config) {
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
     freeformWatch: true, watchNote: '',
     commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    cleanBvid: '', cleanEnabled: false, cleanPerRound: 5, cleanLastScanAt: 0,
     adminMode: false,
     /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
     absoluteGuard: true,
@@ -3994,6 +4009,386 @@ export function apply(ctx, config) {
     async execute() { return runInstall() },
   })
 
+  /* ─────────────── 评论区整理（2026-10-26 加） ───────────────
+   *
+   * **要解决的问题**（使用者原话）：
+   *   宣传片下面有很多使用插件的用户，他们的 AI 跑来留言，
+   *   一定程度上污染了工作区。
+   *
+   * **做法**：把「机器人代发的一级评论」删掉，同时建一层**收纳楼**，
+   *   把「原文 + 被 @ 的人」搬进去，让被 @ 的朋友还能看到内容。
+   *
+   * ── 🔴 三条真机实测出来的硬约束（别凭想象改）─────────────────────
+   *   ① **发评论必须走 MCP 的 `bili_reply`**，不能自己发 HTTP ——
+   *      实测：手写 HTTP（哪怕文本完全相同）会被阿瓦隆隐藏成 `state:17`，
+   *      **只有自己能看见、别人看不到**，而接口照样返回 `code:0`（假成功）。
+   *      根因：`bilibili_api` 的 `send_comment` 会带
+   *      `statistics:{appId:100,platform:5}`、`gaia_source:"main_web"` 并做 wbi 签名。
+   *   ② **删评论走插件自己的 HTTP 没问题** —— 实测删完另一账号确实看不到了、
+   *      `reply/detail` 返回 `code:12006`。删除是"管理已有内容"，不吃那套风控。
+   *   ③ **一句里 @ 同一个人两次，B站 一次都不识别**；
+   *      而 `@A`（别人）在**开头位置能被正常识别**（实测过）。
+   *      ⇒ 目标格式 `@B，你的@A 给你留言「…」` 在 B≠A 时成立。
+   *
+   * ── 顺序：**先发后删**（不能反过来）─────────────────────────────
+   *   反过来一旦中途失败（网络断/限流/进程崩），原评论就没了、楼也没建成
+   *   ⇒ **信息永久丢失**。先发后删最坏只是"重复一条"（可再删一次）。
+   */
+
+  /** 白名单文件：存 `mid`（一个账号一次永久跳过，不管他发几条） */
+  const whitelistFile = join(stateDir, 'comment-whitelist.json')
+  const readWhitelist = () => {
+    const j = readJson(whitelistFile, null)
+    if (!j || typeof j !== 'object') return { mids: [], names: {} }
+    return {
+      mids: Array.isArray(j.mids) ? j.mids.map(String) : [],
+      names: (j.names && typeof j.names === 'object') ? j.names : {},
+    }
+  }
+
+  /**
+   * ⭐ **插件自己的账号永远在白名单里**（2026-10-26 使用者要求）。
+   *    否则「插件自己发的收纳楼 / 评论」会被下一轮扫描当成待处理对象
+   *    —— 那就变成自己删自己了。
+   * ⚠️ 凭证里的 `dedeuserid` 就是当前登录账号的 mid。
+   */
+  const selfMid = () => {
+    const c = readJson(join(stateDir, 'bili_credential.json'), null)
+    return String(c?.dedeuserid || '')
+  }
+
+  /** 当前是否在这个账号的白名单里（含"插件自己"） */
+  const inWhitelist = (mid) => {
+    const m = String(mid || '')
+    if (!m) return false
+    if (m === selfMid()) return true            // 插件自己
+    return readWhitelist().mids.includes(m)
+  }
+
+  /**
+   * 扫描：拉一级评论，按「带 @」筛出候选。
+   *
+   * ⭐ **增量模式（2026-10-26 加）**：`x/v2/reply?sort=0` 是**按时间倒序**，
+   *   新的在前面 ⇒ 只翻前几页、遇到比 `sinceTime` 更早的就停。
+   *   实测：599 条的评论区全量要翻 30 页 ≈ 24 秒；增量只要 1~3 页。
+   *
+   * ⚠️ **代价**：如果老评论后来被"顶上来"（有新回复），增量模式可能漏。
+   *   使用者确认接受这个代价（他要每 5 分钟跑一次，全量太重）。
+   *
+   * @param {string} bvid
+   * @param {number} [sinceTime] 只关心 `ctime > sinceTime` 的；不传 = 全量
+   * @returns {Promise<{ok:boolean, total:number, items:Array, scannedPages:number, newestCtime:number, error?:string}>}
+   */
+  const scanComments = async (bvid, sinceTime = 0) => {
+    const meta = await bvidMeta(bvid, credCookie())
+    if (!meta?.aid) return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `拿不到 ${bvid} 的视频信息（视频被删了 / 登录过期）。` }
+
+    const all = []
+    const incremental = Number(sinceTime) > 0
+    let scannedPages = 0
+    let newestCtime = 0
+    let hitOld = false
+    // ⚠️ `bili_comments` 只给热门几十条、**没有翻页参数** ⇒ 这里自己打 HTTP 翻页读
+    //    （读接口不吃风控，实测 `x/v2/reply?sort=0&pn=N` 正常）
+    const cookie = credCookie()
+    // 增量模式最多翻 5 页（新的都在前面）；全量最多翻 30 页
+    const maxPages = incremental ? 5 : 30
+    for (let pn = 1; pn <= maxPages; pn++) {
+      let j
+      try {
+        j = await biliGet(
+          `https://api.bilibili.com/x/v2/reply?type=1&oid=${meta.aid}&sort=0&pn=${pn}&ps=20`,
+          cookie,
+        )
+      } catch (e) {
+        // ⚠️ 已经拿到部分就照用（增量模式下这是正常的：前面几页已经够了）
+        if (all.length) break
+        return { ok: false, total: 0, items: [], scannedPages, newestCtime, error: `拉评论失败（第 ${pn} 页）：${e?.message ?? e}` }
+      }
+      const reps = Array.isArray(j?.data?.replies) ? j.data.replies : []
+      if (!reps.length) break
+      scannedPages = pn
+      for (const x of reps) {
+        const ct = Number(x.ctime) || 0
+        if (ct > newestCtime) newestCtime = ct
+        // ⭐ 增量：这条比"上次扫到的时间"还早 ⇒ 后面的都更早，可以停
+        if (incremental && ct <= Number(sinceTime)) { hitOld = true; continue }
+        all.push(x)
+      }
+      if (hitOld) break
+      // 防风控（读也一样有频率限制）
+      await new Promise((r) => setTimeout(r, 800))
+    }
+
+    const items = []
+    for (const x of all) {
+      const ct = x.content || {}
+      const mems = Array.isArray(ct.members) ? ct.members : []
+      // ⭐ 使用者的判据：**带 @ 的一级评论就算**（不看 @ 在开头还是结尾）
+      if (!mems.length) continue
+      const mem = x.member || {}
+      items.push({
+        rpid: String(x.rpid),
+        mid: String(mem.mid || ''),
+        uname: String(mem.uname || ''),
+        message: String(ct.message || ''),
+        at: mems.map((m) => ({ mid: String(m.mid || ''), uname: String(m.uname || '') })),
+        like: Number(x.like) || 0,
+        rcount: Number(x.rcount) || 0,
+        ctime: Number(x.ctime) || 0,
+        state: Number(x.state) || 0,
+        /** 插件自己发的、或已在白名单里的 ⇒ 标出来，界面上好区分 */
+        isSelf: String(mem.mid || '') === selfMid(),
+        whitelisted: inWhitelist(mem.mid),
+      })
+    }
+    return {
+      ok: true,
+      total: all.length,
+      items,
+      aid: meta.aid,
+      title: meta.title,
+      scannedPages,
+      newestCtime,
+      incremental,
+    }
+  }
+
+  /**
+   * 解析一条原评论：剥掉正文里的 `@xxx`，得到"纯内容"。
+   *
+   * ⚠️ **不能只删开头**（实测 514 条里有 @ 在结尾的）。
+   *    做法：优先按 `content.members` 里的**已知昵称**精确剥（带前后空格/标点），
+   *    再兜底剥掉开头的 `@非空白串`。
+   *    用昵称精确匹配比正则乱切安全 —— 有的正文中间本来就有 `@`。
+   */
+  const stripAt = (message, atList) => {
+    let s = String(message || '')
+    for (const a of atList || []) {
+      const n = String(a.uname || '')
+      if (!n) continue
+      // 去掉「@昵称」本体，连同它后面紧跟的一个空格
+      s = s.split(`@${n}`).join('')
+    }
+    // 兜底：开头的 @xxx（昵称对不上时）
+    s = s.replace(/^\s*@[^\s@]+\s*/g, '')
+    return s.trim()
+  }
+
+  /**
+   * 生成搬运后的新评论文本。
+   *
+   * 目标格式（使用者原话）：
+   *   「@B，你的@A 给你留言「...」」
+   *   · B = 原评论里被 @ 的人（真人）
+   *   · A = 原评论的作者（机器人）
+   *   · 「...」= 原正文，**去掉里面的 @**
+   *
+   * 🔴 实测约束：一句里 @ 同一个人两次 ⇒ B站 一次都不识别。
+   *    ⇒ 只有当 B 与 A 不同、且 B 之间互不相同时才拼 @ 前缀。
+   */
+  const buildMovedText = (item) => {
+    const content = stripAt(item.message, item.at)
+    const seen = new Set()
+    const atParts = []
+    for (const a of item.at) {
+      const n = String(a.uname || '').trim()
+      if (!n) continue
+      // 跳过跟"作者本人"重名的（否则一句里两次 @ 同一个人 ⇒ 都不识别）
+      if (n === item.uname) continue
+      if (seen.has(n)) continue
+      seen.add(n)
+      atParts.push(`@${n}`)
+    }
+    const head = atParts.length ? `${atParts.join(' ')}，` : ''
+    return `${head}你的 @${item.uname} 给你留言「${content}」`
+  }
+
+  /**
+   * 处理一条：**先发**（搬到收纳楼）→ 校验 → **再删**原评论。
+   * @returns {Promise<{ok:boolean, movedRpid?:string, deleted?:boolean, error?:string}>}
+   */
+  const moveOne = async (item, bvid, floorRpid) => {
+    const text = buildMovedText(item)
+    let sent
+    try {
+      // ⚠️ **必须走 MCP**：自己发 HTTP 会被阿瓦隆隐藏（见本节开头 ①）
+      sent = await call('bili_reply', {
+        bvid,
+        text,
+        rpid: Number(floorRpid),        // ＝ parent：回在收纳楼下面
+        root: Number(floorRpid),        // ＝ root：楼层根也是收纳楼
+      })
+    } catch (e) {
+      return { ok: false, error: `搬到收纳楼失败（MCP）：${e?.message ?? e}` }
+    }
+    // MCP 回的是 JSON 文本
+    let rec = sent
+    if (typeof rec === 'string') { try { rec = JSON.parse(rec) } catch { /* 保持原样 */ } }
+    const movedRpid = rec?.rpid != null ? String(rec.rpid) : ''
+    const sentOk = rec?.success !== false && rec?.ok !== false && rec?.code !== -1
+    if (!sentOk) {
+      return { ok: false, error: `搬到收纳楼失败：${rec?.message ?? rec?.error ?? '返回不明确'}` }
+    }
+
+    // ⭐ **先发成功，才删原评论**（顺序不能反，见本节开头）
+    const del = await biliPost(
+      'https://api.bilibili.com/x/v2/reply/del',
+      { type: 1, oid: (await bvidMeta(bvid, credCookie()))?.aid, rpid: item.rpid },
+      credCookie(),
+    )
+    const dcode = Number(del?.code)
+    const delOk = dcode === 0 || dcode === 12022
+    return {
+      ok: delOk,
+      movedRpid,
+      deleted: delOk,
+      text,
+      ...(delOk ? {} : { error: `搬过去了，但**删原评论失败**（code=${dcode}）—— 原评论还在，下次扫描会重复搬。` }),
+    }
+  }
+
+  /** 一轮整理（扫描 → 逐条搬运）；返回详细日志 */
+  const runCommentClean = async (bvid, limit) => {
+    const sc = await scanComments(bvid)
+    if (!sc.ok) return { ok: false, error: sc.error, log: [] }
+    const todo = sc.items.filter((it) => !it.whitelisted && !it.isSelf).slice(0, Math.max(1, limit))
+    if (!todo.length) return { ok: true, scanned: sc.total, todo: 0, log: [], note: '没有需要处理的评论。' }
+
+    // ① 建收纳楼（如果这一轮有活干）
+    const floorText = `【收纳楼】这里收纳本视频下机器人代发的留言。原留言已删除，内容与 @ 对象保留在这一楼下，供被 @ 的朋友查阅。本楼只做归档，不参与讨论。\n（整理时间：${new Date().toISOString().slice(0, 19).replace('T', ' ')}）`
+    let floorRpid = ''
+    try {
+      const f = await call('bili_reply', { bvid, text: floorText, rpid: 0 })
+      let fr = f
+      if (typeof fr === 'string') { try { fr = JSON.parse(fr) } catch { /* */ } }
+      floorRpid = fr?.rpid != null ? String(fr.rpid) : ''
+      if (!floorRpid) return { ok: false, error: '建收纳楼失败（拿不到 rpid）', log: [] }
+    } catch (e) {
+      return { ok: false, error: `建收纳楼失败：${e?.message ?? e}`, log: [] }
+    }
+
+    const log = []
+    for (const it of todo) {
+      const r = await moveOne(it, bvid, floorRpid)
+      log.push({
+        原rpid: it.rpid,
+        作者: it.uname,
+        at谁: it.at.map((a) => a.uname),
+        ...(r.ok
+          ? { 结果: '✅ 已搬运并删除', 新rpid: r.movedRpid, 文本: r.text }
+          : { 结果: '❌ 失败', 错误: r.error, 已搬rpid: r.movedRpid || null }),
+      })
+      // 每条之间留一点间隔（写操作太密会 -509）
+      await new Promise((s) => setTimeout(s, 1500))
+    }
+    return {
+      ok: true,
+      bvid,
+      scanned: sc.total,
+      todo: todo.length,
+      floorRpid,
+      done: log.filter((x) => x.结果.startsWith('✅')).length,
+      failed: log.filter((x) => x.结果.startsWith('❌')).length,
+      log,
+    }
+  }
+
+  tool({
+    name: 'bilij_clean_comments',
+    description: '🗂 **评论区整理**（实验功能，破坏性）：把「带 @ 的机器人留言」删掉，'
+      + '同时建一层收纳楼，把原文与被 @ 的人搬进去。\n'
+      + '⚠️ **先发后删** —— 中途失败只会重复一条，不会丢内容。\n'
+      + '⚠️ 只有**该视频的 UP 主**能用（删别人的评论要评论区管理权限）。\n'
+      + '⭐ 传 `dryRun: true` 只扫描不执行（默认就是 dryRun）。\n'
+      + '⭐ 白名单里 mid 的评论会被跳过；**插件自己的账号永远跳过**。',
+    parameters: {
+      bvid: { type: 'string', description: '目标视频 BV 号' },
+      dryRun: { type: 'boolean', description: 'true（默认）= 只扫描出清单，不动手；要真执行传 false' },
+      limit: { type: 'number', description: '这一轮最多处理几条（默认 5）' },
+    },
+    async execute(args) {
+      const bvid = String(args.bvid ?? '').trim()
+      if (!bvid) return { ok: false, error: '缺少 bvid。' }
+      const limit = Math.max(1, Math.min(Number(args.limit) || 5, 50))
+      const dryRun = args.dryRun !== false          // ⚠️ 默认就是干跑
+
+      if (dryRun) {
+        const sc = await scanComments(bvid)
+        if (!sc.ok) return { ok: false, error: sc.error }
+        const pending = sc.items.filter((it) => !it.whitelisted && !it.isSelf)
+        return {
+          ok: true,
+          dryRun: true,
+          bvid,
+          title: sc.title,
+          总数: sc.total,
+          带at: sc.items.length,
+          待处理: pending.length,
+          跳过_白名单或自己: sc.items.length - pending.length,
+          本轮到上限: Math.min(pending.length, limit),
+          清单: pending.slice(0, 50).map((it) => ({
+            rpid: it.rpid, 作者: it.uname, mid: it.mid, at谁: it.at.map((a) => a.uname),
+            原文: it.message.slice(0, 80), 将发: buildMovedText(it).slice(0, 120),
+          })),
+          hint: `这是**干跑**（没删任何东西）。确认清单没问题后，用 \`dryRun: false\` 才会真执行。`,
+        }
+      }
+
+      const r = await runCommentClean(bvid, limit)
+      return r
+    },
+  })
+
+  tool({
+    name: 'bilij_clean_whitelist',
+    description: '📋 管理「评论区整理」的白名单（按 **mid** 存，一个账号一次永久跳过）。\n'
+      + '不给 `action` = 查看当前白名单。\n'
+      + '⭐ `action:"add"` 传 `mids` 加入；`action:"remove"` 移除；`action:"clear"` 清空（不动"插件自己"那条）。\n'
+      + '⚠️ **插件自己的账号（凭证里的 dedeuserid）永远跳过**，不在这个文件里、也删不掉。',
+    parameters: {
+      action: { type: 'string', description: 'add / remove / clear / list（默认 list）' },
+      mids: { type: 'string', description: 'add/remove 时的 mid，多个用逗号分隔' },
+      names: { type: 'string', description: '可选：给这些 mid 配昵称，逗号分隔、与 mids 一一对应' },
+    },
+    async execute(args) {
+      const action = String(args.action ?? 'list').trim()
+      const wl = readWhitelist()
+      if (action === 'add') {
+        const add = String(args.mids ?? '').split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+        if (!add.length) return { ok: false, error: '`mids` 是空的，没东西可加。' }
+        const names = String(args.names ?? '').split(/[,，]/).map((s) => s.trim())
+        for (let i = 0; i < add.length; i++) {
+          if (!wl.mids.includes(add[i])) wl.mids.push(add[i])
+          if (names[i]) wl.names[add[i]] = names[i]
+        }
+        writeJson(whitelistFile, wl)
+        return { ok: true, action: 'add', added: add.length, total: wl.mids.length, whitelist: wl }
+      }
+      if (action === 'remove') {
+        const rm = String(args.mids ?? '').split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+        wl.mids = wl.mids.filter((m) => !rm.includes(m))
+        for (const m of rm) delete wl.names[m]
+        writeJson(whitelistFile, wl)
+        return { ok: true, action: 'remove', removed: rm.length, total: wl.mids.length, whitelist: wl }
+      }
+      if (action === 'clear') {
+        const kept = { mids: [], names: {} }
+        writeJson(whitelistFile, kept)
+        return { ok: true, action: 'clear', total: 0, removed: wl.mids.length, whitelist: kept }
+      }
+      return {
+        ok: true,
+        action: 'list',
+        total: wl.mids.length,
+        whitelist: wl,
+        selfMid: selfMid(),
+        note: '插件自己的账号（selfMid）**永远跳过**，不列在这个文件里。',
+        file: whitelistFile,
+      }
+    },
+  })
+
   tool({
     name: 'bilij_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
@@ -7003,7 +7398,17 @@ export function apply(ctx, config) {
        *    （第一次加载时是 null ⇒ 面板不显示任何东西，下次轮询就有了）。
        */
       warmUpdate()
-      return sendJson(res, 200, status())
+      /**
+       * ⚠️ 评论区整理的白名单也塞进 `/status`（2026-10-26）——
+       *    面板每 5 秒轮询一次就自动对齐了，不用另开一个请求。
+       *    它只有几十个 mid，体积可忽略。
+       */
+      const _wl = readWhitelist()
+      return sendJson(res, 200, {
+        ...status(),
+        cleanWhitelist: _wl,
+        cleanSelfMid: selfMid(),
+      })
     }
 
     if (req.method === 'GET' && path === '/api/bili-scroll-jojo/config') {
@@ -7018,6 +7423,8 @@ export function apply(ctx, config) {
         'keywords', 'keywordMode', 'searchOrder', 'searchDays', 'searchNum',
         'freeformWatch', 'watchNote',
         'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
+        // 评论区整理（2026-10-26）：目标视频 / 开关 / 每轮上限
+        'cleanBvid', 'cleanEnabled', 'cleanPerRound', 'cleanLastScanAt',
         // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
         'absoluteGuard',
         'personaEnabled', 'personaMaxChars',
@@ -7039,6 +7446,15 @@ export function apply(ctx, config) {
       }
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('adminMode' in patch) patch.adminMode = Boolean(patch.adminMode)
+      /* 评论区整理（2026-10-26） */
+      if ('cleanEnabled' in patch) patch.cleanEnabled = Boolean(patch.cleanEnabled)
+      if ('cleanBvid' in patch) {
+        // 只留 BV 号本身：粘贴整条链接时也能用（从 URL 里抠出 BV…）
+        const m = /(BV[0-9A-Za-z]{10})/.exec(String(patch.cleanBvid || ''))
+        patch.cleanBvid = m ? m[1] : String(patch.cleanBvid || '').trim()
+      }
+      if ('cleanPerRound' in patch) patch.cleanPerRound = Math.max(1, Math.min(Math.floor(Number(patch.cleanPerRound) || 5), 50))
+      if ('cleanLastScanAt' in patch) patch.cleanLastScanAt = Math.max(0, Number(patch.cleanLastScanAt) || 0)
       // ⭐ **两个"每轮几条"的额度：只保证 >= 1，不设上限**（2026-10-16 改）。
       //    原来给 replyPerRound 夹了 1..10、commentPerRound 干脆没夹。
       //    使用者要求去掉上限（"大于 1 即可"）—— 想回多少条是他自己的事。
@@ -7517,6 +7933,90 @@ export function apply(ctx, config) {
     // 「测一下」：真跑一次，回答"能不能用"
     if (req.method === 'POST' && path === '/api/bili-scroll-jojo/check') {
       return sendJson(res, 200, await checkUp())
+    }
+
+    /* ── 评论区整理（面板「实验功能」页用，2026-10-26 加） ──
+     *
+     * ⚠️ **为什么这几个走 HTTP、而不是塞进工具**
+     *   面板要「扫描 → 列清单 → 多选 → 加白名单 → 执行」，
+     *   那是一连串**界面交互**，模型不需要参与；走工具反而绕。
+     *   （`bilij_clean_*` 那两个工具是给模型/脚本用的，两边共用同一批函数。）
+     */
+
+    // 读取当前设置（目标视频 / 是否开启 / 每轮上限）+ 白名单
+    if (req.method === 'GET' && path === '/api/bili-scroll-jojo/clean') {
+      const wl = readWhitelist()
+      return sendJson(res, 200, {
+        ok: true,
+        bvid: String(cfg.cleanBvid || ''),
+        enabled: cfg.cleanEnabled === true,
+        limit: Number(cfg.cleanPerRound) || 5,
+        lastScanAt: Number(cfg.cleanLastScanAt) || 0,
+        whitelist: wl,
+        selfMid: selfMid(),
+        note: '插件自己的账号（selfMid）永远跳过，不在 whitelist 里、也删不掉。',
+      })
+    }
+
+    // 扫描（只读，不删任何东西）
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/clean/scan') {
+      const body = await readBody(req)
+      const bvid = String(body.bvid || cfg.cleanBvid || '').trim()
+      if (!bvid) return sendJson(res, 400, { ok: false, error: '还没填目标视频的 BV 号。' })
+      const sc = await scanComments(bvid, 0)          // 面板扫描一律全量（要看到全部）
+      if (!sc.ok) return sendJson(res, 200, { ok: false, error: sc.error })
+      const pending = sc.items.filter((it) => !it.whitelisted && !it.isSelf)
+      return sendJson(res, 200, {
+        ok: true,
+        bvid,
+        title: sc.title,
+        total: sc.total,
+        withAt: sc.items.length,
+        pending: pending.length,
+        skipped: sc.items.length - pending.length,
+        items: sc.items.map((it) => ({
+          rpid: it.rpid, mid: it.mid, uname: it.uname,
+          at: it.at.map((a) => a.uname), atMids: it.at.map((a) => a.mid),
+          message: it.message,
+          willPost: buildMovedText(it),
+          isSelf: it.isSelf, whitelisted: it.whitelisted,
+          state: it.state,
+        })),
+      })
+    }
+
+    // 白名单增删（`mids` 逗号分隔）
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/clean/whitelist') {
+      const body = await readBody(req)
+      const action = String(body.action || 'add')
+      const wl = readWhitelist()
+      const ids = String(body.mids || '').split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (action === 'add') {
+        const names = String(body.names || '').split(/[,，]/).map((s) => s.trim())
+        for (let i = 0; i < ids.length; i++) {
+          if (!wl.mids.includes(ids[i])) wl.mids.push(ids[i])
+          if (names[i]) wl.names[ids[i]] = names[i]
+        }
+      } else if (action === 'remove') {
+        wl.mids = wl.mids.filter((m) => !ids.includes(m))
+        for (const m of ids) delete wl.names[m]
+      } else if (action === 'clear') {
+        wl.mids = []
+        wl.names = {}
+      }
+      writeJson(whitelistFile, wl)
+      return sendJson(res, 200, { ok: true, whitelist: wl, selfMid: selfMid() })
+    }
+
+    // 执行一轮（会真删！）—— 面板上必须二次确认后才点
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/clean/run') {
+      const body = await readBody(req)
+      const bvid = String(body.bvid || cfg.cleanBvid || '').trim()
+      if (!bvid) return sendJson(res, 400, { ok: false, error: '还没填目标视频的 BV 号。' })
+      const limit = Math.max(1, Math.min(Number(body.limit) || Number(cfg.cleanPerRound) || 5, 50))
+      const r = await runCommentClean(bvid, limit)
+      if (r.ok) saveCfg({ cleanLastScanAt: Date.now() })
+      return sendJson(res, 200, r)
     }
 
     // ── 扫码登录（设置页用）──
