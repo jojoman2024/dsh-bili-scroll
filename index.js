@@ -4351,17 +4351,20 @@ export function apply(ctx, config) {
   }
 
   /**
-   * spawn 一次 Python 脚本，把 stdout 当 JSON 读回来。
+   * spawn 一次 Python 脚本，**取一页**评论，把 stdout 当 JSON 读回来。
+   * @param {string} bvid
+   * @param {number} pageIndex 页码（从 1 开始）
+   * @param {'time'|'like'} order
    * @returns {Promise<{ok:boolean, data?:object, error?:string}>}
    */
-  const runCommentsPy = (bvid, want) => new Promise((resolve) => {
+  const runCommentsPy = (bvid, pageIndex = 1, order = 'time') => new Promise((resolve) => {
     const script = ensureCommentsScript()
     if (!script) return resolve({ ok: false, error: '铺不了 fetch_comments.py（家目录写不进去？）' })
 
     const py = String(cfg.pythonPath || 'python')
     let child
     try {
-      child = spawn(py, [script, String(bvid), String(want)], {
+      child = spawn(py, [script, String(bvid), String(pageIndex), String(order)], {
         cwd: stateDir,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -4375,7 +4378,7 @@ export function apply(ctx, config) {
     let err = ''
     const timer = setTimeout(() => {
       try { child.kill() } catch { /* 已经死了 */ }
-      resolve({ ok: false, error: `Python 取评论超时（${Math.round(COMMENTS_PY_TIMEOUT_MS / 1000)}s），可能是页数太多` })
+      resolve({ ok: false, error: `Python 取评论超时（${Math.round(COMMENTS_PY_TIMEOUT_MS / 1000)}s）` })
     }, COMMENTS_PY_TIMEOUT_MS)
     timer.unref?.()
 
@@ -4409,71 +4412,48 @@ export function apply(ctx, config) {
    * @param {string} bvid
    * @param {number} [sinceTime] 只关心 `ctime > sinceTime` 的（增量模式先少拿些）
    */
-  const scanComments = async (bvid, sinceTime = 0) => {
+  /**
+   * ⭐ **把一页原始评论筛成候选**（2026-10-26 抽出来，单页扫描 / 滚动翻页共用）。
+   *
+   * 判据（使用者澄清过的"或"语义，别改）：
+   *   候选 = **带 @ 的** ∪（**没 @ 但命中关键词的**）
+   *
+   * @param {Array} list  一页原始评论（Python 拍平后的结构）
+   * @param {number} sinceTime 增量模式：只要比这个新的
+   * @returns {{items:Array, hasAtCount:number, kwExtra:number, kwActive:boolean, newestCtime:number}}
+   */
+  const filterPage = (list, sinceTime = 0) => {
     const incremental = Number(sinceTime) > 0
-    // 增量模式少拿（新的在前面）；全量给足（实测 765 条总回复 → 748 条一级）
-    const want = incremental ? 200 : 1000
-
-    const r = await runCommentsPy(bvid, want)
-    if (!r.ok) {
-      return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `取评论失败：${r.error}` }
-    }
-    const rec = r.data || {}
-    const list = Array.isArray(rec.comments) ? rec.comments : []
-    const statReply = Number(rec.statReply) || 0
-
-    /**
-     * ⚠️ 一条都没拿到时要分清原因（别笼统说"没评论"）。
-     * `statReply` 是 B站 的评论总数（**含楼中楼**）——
-     * 它 > 0 但我们拿到 0 条 ⇒ 是接口出问题了，不是视频没人评论。
-     */
-    if (!list.length) {
-      if (statReply > 0) {
-        return {
-          ok: false, total: 0, items: [], scannedPages: rec.pages || 0, newestCtime: 0,
-          error: `B站 显示这个视频有 ${statReply} 条评论，但一条都没取回来`
-            + `${rec.lastErr ? '（' + rec.lastErr + '）' : ''}。可能是接口临时抽风，再点一次「扫描」试试。`,
-        }
-      }
-      // statReply=0 ⇒ 真的没评论
-      return { ok: true, total: 0, items: [], scannedPages: 0, newestCtime: 0, kwActive: false, hasAtCount: 0, kwExtra: 0, note: '这个视频没有评论。' }
-    }
-
-    let newestCtime = 0
-    const all = []
-    for (const x of list) {
-      const ct = Number(x.ctime) || 0
-      if (ct > newestCtime) newestCtime = ct
-      if (incremental && ct <= Number(sinceTime)) continue
-      all.push(x)
-    }
-    const scannedPages = Number(rec.pages) || 1
-    log(`评论取回：${all.length} 条一级评论 / ${scannedPages} 页（B站 显示总回复 ${statReply}）`)
-
     const items = []
     const kwActive = (() => {
       const split = (s) => String(s || '').split(/\s+/).filter(Boolean)
       return split(cfg.cleanKwUname).length > 0 || split(cfg.cleanKwMessage).length > 0
     })()
-    let kwExtra = 0        // 靠关键词额外捞进来的（本来没 @ 的）
-    let hasAtCount = 0     // 带 @ 的条数
-    for (const x of all) {
+    let kwExtra = 0
+    let hasAtCount = 0
+    let newestCtime = 0
+
+    for (const x of list) {
       /**
        * ⭐ **字段按 `python/fetch_comments.py` 的输出**（扁平结构，2026-10-26）：
        *    `{ rpid, user, mid, content, members, like, rcount, ctime, state }`
        * ⚠️ 不是 B站 原始的 `member.uname` / `content.message` 那种嵌套 ——
-       *    脚本在 Python 侧已经把它拍平了（这样 JS 这边不用再解一层）。
+       *    脚本在 Python 侧已经把它拍平了。
        * ⇒ **mid 和 members 都在**，白名单能按 mid 精确判。
        */
       const msg = String(x.content || '')
       const uname = String(x.user || '')
       const mid = String(x.mid || '')
       const mems = Array.isArray(x.members) ? x.members : []
+      const ctime = Number(x.ctime) || 0
+      if (ctime > newestCtime) newestCtime = ctime
+      if (incremental && ctime <= Number(sinceTime)) continue
+
       /**
-       * 🔴 **「带 @」= `content.members` 非空 OR 正文里有 `@xxx`**（2026-10-26）。
+       * 🔴 **「带 @」= `members` 非空 OR 正文里有 `@xxx`**（2026-10-26）。
        *
        * 为什么要两个条件：实测 4 条正文含 `@茄子舅舅` 的评论里，
-       * `content.members` **只有 2 条有值**（另 2 条是空的）——
+       * `members` **只有 2 条有值**（另 2 条是空的）——
        * 只信 members 会漏掉一半。只看正文又可能把正文里孤零零的 @ 算进来。
        * ⇒ **两者取或：宁可多收，不可漏收**（漏一条 = 那条机器人留言永远留着）。
        */
@@ -4525,33 +4505,96 @@ export function apply(ctx, config) {
         pickedBy: why,
       })
     }
+    return { items, hasAtCount, kwExtra, kwActive, newestCtime }
+  }
+
+  /**
+   * ⭐ **扫描第 1 页**（2026-10-26 改：**不再自动翻页**）。
+   *
+   * 🔴 为什么改：一口气翻 38 页要 200 多秒，面板点一下要等三分半。
+   *    使用者定：「扫描不要自动翻页了，就先给他加载一页，
+   *    然后用户向下滚动的时候去触发翻页的请求。」
+   *    ⇒ 这里只取第 1 页；后续页由 `scanPage` 提供，前端滚到底时来要。
+   *
+   * ⚠️ **一页多少条由接口自己定**（`bilibili_api` 的 `comment.get_comments`
+   *    压根不传 `ps`），我们不猜、不改。
+   */
+  const scanComments = async (bvid, sinceTime = 0) => {
+    const r = await runCommentsPy(bvid, 1, 'time')
+    if (!r.ok) {
+      return { ok: false, total: 0, items: [], scannedPages: 0, newestCtime: 0, error: `取评论失败：${r.error}` }
+    }
+    const rec = r.data || {}
+    const list = Array.isArray(rec.comments) ? rec.comments : []
+    const statReply = Number(rec.statReply) || 0
+
+    /**
+     * ⚠️ 一条都没拿到时要分清原因（别笼统说"没评论"）。
+     * `statReply` 是 B站 的评论总数（**含楼中楼**）——
+     * 它 > 0 但我们拿到 0 条 ⇒ 是接口出问题了，不是视频没人评论。
+     */
+    if (!list.length) {
+      if (statReply > 0) {
+        return {
+          ok: false, total: 0, items: [], scannedPages: 1, newestCtime: 0,
+          error: `B站 显示这个视频有 ${statReply} 条评论，但第 1 页一条都没取回来。`
+            + '可能是接口临时抽风，再点一次「扫描」试试。',
+        }
+      }
+      return {
+        ok: true, total: 0, items: [], scannedPages: 0, newestCtime: 0,
+        kwActive: false, hasAtCount: 0, kwExtra: 0, note: '这个视频没有评论。',
+      }
+    }
+
+    const f = filterPage(list, sinceTime)
+    log(`评论第 1 页：${list.length} 条原始 / ${f.items.length} 条入选`
+      + `（B站 显示总回复 ${statReply}，一级共 ${rec.total || '?'} 条）`)
+
     return {
       ok: true,
-      total: all.length,
-      items,
-      /**
-       * ⚠️ `aid` / `title` 现在从 **Python 脚本的返回**里取（`rec.aid`），
-       *    不再调 `bvidMeta`（那条路是插件自己发 HTTP，现在没必要了）。
-       *    标题脚本没返回就留空 —— 面板上显示空标题不影响功能。
-       */
+      total: list.length,
+      items: f.items,
       aid: rec.aid ?? null,
       title: String(rec.title || ''),
-      /** ⭐ B站 自己报的评论总数（含楼中楼）—— 面板上用来对照"拿到多少 / 一共多少" */
       statReply,
-      scannedPages,
-      newestCtime,
-      incremental,
-      /**
-       * ⭐ 关键词信息（2026-10-26 改成"额外捞取"语义）：
-       *   · `kwActive`  —— 用户到底设了关键词没有
-       *   · `hasAtCount` —— 带 @ 的条数（主体）
-       *   · `kwExtra`   —— 靠关键词**额外**捞进来的条数（本来没 @）
-       * ⚠️ 不再有 `kwFilteredOut` —— 关键词现在**不会筛掉任何东西**，
-       *    它只会让候选变多。原来那个名字会误导（用户以为"被筛掉了"）。
-       */
-      kwActive,
-      hasAtCount,
-      kwExtra,
+      /** ⭐ 一级评论总数（B站 的分页 page.count）—— 面板据此算"还有多少页" */
+      oneLevelTotal: Number(rec.total) || 0,
+      page: 1,
+      pageSize: Number(rec.pageSize) || list.length,
+      isEnd: rec.isEnd === true,
+      scannedPages: 1,
+      newestCtime: f.newestCtime,
+      kwActive: f.kwActive,
+      hasAtCount: f.hasAtCount,
+      kwExtra: f.kwExtra,
+    }
+  }
+
+  /**
+   * ⭐ **取第 N 页**（2026-10-26 加，给面板滚动加载用）。
+   * @param {string} bvid
+   * @param {number} page 页码，从 2 开始（第 1 页用 scanComments）
+   */
+  const scanPage = async (bvid, page) => {
+    const p = Math.max(1, Math.floor(Number(page) || 1))
+    const r = await runCommentsPy(bvid, p, 'time')
+    if (!r.ok) return { ok: false, page: p, items: [], error: `取第 ${p} 页失败：${r.error}` }
+    const rec = r.data || {}
+    const list = Array.isArray(rec.comments) ? rec.comments : []
+    const f = filterPage(list, 0)
+    log(`评论第 ${p} 页：${list.length} 条原始 / ${f.items.length} 条入选`)
+    return {
+      ok: true,
+      page: p,
+      raw: list.length,
+      items: f.items,
+      oneLevelTotal: Number(rec.total) || 0,
+      pageSize: Number(rec.pageSize) || list.length,
+      isEnd: rec.isEnd === true || list.length === 0,
+      hasAtCount: f.hasAtCount,
+      kwExtra: f.kwExtra,
+      kwActive: f.kwActive,
     }
   }
 
@@ -8836,6 +8879,48 @@ export function apply(ctx, config) {
           /** ⭐ 'hasAt' = 带 @（主体） / 'kw' = 关键词额外捞的 */
           pickedBy: it.pickedBy,
         })),
+        /** ⭐ 分页信息（2026-10-26）：面板靠它算"还能翻几页" */
+        page: sc.page,
+        pageSize: sc.pageSize,
+        oneLevelTotal: sc.oneLevelTotal,
+        isEnd: sc.isEnd,
+      })
+    }
+
+    /**
+     * ⭐ **翻到第 N 页**（2026-10-26 加）。
+     *
+     * 使用者定：「扫描不要自动翻页了，就先给他加载一页，
+     * 然后用户向下滚动的时候去触发翻页的请求。」
+     * ⇒ 前端滚到底时调这个，一页一页往后来。
+     */
+    if (req.method === 'POST' && path === '/api/bili-scroll-jojo/clean/page') {
+      const body = await readBody(req)
+      const bvid = String(body.bvid || cfg.cleanBvid || '').trim()
+      const page = Math.max(2, Math.floor(Number(body.page) || 2))
+      if (!bvid) return sendJson(res, 400, { ok: false, error: '还没填目标视频的 BV 号。' })
+      const sp = await scanPage(bvid, page)
+      if (!sp.ok) return sendJson(res, 200, { ok: false, page, error: sp.error })
+      const pending = sp.items.filter((it) => !it.whitelisted && !it.isSelf)
+      return sendJson(res, 200, {
+        ok: true,
+        page: sp.page,
+        raw: sp.raw,
+        items: sp.items.map((it) => ({
+          rpid: it.rpid, mid: it.mid, uname: it.uname,
+          at: it.at.map((a) => a.uname), atMids: it.at.map((a) => a.mid),
+          message: it.message,
+          willPost: buildMovedText(it),
+          isSelf: it.isSelf, whitelisted: it.whitelisted,
+          state: it.state,
+          pickedBy: it.pickedBy,
+        })),
+        /** 这一页里"待处理"的条数（面板要累加） */
+        pending: pending.length,
+        skipped: sp.items.length - pending.length,
+        oneLevelTotal: sp.oneLevelTotal,
+        pageSize: sp.pageSize,
+        isEnd: sp.isEnd,
       })
     }
 

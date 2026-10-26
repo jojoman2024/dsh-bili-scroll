@@ -1943,6 +1943,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
        */
       const [cleanShown, setCleanShown] = React.useState(30)
       /**
+       * ⭐ **正在取下一页吗**（2026-10-26 加，配合滚动加载）。
+       * 作用：防止用户一直往下拉、连着发好几个翻页请求。
+       */
+      const [cleanLoading, setCleanLoading] = React.useState(false)
+      /**
        * ⭐ 两个筛选关键词的**草稿**（2026-10-26）。
        * ⚠️ 跟 cleanDraft 同理：**不能让 5 秒轮询直接绑 cfg**，
        *    否则你打字打到一半会被冲掉（面板里这个坑踩过多次）。
@@ -4549,6 +4554,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   onClick: async () => {
                     setCleanBusy(true)
                     setCleanResult(null)
+                    // ⭐ 新扫描 ⇒ 显示条数/加载状态都归零（2026-10-26，配合分页）
+                    setCleanShown(30)
+                    setCleanLoading(false)
                     try {
                       const r = await jpost('/clean/scan', { bvid: cleanDraft || cfg.cleanBvid })
                       setCleanResult(r)
@@ -4603,17 +4611,61 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                         ? `关键词额外捞到 ${cleanResult.kwExtra ?? 0} 条`
                           + `（昵称「${cleanResult.kwUname || '空'}」/ 内容「${cleanResult.kwMessage || '空'}」）。`
                         : '')
-                      + `现在显示 ${Math.min(cleanShown, (cleanResult.items || []).length)} / ${(cleanResult.items || []).length} 条。`),
+                      + `现在显示 ${Math.min(cleanShown, (cleanResult.items || []).length)} / ${(cleanResult.items || []).length} 条`
+                      + (cleanResult.isEnd ? '（已到底）' : '（往下滑继续加载下一页）') + '。'),
                     h('div', {
                       'data-bd-cleanlist': '',
-                      // ⭐ 滑到底自动加 30 条 —— 不用按钮、不用回顶部
+                      /**
+                       * 🔴 **滚到底就向后台要下一页**（2026-10-26 改）。
+                       *
+                       * 使用者定：「扫描不要自动翻页了，就先给他加载一页，
+                       * 然后用户向下滚动的时候去触发翻页的请求。」
+                       *
+                       * 现在的行为：
+                       *   ① 先把**已加载但还没显示**的本地条目放出来（每次 30，纯前端，不请求）
+                       *   ② 本地放光了、且后台还有页（`isEnd !== true`）⇒ 才真发一次请求取下一页
+                       * ⚠️ `cleanLoading` 防重入：请求没回来之前不再发。
+                       */
                       onScroll: (e) => {
                         const el = e.currentTarget
                         if (!el) return
                         const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 120
-                        if (nearBottom) {
-                          const total = (cleanResult.items || []).length
-                          setCleanShown((n) => (n >= total ? n : Math.min(n + 30, total)))
+                        if (!nearBottom) return
+                        const total = (cleanResult.items || []).length
+                        // ① 本地还有没显示的 ⇒ 先放出来
+                        if (cleanShown < total) {
+                          setCleanShown((n) => Math.min(n + 30, total))
+                          return
+                        }
+                        // ② 本地放光了 ⇒ 去后台要下一页
+                        if (!cleanLoading && cleanResult.isEnd !== true && cleanResult.bvid) {
+                          setCleanLoading(true)
+                          const nextPage = (cleanResult.page || 1) + 1
+                          jpost('/clean/page', { bvid: cleanResult.bvid, page: nextPage })
+                            .then((r) => {
+                              if (!r?.ok) {
+                                setCleanResult((prev) => prev ? { ...prev, isEnd: true, loadError: r?.error || '取下一页失败' } : prev)
+                                return
+                              }
+                              setCleanResult((prev) => {
+                                if (!prev) return prev
+                                const add = Array.isArray(r.items) ? r.items : []
+                                return {
+                                  ...prev,
+                                  // ⚠️ 拼在末尾（按时间序，后面的页更旧）
+                                  items: [...(prev.items || []), ...add],
+                                  pending: (prev.pending || 0) + (r.pending || 0),
+                                  skipped: (prev.skipped || 0) + (r.skipped || 0),
+                                  page: r.page,
+                                  isEnd: r.isEnd === true,
+                                }
+                              })
+                              setCleanShown((n) => n + 30)
+                            })
+                            .catch((err) => {
+                              setCleanResult((prev) => prev ? { ...prev, isEnd: true, loadError: String(err?.message || err) } : prev)
+                            })
+                            .finally(() => setCleanLoading(false))
                         }
                       },
                     },
