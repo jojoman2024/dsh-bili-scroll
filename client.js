@@ -4371,9 +4371,9 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
              *    否则他会以为"设了 5 分钟就该每 5 分钟看到一次动静"。 */
             sw('cleanEnabled') ? h(Field, {
               label: '整理间隔（分钟）',
-              note: '默认 5 分钟。填 0 = 不自动清理（但保留上面的开关状态）。'
+              note: '默认 30 分钟。'
                 + '⚠️ 计时是「上一轮跑完之后」才开始算 —— 不是每 N 分钟准时启动一次。'
-                + '所以一轮如果跑了 3 分钟，下一轮在它结束后再过 5 分钟才开，不会叠加。',
+                + '所以一轮如果跑了 3 分钟，下一轮在它结束后再过这么久才开，不会叠加。',
               children: h('input', {
                 'data-bd-input': '',
                 type: 'number',
