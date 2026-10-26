@@ -4237,6 +4237,30 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
            */
           h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-h': '' }, '评论区整理'),
+            /* ⭐ 大标题下的描述（2026-10-26 加）——
+             *    必须说清「要先用 UP 主账号扫码登录」这个前提，
+             *    否则用户填了视频、点了扫描，只会拿到一句「拿不到视频信息」。
+             *    ⚠️ 面板是纯文本，不能写星号。 */
+            h('div', { 'data-bd-note': '' },
+              '把本视频下「带 @ 的机器人留言」删掉，同时建一层收纳楼，'
+              + '把原文和被 @ 的人搬进去 —— 被 @ 的朋友还能看到内容。'
+              + '⚠️ 前置条件：需要先在「环境与账号」页扫码登录「该视频的 UP 主」账号，'
+              + '因为删评论只有 UP 主本人有权限。'),
+
+            /* ⭐⭐ 总开关（2026-10-26 使用者要求）：
+             *    「评论区整理应该加个开关，关闭时相关选项折叠。」
+             *    ⇒ 关着的时候下面所有选项都不渲染（连标题下那块内容一起收起来）。
+             *    ⚠️ 默认关 —— 这是面板里唯一会删别人内容的功能。 */
+            h(ToggleRow, {
+              label: '启用评论区整理',
+              note: '默认关闭。关闭时下面的设置全部折叠。'
+                + '打开后才会出现目标视频、扫描、执行这些选项。',
+              on: sw('cleanUiOpen'),
+              onChange: (v) => patch({ cleanUiOpen: v }, '启用评论区整理'),
+            }),
+
+            // ── 折叠区：只在开关打开时渲染 ──
+            sw('cleanUiOpen') ? h('div', { 'data-bd-fold': '' },
 
             h(Field, {
               label: '目标视频',
@@ -4404,7 +4428,8 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                         setCleanRun({ ok: false, error: String(e?.message || e) })
                       } finally { setCleanBusy(false) }
                     },
-                  }, '确认执行（会真删）')))) : null),
+                  }, '确认执行（会真删）')))) : null)
+            : null),   // ← 折叠区结束（`sw('cleanUiOpen') ? ... : null`）
 
           /* ⚠️ 这里原来有三块「开关状态」条件渲染，2026-10-18 按使用者要求全部删掉 ——
              使用者原话：「开关下面的状态那些都不要。3 行已打开都不要。」

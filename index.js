@@ -301,6 +301,13 @@ export const Config = !z ? undefined : z.object({
    */
   /** 目标视频 BV 号（面板输入框） */
   cleanBvid: z.string().default('').extra('volatile', true),
+  /**
+   * ⭐ **面板折叠开关**（2026-10-26 加，使用者要求「关闭时相关选项折叠」）。
+   * ⚠️ 它**只管界面**：关着时面板上那些输入框/按钮不渲染，
+   *    但**不影响** `cleanEnabled`（那个才是"每 5 分钟自动跑"的开关）。
+   *    两个分开是有意的 —— 你可以只想手动扫一次、不想开自动。
+   */
+  cleanUiOpen: z.boolean().default(false).extra('volatile', true),
   /** 是否开启「每 5 分钟自动整理」—— 默认关 */
   cleanEnabled: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多处理几条（⚠️ 每条约 2 次写请求，调大会 -509） */
@@ -468,7 +475,7 @@ export function apply(ctx, config) {
     keywords: [], keywordMode: 'llm', searchOrder: 'totalrank', searchDays: 0, searchNum: 20,
     freeformWatch: true, watchNote: '',
     commentPerRound: 1, mentionName: '', mentionInComment: true, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', runMode: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
-    cleanBvid: '', cleanEnabled: false, cleanPerRound: 5, cleanLastScanAt: 0,
+    cleanBvid: '', cleanEnabled: false, cleanPerRound: 5, cleanLastScanAt: 0, cleanUiOpen: false,
     adminMode: false,
     /** 🔒 绝对防护（默认开）—— 前台会话只能看见 `bilij_*`。⚠️ 模型改不了它，见 schema 注释。 */
     absoluteGuard: true,
@@ -7424,7 +7431,7 @@ export function apply(ctx, config) {
         'freeformWatch', 'watchNote',
         'pythonPath', 'dshBin', 'headlessProfile', 'runMode', 'reportLevel', 'replyToComments', 'replyPerRound', 'adminMode', 'dmNotify', 'dmUnlocked', 'scheduleTimes',
         // 评论区整理（2026-10-26）：目标视频 / 开关 / 每轮上限
-        'cleanBvid', 'cleanEnabled', 'cleanPerRound', 'cleanLastScanAt',
+        'cleanBvid', 'cleanEnabled', 'cleanPerRound', 'cleanLastScanAt', 'cleanUiOpen',
         // 🔒 绝对防护：**只从这里改**（面板）。`bilij_config` 里显式拒绝对它写 —— 见那里注释。
         'absoluteGuard',
         'personaEnabled', 'personaMaxChars',
