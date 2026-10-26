@@ -4932,23 +4932,34 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   x.错误 ? h('div', { 'data-bd-cleanwill': '' }, '⚠️ ' + x.错误) : null)))
               : null,
 
-            // ── 失败清单 ⭐（2026-10-26 加）──
-            // 按使用者选的 C 方案：**只记录、不跳过** —— 下一轮照样会重试这些。
-            // 摊在面板上的目的是"知道卡在哪一步、错了几次"，不是"拉黑"。
+            /**
+             * ── 失败**只报数量，不列明细**（2026-10-26 使用者要求：
+             *    「失败的条不用再列表显示了。如果失败很多，会把面板撑太长。而且也没啥意义。」）
+             *
+             * 🔴 为什么明细确实没意义：
+             *    · 失败项**下一轮会自动重试**（C 方案：只记录、不跳过）
+             *      ⇒ 它只是"还没成功"，不是"需要你去处理的问题"
+             *    · 真正要看的**原因**，日志区已经一条条写了（✗ … code=…）
+             *    · 600 条里失败 50 条 ⇒ 面板被撑好几屏，别的设置全被挤走
+             *
+             * ⇒ 只留**一行**：总数 + 按错误码归类的计数（一眼看出是不是同一类问题）。
+             * ⚠️ 完整明细仍在 `comment-failures.json`，真要查去文件里看。
+             */
             (st.cleanFailures && st.cleanFailures.length)
-              ? h('div', { 'data-bd-cleanbox': '' },
-                h('div', { 'data-bd-note': '' },
-                  `⚠️ 失败 ${st.cleanFailures.length} 条 —— 下一轮会自动重试（不会跳过）。`),
-                st.cleanFailures.map((f) => h('div', { 'data-bd-cleanitem': '' },
-                  h('div', { 'data-bd-cleanhead': '' },
-                    h('span', { 'data-bd-cleanu': '' }, f.作者 || f.原rpid),
-                    h('span', { 'data-bd-cleantag': '' }, f.失败在哪一步),
-                    h('span', { 'data-bd-cleantag': '' }, `试了 ${f.试了几次} 次`)),
-                  h('div', { 'data-bd-cleanmsg': '' },
-                    `原 rpid ${f.原rpid} · ` + (f.错误码 != null ? `code ${f.错误码} · ` : '') + (f.错误 || '')),
-                  f.原文 ? h('div', { 'data-bd-cleanwill': '' }, '原文：' + f.原文) : null,
-                  f.已搬rpid ? h('div', { 'data-bd-cleanwill': '' },
-                    `已搬进楼（${f.已搬rpid}），下轮只补删、不会重复搬`) : null)))
+              ? h('div', { 'data-bd-note': '', 'data-bd-noteonly': '' },
+                `⚠️ 失败 ${st.cleanFailures.length} 条（下一轮会自动重试，不会跳过）`
+                + (() => {
+                  // ⭐ 按错误码归类：同码合成一个计数，最多列 3 类
+                  const byCode = new Map()
+                  for (const f of st.cleanFailures) {
+                    const k = f.错误码 != null ? `code ${f.错误码}` : (f.失败在哪一步 || '未知')
+                    byCode.set(k, (byCode.get(k) || 0) + 1)
+                  }
+                  const top = [...byCode.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+                  return '：' + top.map(([k, n]) => `${k} × ${n}`).join('、')
+                    + (byCode.size > 3 ? ` 等 ${byCode.size} 类` : '')
+                })()
+                + '。明细见家目录 comment-failures.json')
               : null,
 
             // ── 白名单摘要 ──
@@ -5034,11 +5045,17 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                       : (cleanLog.lines.length > 0
                         ? `已结束（${cleanLog.lines[cleanLog.lines.length - 1].ts}）`
                         : '已结束')),
-                  h('button', {
-                    'data-bd-btn': '',
-                    'data-bd-mini': '',
-                    onClick: () => setCleanLogOn((v) => !v),
-                  }, cleanLogOn ? '暂停' : '继续')),
+                  /* 🔴 **「暂停 / 继续」按钮已删**（2026-10-26 使用者问
+                     「日志窗上面那个继续按钮的作用是啥？」）。
+                     它原本切 `cleanLogOn`（要不要每 1.5 秒拉一次日志）。
+                     ⚠️ **对使用者没用**：
+                       · 整理在后台跑，暂停只是让**屏幕不刷新**，任务照跑 —— 极易误解成"暂停了任务"
+                       · 真要中断得关自动整理开关或等它跑完，不是按这个
+                       · 轮询本来就会在跑完 30 秒后自动停
+                     ⇒ 去掉；状态文字已经说清「正在整理 / 已结束」。
+                     ⚠️ 注意这一行结尾的 `)),` **不能省**：一个关 loghint 的 h()、
+                        另一个关 loghead 的 h()（原来第二个是关 button 的）。 */
+                  ),
                 h('div', {
                   'data-bd-logscroll': '',
                   /* 自动滚到底：内容变了就把 scrollTop 拉到底。
