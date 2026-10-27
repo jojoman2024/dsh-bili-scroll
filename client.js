@@ -5262,9 +5262,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
          */
         h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab' },
           h('div', { 'data-bd-h': '' }, '作者信息'),
-          h('div', { 'data-bd-note': '' },
-            '内容来自作者维护的在线文档，自动同步（大约每小时一次）。'
-            + '有新消息时会弹一次提醒。'),
+          /* ⭐ 大标题下**没有说明文字**（2026-10-27 使用者要求去掉原句
+             「内容来自作者维护的在线文档，自动同步（大约每小时一次）。
+               有新消息时会弹一次提醒。」）。
+             ⚠️ 删掉后这个分节就是「标题 + 卡片」，
+                [data-bd-h]+* 那条间距规则仍然成立，不用补别的。 */
 
           (() => {
             const card = st?.authorCard
@@ -5273,10 +5275,6 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
             const lines = Array.isArray(au.lines) ? au.lines : []
             const name = String(au.name || '')
             const url = String(au.url || '')
-            const when = Number(card?.updatedAt) || 0
-            const whenText = when
-              ? new Date(when).toLocaleString('zh-CN', { hour12: false })
-              : ''
             return h('div', { 'data-bd-author': '' },
               name
                 ? h('div', { 'data-bd-author-name': '' }, name)
@@ -5325,15 +5323,11 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                     }, isBullet ? s.replace(/^[·\-•*]\s*/, '') : s)
                   }))
                 : null,
-              whenText
-                ? h('div', { 'data-bd-note': '' },
-                  `上次同步：${whenText}`
-                  + (card?.source === 'fallback'
-                    ? '（没连上在线文档，显示的是插件自带的默认内容）'
-                    : card?.failed
-                      ? `（拉取失败：${String(card.reason || '未知原因')}）`
-                      : card?.stale ? '（内容较旧，稍后会自动重试）' : ''))
-                : null,
+              /* ⭐ 「上次同步：…」那块**整块删掉**（2026-10-27 使用者要求）。
+                 它原来还兼着三条状态提示（fallback / 拉取失败 / 内容较旧），
+                 现在一起去掉了 —— 卡片只显示作者内容本身。
+                 ⚠️ 后端 `/status.authorCard` 里的 `source`/`failed`/`stale` 字段
+                    **没有删**：它们是诊断信息，以后要排查"为什么内容没更新"还得看。 */
             )
           })(),
         ),
