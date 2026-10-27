@@ -847,6 +847,34 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
 [data-bd-pre][data-bd-clog][data-bd-wrap]{word-break:break-all;max-height:120px;}
 
 /* ══════════════════════════════════════════════════════════════════════════
+   ⭐⭐ 作者信息卡（2026-10-27 加）
+
+   使用者要求：实验功能页加一节「作者信息」，B站 链接**可点击**。
+   它是一张**只读卡片**（不是设置行），所以不复用 [data-bd-row] ——
+   那边是"左边文字、右边控件"的两列布局，这里是整块内容。
+
+   ⚠️ 间距仍要跟面板其它地方一致：卡内元素之间 **8px**，
+      卡片本身与上下文的间距由 [data-bd-sec] > * 那条统一规则给（不要自己写 margin）。
+   */
+[data-bd-author]{display:flex;flex-direction:column;gap:8px;padding:12px;
+  border-radius:var(--dsw-radius-md,12px);
+  background:var(--dsw-alias-bg-module-platform,#f5f6f7);}
+[data-bd-author-name]{font-size:var(--dsw-font-sm-13-font-size,13px);font-weight:600;
+  color:var(--dsw-alias-label-primary,#17181a);}
+/* 链接用主题色，别用浏览器默认蓝 —— 面板整体是灰阶的，默认蓝会跳出来 */
+[data-bd-author-url]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  color:var(--dsw-alias-brand-primary,#1e6fff);text-decoration:none;
+  word-break:break-all;cursor:pointer;}
+[data-bd-author-url]:hover{text-decoration:underline;}
+[data-bd-author-lines]{display:flex;flex-direction:column;gap:4px;}
+[data-bd-author-line]{font-size:var(--dsw-font-xxs-12-font-size,12px);line-height:18px;
+  color:var(--dsw-alias-label-secondary,#61666b);}
+/* 以圆点开头的那种行：缩进 + 前面加一个圆点。
+   ⚠️ 用 ::before 而不是在文字里塞符号 —— 那样复制出来会带上多余的符号。 */
+[data-bd-author-bullet]{padding-left:12px;position:relative;}
+[data-bd-author-bullet]::before{content:"·";position:absolute;left:2px;}
+
+/* ══════════════════════════════════════════════════════════════════════════
    ⭐⭐ 「产物报告」页：左列表 / 右详情（2026-10-22 加，同日按反馈重做布局）
 
    使用者要求（第一版交出去之后）：
@@ -1956,6 +1984,27 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         try { localStorage.setItem('bili-scroll-jojo/upgrade-dismissed', at) } catch { /* 存不了就只在本次生效 */ }
       }
       /**
+       * ⭐⭐ **作者信息弹窗**（2026-10-27 加）。
+       *
+       * 使用者定：「文档正文会给结构化内容，比如有一块就是弹窗内容。
+       *   弹窗内容变化且不为空的时候才弹窗」「实例共享，看过就不再弹窗」。
+       *
+       * 🔴 存 localStorage 而不是 useState —— 面板**按会话一份**（切会话 = 组件重建），
+       *    存内存里的话每开一个会话就弹一遍。使用者要的是"实例内只弹一次"。
+       * ⚠️ 记的是**内容指纹**（`authorCard.key`），不是布尔值 ——
+       *    这样"你改文档 ⇒ 再弹一次"能自然成立，"你只改 enabled ⇒ 不重复弹"也成立。
+       */
+      const AUTHOR_POPUP_SEEN = 'bili-scroll-jojo/author-popup-seen'
+      const [authorSeen, setAuthorSeen] = React.useState(() => {
+        try { return String(localStorage.getItem(AUTHOR_POPUP_SEEN) || '') } catch { return '' }
+      })
+      const [showAuthorDlg, setShowAuthorDlg] = React.useState(false)
+      const dismissAuthorPopup = (key) => {
+        setAuthorSeen(key)
+        setShowAuthorDlg(false)
+        try { localStorage.setItem(AUTHOR_POPUP_SEEN, key) } catch { /* 存不了就只在本次生效 */ }
+      }
+      /**
        * ⚠️ 这里原来有一个 `perRoundBeforeEgg` ref —— 给 5299 暗号还原数值用的。
        *    2026-10-24 暗号去掉了（私信开关直接常显），这个 ref 一并删除。
        */
@@ -2293,6 +2342,33 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
         if (applyingRemote.current) { applyingRemote.current = false; return }
         writeSharedUI({ tab })
       }, [tab])
+
+      /**
+       * ⭐⭐ **作者信息弹窗的四道闸**（2026-10-27 加）。
+       *
+       * 使用者定的规矩：「popup 加个布尔字段，只有等于 true 才触发弹窗
+       *   （这个是额外的条件，之前的条件也要留下）」。
+       *
+       * 四道全满足才弹：
+       *   ① `popup.enabled === true`   ← 严格相等！写成 `"false"` 这种字符串不算关
+       *   ② `popup.lines` 非空          ← 你清空它 = 撤回这次通知
+       *   ③ 内容指纹 ≠ 上次弹过的那个   ← 同一份内容只弹一次
+       *   ④ 拿到了卡片数据              ← 拉不动就什么都不知道，不弹
+       *
+       * 🔴 判据里的 `key` 来自后端（`authorCard.key`），**只算 title+lines**，
+       *    不含 `enabled` —— 否则把 enabled 从 false 改回 true 会重复弹老内容。
+       */
+      React.useEffect(() => {
+        const card = st?.authorCard
+        if (!card) return
+        const p = card?.data?.popup
+        if (!p || p.enabled !== true) return
+        if (!Array.isArray(p.lines) || p.lines.length === 0) return
+        const key = String(card.key || '')
+        if (!key) return
+        if (authorSeen === key) return
+        setShowAuthorDlg(true)
+      }, [st?.authorCard?.key, st?.authorCard?.data?.popup?.enabled, authorSeen])
 
       // ③ 收到别的面板的广播 ⇒ 跟上（只认它管的字段）
       React.useEffect(() => {
@@ -4324,6 +4400,41 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   onClick: () => { setShowUpdateDlg(false); setShowChangelog(null); setTab('env'); onUpgrade() },
                 }, '直接升级')))) : null,
 
+        /* ════════ ⭐⭐ 作者消息弹窗（2026-10-27 加）════════
+         *
+         * 使用者要的：「弹窗内容变化且不为空的时候才弹窗」+「实例共享，看过就不再弹窗」。
+         * 四道闸全在前面的 useEffect 里判完了，这里只负责渲染。
+         *
+         * ⚠️ **复用 `data-bd-confirm` 那套自绘浮层** —— 与「检测到有新版本」同一套样式，
+         *    不自造第二套（面板里多套浮层样式会立刻显得不统一）。
+         * ⚠️ 这里**不显示 `author.url` 跳转按钮** —— 使用者明确说"单纯的消息通知"。
+         */
+        showAuthorDlg && st?.authorCard?.data?.popup?.enabled === true
+          ? (() => {
+            const p = st.authorCard.data.popup
+            const lines = Array.isArray(p.lines) ? p.lines : []
+            const key = String(st.authorCard.key || '')
+            return h('div', { 'data-bd-confirm': '' },
+              h('div', { 'data-bd-confirm-box': '' },
+                h('div', { 'data-bd-confirm-title': '' },
+                  String(p.title || '插件有新消息')),
+                h('div', { 'data-bd-confirm-body': '' },
+                  lines.map((t, i) => {
+                    const s = String(t || '').trim()
+                    if (!s) return null
+                    const isBullet = /^[·\-•*]\s*/.test(s)
+                    return h('div', {
+                      key: 'pl' + i,
+                      ...(isBullet ? { 'data-bd-author-bullet': '' } : {}),
+                    }, isBullet ? s.replace(/^[·\-•*]\s*/, '') : s)
+                  })),
+                h('div', { 'data-bd-confirm-foot': '' },
+                  h('button', {
+                    'data-bd-btn': '', 'data-primary': '',
+                    onClick: () => dismissAuthorPopup(key),
+                  }, '知道了'))))
+          })() : null,
+
         /* ════════ ⭐⭐ 升级过程浮窗（2026-10-20 加）════════
          *
          * 使用者原话：「升级的这个过程能有一个浮窗去显示升级的进程。
@@ -5137,6 +5248,95 @@ input[type="time"][data-bd-input]::-webkit-calendar-picker-indicator{opacity:.55
                   }, '确认执行（会真删）')))) : null)
             : null),   // ← 折叠区结束
 
+        /* ════════ 作者信息（2026-10-27 加）════════
+         *
+         * 使用者要求：实验功能页加一节「作者信息」，内容他在腾讯文档里维护，
+         * 插件轮询跟上，变了还能弹窗。数据全来自后端的 `/status.authorCard`
+         * （拉取/解析/冷却都在 `index.js`，面板只负责渲染）。
+         *
+         * 🔴 三件事别搞丢：
+         *   ① 这是**独立分节**（自己的 `data-bd-sec` + `data-bd-tabin: 'lab'`）——
+         *      不然会被切页规则当成别页的内容（这个坑面板里踩过，见 CSS 那段注释）。
+         *   ② 大标题下的说明只有一句：**跨小节的整体说明放这里，单项说明放单项上**。
+         *   ③ 面板是**纯文本**（不渲染 markdown）⇒ 不能写星号。
+         */
+        h('div', { 'data-bd-sec': '', 'data-bd-tabin': 'lab' },
+          h('div', { 'data-bd-h': '' }, '作者信息'),
+          h('div', { 'data-bd-note': '' },
+            '内容来自作者维护的在线文档，自动同步（大约每小时一次）。'
+            + '有新消息时会弹一次提醒。'),
+
+          (() => {
+            const card = st?.authorCard
+            const d = card?.data || {}
+            const au = d.author || {}
+            const lines = Array.isArray(au.lines) ? au.lines : []
+            const name = String(au.name || '')
+            const url = String(au.url || '')
+            const when = Number(card?.updatedAt) || 0
+            const whenText = when
+              ? new Date(when).toLocaleString('zh-CN', { hour12: false })
+              : ''
+            return h('div', { 'data-bd-author': '' },
+              name
+                ? h('div', { 'data-bd-author-name': '' }, name)
+                : null,
+              /**
+               * ⭐ **链接必须能点**（使用者明确要求）。
+               *
+               * 🔴 这里做了**双保险**，因为面板是插件自绘的子树，
+               *    `<a target="_blank">` 在 Electron 里未必真能开新窗口
+               *    （这个项目有过"看着该能用的按钮其实没反应"的先例）：
+               *      ① 正常情况：原生 `<a>` 自己开
+               *      ② 兜底：`onClick` 里拦下来，交给宿主 `window.open`；
+               *         再不行才退回"复制到剪贴板"那种手工路径（不做，太丑）。
+               *    ⚠️ 只在用户**左键单击**时接管，中键/Ctrl+点击保持浏览器默认行为。
+               */
+              url
+                ? h('a', {
+                  'data-bd-author-url': '',
+                  href: url,
+                  target: '_blank',
+                  rel: 'noreferrer noopener',
+                  onClick: (e) => {
+                    // 让浏览器有机会自己处理（中键 / 带修饰键 ⇒ 不拦）
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
+                    try {
+                      const w = typeof window !== 'undefined' ? window : null
+                      if (w && typeof w.open === 'function') {
+                        const opened = w.open(url, '_blank', 'noopener,noreferrer')
+                        if (opened) e.preventDefault()
+                      }
+                    } catch { /* 拦不住就让 <a> 自己走 */ }
+                  },
+                }, url)
+                : null,
+              lines.length
+                ? h('div', { 'data-bd-author-lines': '' },
+                  lines.map((t, i) => {
+                    const s = String(t || '').trim()
+                    if (!s) return null
+                    // `·` / `-` / `•` 开头的行渲染成列表项（文档模版里就是这么写的）
+                    const isBullet = /^[·\-•*]\s*/.test(s)
+                    return h('div', {
+                      key: 'al' + i,
+                      'data-bd-author-line': '',
+                      ...(isBullet ? { 'data-bd-author-bullet': '' } : {}),
+                    }, isBullet ? s.replace(/^[·\-•*]\s*/, '') : s)
+                  }))
+                : null,
+              whenText
+                ? h('div', { 'data-bd-note': '' },
+                  `上次同步：${whenText}`
+                  + (card?.source === 'fallback'
+                    ? '（没连上在线文档，显示的是插件自带的默认内容）'
+                    : card?.failed
+                      ? `（拉取失败：${String(card.reason || '未知原因')}）`
+                      : card?.stale ? '（内容较旧，稍后会自动重试）' : ''))
+                : null,
+            )
+          })(),
+        ),
             /* ⭐⭐ **实时日志区**（2026-10-26 加，使用者要求：
              *    「执行的时候，加个实时日志区吧，放在评论区整理小节的尾部。
              *     黑底白字。主要排版和美观。轮询时间短一些。」）

@@ -8466,6 +8466,265 @@ export function apply(ctx, config) {
    *    真正的错误会在**点「检查更新」**时如实报出来。
    */
   let warming = false
+
+  /* ─────────────── 作者信息卡（2026-10-27 加） ───────────────
+   *
+   * 使用者要求：实验功能页加一节「作者信息」，内容由他**在公网的腾讯文档**里维护，
+   * 插件轮询发现变了就跟上；变了的「弹窗」段还能主动弹一下。
+   *
+   * ── 为什么必须走**服务端代理**（不能在浏览器里直接拉）────────
+   *   ① 腾讯文档的 opendoc 接口**必须带 `Referer`**，不带直接 401 ——
+   *      而 `Referer` 是浏览器禁止脚本设置的请求头；
+   *   ② `docs.qq.com` 不会给 `127.0.0.1:3100` 开 CORS；
+   *   ③ 就算能拉，也是让**用户**去连腾讯文档，不如插件统一代劳。
+   *
+   * ── 为什么响应有 54 KB、但实际只传 11 KB ────────────────────
+   *   实测拆解：54,115 字节里
+   *     · 46,348（86%）是 `ty:"ms"` 的 **Word 样式表**（376 个内置样式）+ 主题 + 文档设置
+   *     ·  6,200（12%）是 `ty:"mp"` 的排版片段（哪几个字用了什么字体）
+   *     ·    100（0.18%）才是**正文**
+   *   腾讯文档底层是 Word 格式模型 ⇒ 打开文档带出来的是整套样式。
+   *   ⭐ 但服务端**已经 gzip**，线上实测只有 **11,006 字节**（20.3%）。
+   *      ⇒ 用户真实带宽 ≈ 11KB/次，60 分钟一次 = 每天 264KB，可忽略。
+   *   🔴 所以：**不要**试图"只请求正文部分"（接口不支持），也不要为此加重试逻辑。
+   */
+  const AUTHOR_DOC = 'https://docs.qq.com/dop-api/opendoc'
+
+  /**
+   * 🔴 **参数是实测抠出来的，少一个多一个都不行**。
+   *
+   * 文档首页 `<link rel=preload>` 里那套完整参数带了 `noEscape=1&commandsFormat=1` ——
+   * 实测那套返回 40KB、`padHTML` 为空、**正文一个字都没有**。
+   * 去掉这两个、只留下面四个，才能拿到 `initialAttributedText`。
+   */
+  const AUTHOR_DOC_ID = 'DVEVCSXp4Skh4cndq'
+  const authorDocUrl = () => `${AUTHOR_DOC}?id=${AUTHOR_DOC_ID}`
+    + '&normal=1&outformat=1&doc_chunk_version=3&doc_chunk_flag=1'
+
+  /** 出厂默认 = 使用者第一次给我那段原文。拉不到文档时用它，保证新装用户也有内容 */
+  const AUTHOR_FALLBACK = {
+    version: 1,
+    author: {
+      name: 'B站 @闲人JOJO',
+      url: 'https://space.bilibili.com/3706942742595667',
+      lines: ['求关注，插件后续更新。即更多好玩的想法实现，都会在此账号发布。'],
+    },
+    popup: { enabled: false, title: '', lines: [] },
+  }
+
+  let authorCache = null      // { at, ok, key, data, updatedAt, source }
+  let lastAuthorFailAt = 0
+  let lastAuthorFailReason = ''
+  let authorWarming = false
+
+  /** 控制字符清洗：腾讯文档在正文尾部拖一串 `\u000f\u001e` */
+  const TEN_DOC_CTRL = /[\u000f\u001e\uFEFF]/g
+
+  /**
+   * ⭐⭐ **三轮宽松解析**（这个顺序是有意的，别调换）。
+   *
+   * 为什么不能只 `JSON.parse`：使用者在**腾讯文档的富文本编辑器里**粘 JSON，
+   * 会踩三种坑，而三种都不该让整个功能挂掉：
+   *   ① 回车换行被存成独立段落 ⇒ 拼接时要按 `\r` 切开再粘回去；
+   *   ② 行尾多一个逗号（手改内容时极常见）；
+   *   ③ 输入法把 `"` 自动转成中文弯引号 `“”`。
+   *
+   * 🔴 **为什么"智能引号替换"放第三轮而不是第一轮**：
+   *    正文里完全可能出现**合法的中文引号**（`他说"真香"`）。
+   *    前两轮能过就绝不会走到第三轮 ⇒ 那种情况不会被误伤。
+   *    反过来若先做替换，等于**每次都在改用户内容**。
+   */
+  const parseAuthorDoc = (raw) => {
+    const cleaned = String(raw ?? '').replace(TEN_DOC_CTRL, '')
+    // 腾讯文档：一个段落一个 `\r`。空白段落全去掉，其余 trim 后**直接拼接**
+    const glued = cleaned.split('\r').map((s) => s.trim()).join('')
+    if (!glued) return { ok: false, error: '文档是空的' }
+
+    // ① 严格
+    try { return { ok: true, via: 'strict', data: JSON.parse(glued) } } catch { /* 下一轮 */ }
+
+    // ② 去掉对象/数组收尾处多余的逗号
+    const noTrail = glued.replace(/,(\s*[}\]])/g, '$1')
+    try { return { ok: true, via: 'no-trailing-comma', data: JSON.parse(noTrail) } } catch { /* 下一轮 */ }
+
+    // ③ 中文弯引号 → 半角，再截取首尾花括号（前后夹了说明文字也救得回）
+    const smart = noTrail.replace(/[\u201c\u201d]/g, '"').replace(/[\u2018\u2019]/g, "'")
+    const a = smart.indexOf('{')
+    const b = smart.lastIndexOf('}')
+    const sliced = a >= 0 && b > a ? smart.slice(a, b + 1) : smart
+    try { return { ok: true, via: 'smart-quotes+slice', data: JSON.parse(sliced) } } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) }
+    }
+  }
+
+  /**
+   * 把解析出来的 JSON **规整成面板能直接用的形状**。
+   *
+   * ⚠️ 每个字段都要兜底：使用者改文档时删掉一个键、写错类型都是正常的，
+   *    而那些**不能导致整个卡片消失** —— 缺哪个就用出厂默认补哪个。
+   */
+  const normalizeAuthorData = (j) => {
+    const o = (j && typeof j === 'object') ? j : {}
+    const pick = (v, d) => (typeof v === 'string' && v.trim() ? v.trim() : d)
+    const strArr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()) : [])
+
+    const au = (o.author && typeof o.author === 'object') ? o.author : {}
+    const po = (o.popup && typeof o.popup === 'object') ? o.popup : {}
+
+    const lines = strArr(au.lines)
+    const popupLines = strArr(po.lines)
+
+    return {
+      version: Number(o.version) || 1,
+      author: {
+        name: pick(au.name, AUTHOR_FALLBACK.author.name),
+        url: pick(au.url, AUTHOR_FALLBACK.author.url),
+        // ⚠️ lines 为空时用出厂那段，**不是空卡片**
+        lines: lines.length ? lines : AUTHOR_FALLBACK.author.lines.slice(),
+      },
+      popup: {
+        /**
+         * 🔴 **必须是 `=== true`，不能写成 `if (enabled)`**（2026-10-27 实测过）。
+         *
+         * 用真值判断的话，用户在文档里写成字符串 `"false"`（带引号）会被当成**真值**
+         * ⇒ 他以为自己关掉了，其实还在弹。实测：`"true"`/`"false"`/`1` 全都会被真值判断放过。
+         */
+        enabled: po.enabled === true,
+        title: pick(po.title, '插件有新消息'),
+        lines: popupLines,
+      },
+    }
+  }
+
+  /**
+   * 弹窗的**内容指纹**。
+   *
+   * 🔴 **只算 title + lines，不算 `enabled`**：
+   *    否则把 `enabled` 从 false 改回 true、内容没动，会**再弹一次老内容**。
+   *    "弹过没"的语义是"这段内容你看过没"，与开关无关。
+   */
+  const popupKey = (d) => {
+    const p = d?.popup
+    if (!p || !p.lines || !p.lines.length) return ''
+    const raw = String(p.title || '') + '\u0000' + p.lines.join('\u0001')
+    let h = 0
+    for (let i = 0; i < raw.length; i++) h = (h * 31 + raw.charCodeAt(i)) | 0
+    return (h >>> 0).toString(36) + ':' + p.lines.join('').length
+  }
+
+  /**
+   * 从腾讯文档正文里抠出那段 JSON 文本。
+   *
+   * 结构（实测，2026-10-27）：
+   *   clientVars.collab_client_vars.initialAttributedText.text[0].commands[0].mutations[]
+   *   取 `ty === 'is'` 那一项的 `s` 字段 = 正文原文（段落用 `\r` 分隔）。
+   */
+  const extractDocText = (j) => {
+    const muts = j?.clientVars?.collab_client_vars?.initialAttributedText?.text?.[0]?.commands?.[0]?.mutations
+    if (!Array.isArray(muts)) return ''
+    return muts
+      .filter((m) => m && m.ty === 'is' && typeof m.s === 'string')
+      .map((m) => m.s)
+      .join('')
+  }
+
+  const AUTHOR_TIMEOUT_MS = 15000
+  const AUTHOR_COOLDOWN_MS = 60 * 60 * 1000
+
+  /** 真去拉一次（成功返回规整后的 data；失败抛出可读错误） */
+  const fetchAuthorDoc = async () => {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), AUTHOR_TIMEOUT_MS)
+    try {
+      const r = await fetch(authorDocUrl(), {
+        signal: ac.signal,
+        headers: {
+          // 🔴 不带这个直接 401（实测）。浏览器里设不了，所以只能服务端做。
+          Referer: 'https://docs.qq.com/doc/' + AUTHOR_DOC_ID,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            + 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+          Accept: 'application/json, text/plain, */*',
+        },
+      })
+      if (!r.ok) throw new Error('腾讯文档返回 HTTP ' + r.status)
+      const j = await r.json()
+      const text = extractDocText(j)
+      const modAt = Number(j?.clientVars?.lastModifyTime) || 0
+      if (!text) throw new Error('文档里没找到正文（可能被清空了，或接口结构变了）')
+      const parsed = parseAuthorDoc(text)
+      if (!parsed.ok) {
+        throw new Error('文档内容不是合法 JSON：' + parsed.error
+          + '（照面板上的模版重新粘一份，注意别用中文引号）')
+      }
+      return { data: normalizeAuthorData(parsed.data), via: parsed.via, modAt }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * ⭐ **预热**：照抄 `warmUpdate()` 的形状 —— 挂 `/status`、带冷却、失败静默。
+   *
+   * ⚠️ 冷却 **60 分钟**，比版本检测（10 分钟）长得多：
+   *    作者信息一个月改不了几次，而它一次 11KB、是版本查询的 10 倍。
+   * ⚠️ 与版本检测**各记各的时间**（`authorCache.at` / `lastAuthorFailAt`）——
+   *    不能共用一个冷却，否则"版本查了 ⇒ 作者文档就不查了"。
+   * ⚠️ 失败也冷却，否则每 5 秒轮询会刷爆日志（`warmUpdate` 那段有完整教训）。
+   */
+  const warmAuthorCard = () => {
+    if (authorWarming) return
+    if (authorCache && Date.now() - authorCache.at < AUTHOR_COOLDOWN_MS) return
+    if (lastAuthorFailAt && Date.now() - lastAuthorFailAt < AUTHOR_COOLDOWN_MS) return
+    authorWarming = true
+    fetchAuthorDoc()
+      .then((r) => {
+        lastAuthorFailAt = 0
+        lastAuthorFailReason = ''
+        authorCache = {
+          at: Date.now(),
+          ok: true,
+          key: popupKey(r.data),
+          data: r.data,
+          updatedAt: r.modAt || Date.now(),
+          via: r.via,
+          source: 'remote',
+        }
+      })
+      .catch((e) => {
+        lastAuthorFailAt = Date.now()
+        lastAuthorFailReason = String(e?.message ?? e)
+        log(`作者信息拉取失败：${lastAuthorFailReason}`)
+      })
+      .finally(() => { authorWarming = false })
+  }
+
+  /**
+   * `/status` 里那一份（**同步、零耗时**，绝不在这里等网络）。
+   *
+   * 🔴 **三种状态要能分开**（同 `update` 那段判据）：
+   *    · 拿到过 ⇒ 给 data（哪怕过期，也带 `stale`）
+   *    · 没拿到过、但失败过 ⇒ 给**出厂默认** + `failed` + 原因
+   *    · 还没查过 ⇒ 给**出厂默认**（新装用户第一眼也要有内容）
+   *   ⚠️ 任何情况下**都不能返回 null** —— 面板会渲染一张空卡片，
+   *      那比显示出厂默认糟得多。
+   */
+  const authorCardStatus = () => {
+    const base = authorCache?.ok ? authorCache : null
+    const data = base ? base.data : AUTHOR_FALLBACK
+    const key = base ? base.key : popupKey(AUTHOR_FALLBACK)
+    return {
+      data,
+      key,
+      // 弹不弹只看这个（后面还有"哈希变了没"，前端算）
+      popupKey: key,
+      updatedAt: base ? base.updatedAt : 0,
+      source: base ? 'remote' : 'fallback',
+      stale: Boolean(base) && Date.now() - base.at >= AUTHOR_COOLDOWN_MS,
+      failed: !base && Boolean(lastAuthorFailAt),
+      reason: (!base && lastAuthorFailAt) ? lastAuthorFailReason : '',
+    }
+  }
+
   /**
    * 🔴 **上次"检查更新失败"的时间**（2026-10-20 加，日志被刷爆过）。
    *
@@ -8490,6 +8749,19 @@ export function apply(ctx, config) {
   /** 上次失败的原因（给面板如实显示用；见 `status()` 里 `update.failed` 那段注释） */
   let lastUpdateFailReason = ''
   const warmUpdate = () => {
+    /**
+     * ⭐ **顺手预热作者卡片**（2026-10-27 加）。
+     *
+     * 使用者要求：「这个的轮询是否可以走检测更新那个路由，
+     *   相当于检测更新的同时看一下作者信息有没有更新？」
+     * ⇒ 挂在同一处。但它**自己带 60 分钟冷却**（比这里的 10 分钟长），
+     *   所以实际上大部分轮询只会命中它自己那个 `if` 就返回。
+     *
+     * ⚠️ **放在所有 return 之前** —— 否则版本检测一进冷却，作者卡片就永远不再查了。
+     * ⚠️ 两个预热**互不影响**：各自 try/catch，一个失败不能让另一个也不跑。
+     */
+    try { warmAuthorCard() } catch { /* 预热失败绝不影响 /status */ }
+
     if (warming) return
     // 冷却期内不重复查（`updateCache` 由 `checkUpdate` 维护，共用同一份）
     if (updateCache && Date.now() - updateCache.at < 10 * 60 * 1000) return
@@ -8664,6 +8936,11 @@ export function apply(ctx, config) {
         // ③ 真的还没查过
         return null
       })(),
+      /**
+       * ⭐⭐ **作者信息卡**（2026-10-27 加）。零网络、纯读缓存。
+       * 详见上方 `authorCardStatus()` 的注释（三种状态必须分开）。
+       */
+      authorCard: authorCardStatus(),
       /**
        * ⭐⭐ **后台跑要用哪个 dsh —— 自动探测的结果**（2026-10-18 加）。
        *
