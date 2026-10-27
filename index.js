@@ -2028,13 +2028,18 @@ export function apply(ctx, config) {
 
   tool({
     name: 'bilij_comments',
-    description: '取一个视频的热门评论（含点赞/回复数）。刷一轮时顺手翻一眼，看值不值得占用使用者一次注意力。',
+    description: '取一个视频的评论（含点赞/回复数）。`sort` 不传 = 按点赞；要扫「还有谁没回过」必须传 sort:"time"（按时间新→旧，能翻到底，LIKE 约 40 条就到底了）。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       num: { type: 'number', description: '取几条（默认 30）' },
+      sort: { type: 'string', description: 'like（默认，按点赞）/ time（按时间，新→旧，能翻到底）' },
     },
     async execute(args) {
-      return call('bili_comments', { bvid: String(args.bvid ?? ''), num: Math.max(1, Number(args.num) || 30) })
+      return call('bili_comments', {
+        bvid: String(args.bvid ?? ''),
+        num: Math.max(1, Number(args.num) || 30),
+        sort: String(args.sort ?? '') === 'time' ? 'time' : 'like',
+      })
     },
   })
 

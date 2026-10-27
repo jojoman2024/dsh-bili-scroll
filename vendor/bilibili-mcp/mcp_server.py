@@ -303,13 +303,14 @@ async def bili_search(
 # ========== Tool 2: 获取评论 ==========
 
 @mcp.tool()
-async def bili_comments(bvid: str, num: int = 30) -> str:
+async def bili_comments(bvid: str, num: int = 30, sort: str = "like") -> str:
     """
-    获取B站视频的热门评论
+    获取B站视频的评论
 
     Args:
         bvid: 视频BV号，如"BV1uNk1YxEJQ"
         num: 获取评论数量，默认30
+        sort: "like"=按点赞（默认）；"time"=按时间（新→旧，能翻到底）
     
     Returns:
         JSON格式的评论列表，包含用户名、评论内容、点赞数、回复数
@@ -327,7 +328,7 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                 oid=aid,
                 type_=comment.CommentResourceType.VIDEO,
                 page_index=page,
-                order=comment.OrderType.LIKE,
+                order=comment.OrderType.LIKE if sort != "time" else comment.OrderType.TIME,
                 credential=cred,
             )
             replies = resp.get("replies") or []
