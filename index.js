@@ -8501,13 +8501,21 @@ export function apply(ctx, config) {
   const authorDocUrl = () => `${AUTHOR_DOC}?id=${AUTHOR_DOC_ID}`
     + '&normal=1&outformat=1&doc_chunk_version=3&doc_chunk_flag=1'
 
-  /** 出厂默认 = 使用者第一次给我那段原文。拉不到文档时用它，保证新装用户也有内容 */
+  /**
+   * 出厂默认 = 使用者第一次给我那段原文。拉不到文档时用它，保证新装用户也有内容。
+   *
+   * ⚠️ 2026-10-27 改过一次措辞：`即更多好玩的想法实现` → `以及更多好玩的想法实现`
+   *    （使用者指出的错字，"即"应为"以及"）。
+   *    ⚠️ 改这里**只会影响新装 / 拉不到文档的用户** —— 一旦在线文档能拉到，
+   *       卡片显示的就是文档里的内容，跟这份常量无关。
+   *       ⇒ 所以**线上那份腾讯文档也要同步改**，否则用户看到的是文档里的旧句子。
+   */
   const AUTHOR_FALLBACK = {
     version: 1,
     author: {
       name: 'B站 @闲人JOJO',
       url: 'https://space.bilibili.com/3706942742595667',
-      lines: ['求关注，插件后续更新。即更多好玩的想法实现，都会在此账号发布。'],
+      lines: ['求关注，插件后续更新。以及更多好玩的想法实现，都会在此账号发布。'],
     },
     popup: { enabled: false, title: '', lines: [] },
   }
